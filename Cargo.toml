@@ -1,10 +1,13 @@
 [package]
 name = "figrid-board"
-version = "0.3.1"
-authors = ["wuwbobo2021 <wuwbobo@outlook.com>"]
+version = "0.3.2"
+authors = [
+    "nicotina04 <devherdson@gmail.com>",
+    "wuwbobo2021 <wuwbobo@outlook.com>",
+]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/wuwbobo2021/figrid-board"
+repository = "https://github.com/nicotina04/figrid-board"
 readme = "README.md"
 description = """
 A library for the Five-in-a-Row (Gomoku) game.

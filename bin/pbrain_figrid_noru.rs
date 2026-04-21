@@ -336,7 +336,7 @@ fn main() {
             "ABOUT" => {
                 writeln!(
                     stdout,
-                    "name=\"figrid-noru\", version=\"0.4.1\", author=\"nicotina04\", country=\"KR\""
+                    "name=\"figrid-noru\", version=\"0.4.2\", author=\"nicotina04\", country=\"KR\""
                 )
                 .ok();
             }

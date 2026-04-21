@@ -9,7 +9,7 @@
 use crate::board::{Board, GameResult, Move, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::eval::evaluate;
 use crate::heuristic::{scan_line, DIR};
-use crate::vct::{search_vct, VctConfig};
+use crate::vct::{classify_move, search_vct, ThreatKind, VctConfig};
 use noru::network::NnueWeights;
 use std::time::{Duration, Instant};
 
@@ -242,6 +242,13 @@ impl Searcher {
         let row = (mv / BOARD_SIZE) as i32;
         let col = (mv % BOARD_SIZE) as i32;
 
+        // === Composite threat (multi-direction) ===
+        // DIR-local scan은 방향별 패턴만 보기 때문에 3-3, 4-3, double-four 같은
+        // 다방향 복합 위협을 놓침. classify_move는 4방향 종합 등급을 반환.
+        // 수비 측(opp_kind)을 크게 반영해야 Pela 같은 상대가 3-3으로 떡발리지 않음.
+        score += threat_priority(classify_move(my, opp, mv), /*defending=*/ false);
+        score += threat_priority(classify_move(opp, my, mv), /*defending=*/ true);
+
         // 위협 탐지: 이 수를 두면 어떤 패턴이 만들어지는지 체크
         for &(dr, dc) in &DIR {
             // 내 돌 연장
@@ -290,6 +297,26 @@ impl Searcher {
         score += (14 - center_dist) * 2;
 
         score
+    }
+}
+
+/// `classify_move` 결과를 move ordering priority 점수로 매핑.
+/// `defending=true`이면 상대 관점 위협 (차단 우선순위).
+fn threat_priority(kind: ThreatKind, defending: bool) -> i32 {
+    let base = match kind {
+        ThreatKind::Five => 1_000_000,
+        ThreatKind::OpenFour => 500_000,
+        ThreatKind::DoubleFour | ThreatKind::FourThree => 300_000,
+        ThreatKind::DoubleThree => 200_000,
+        ThreatKind::ClosedFour => 100_000,
+        ThreatKind::OpenThree => 30_000,
+        ThreatKind::None => 0,
+    };
+    // 수비는 공격보다 살짝 낮게 (내가 이기는 게 상대 이김 막는 것보다 우선).
+    if defending {
+        base * 9 / 10
+    } else {
+        base
     }
 }
 

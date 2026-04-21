@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.2 (2026-04-21)
+* **Composite threat priority in move ordering**: `alpha_beta`'s `move_score` now adds per-move scores derived from the multi-direction `classify_move` (double-three, four-three, double-four, etc.) on both attack and defense sides. The previous `scan_line`-only evaluation could miss composite threats like 3-3 that require seeing all four directions at once, which in practice caused losses against mid-tier Gomocup engines (e.g. Pela) that make such threats. Attack-side weight is slightly higher than defense (10% bias) so the engine still prefers its own winning moves over blocking. Arena (baseline 60% vs heuristic) unchanged — heuristic opponent doesn't exercise these patterns; gains are expected only against engines that actually exploit composite threats.
+* No API changes.
+
 ## 0.4.1 (2026-04-21)
 * **Dynamic root VCT budget**: the root tactical search now scales its time budget with the turn time limit (1/8 of the per-turn budget, clamped to 100 ms–2 s). Under Piskvork's 5 s fastgame timing this gives the VCT ~625 ms instead of the previous fixed 150 ms, allowing deeper mate-sequence discovery; under the 30 s timing it scales to the 2 s cap. Arena (fixed depth, no time limit) behavior is unchanged — baseline 60% vs the heuristic is preserved.
 * **Larger VCT transposition table**: root VCT's Zobrist TT initial capacity increased from 4 096 to 65 536 entries, reducing re-expansion of duplicate nodes on deeper searches. Memory impact negligible (< 2 MB per call).

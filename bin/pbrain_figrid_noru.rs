@@ -14,6 +14,10 @@ const WEIGHTS_BYTES: &[u8] = include_bytes!("../models/gomoku_v6a_4096.bin");
 const MAX_DEPTH: u32 = 20;
 const DEFAULT_TIMEOUT_MS: i64 = 30_000;
 const DEFAULT_MATCH_MS: i64 = 1_000_000_000;
+/// Headroom subtracted from the turn budget so the last node batch finishes
+/// well before Piskvork's deadline. Without this, the 1024-node deadline
+/// check can overshoot by ~100 ms on NNUE-heavy positions.
+const SAFETY_MARGIN_MS: i64 = 150;
 
 struct ProtocolInfo {
     timeout_turn: i64,
@@ -52,7 +56,7 @@ impl ProtocolInfo {
             let per_left = self.time_left.max(0) / remaining_half;
             self.timeout_turn.min(per_match).min(per_left)
         };
-        Duration::from_millis(budget.max(50) as u64)
+        Duration::from_millis((budget - SAFETY_MARGIN_MS).max(50) as u64)
     }
 
     fn update(&mut self, key: &str, val: &str) {
@@ -332,7 +336,7 @@ fn main() {
             "ABOUT" => {
                 writeln!(
                     stdout,
-                    "name=\"figrid-noru\", version=\"0.4.0\", author=\"nicotina04\", country=\"KR\""
+                    "name=\"figrid-noru\", version=\"0.4.1\", author=\"nicotina04\", country=\"KR\""
                 )
                 .ok();
             }

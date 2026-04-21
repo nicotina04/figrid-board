@@ -16,10 +16,16 @@ use std::time::{Duration, Instant};
 const INF: i32 = 1_000_000;
 const WIN_SCORE: i32 = 999_000;
 
-/// Root VCT 탐색 시간 예산. 이 시간 안에 강제 승리 수열을 찾으면 α-β 생략.
+/// Root VCT 기본 시간 예산 (time_limit이 없을 때 사용). 아레나 등 고정 depth 탐색용.
 const ROOT_VCT_BUDGET_MS: u64 = 150;
 /// Root VCT 최대 재귀 깊이 (공격-수비 쌍).
 const ROOT_VCT_DEPTH: u32 = 14;
+/// Root VCT가 턴 예산에서 차지할 비율. 5s 턴 → VCT 625ms, 30s 턴 → 3.75s.
+const ROOT_VCT_BUDGET_FRACTION: u32 = 8;
+/// Root VCT 예산 상한 (α-β 시간 확보). 2초.
+const ROOT_VCT_BUDGET_CAP_MS: u64 = 2_000;
+/// Root VCT 예산 하한 (너무 짧으면 TT warmup도 못 함).
+const ROOT_VCT_BUDGET_FLOOR_MS: u64 = 100;
 
 /// 탐색 결과
 pub struct SearchResult {
@@ -64,9 +70,16 @@ impl Searcher {
         self.deadline = time_limit.map(|d| Instant::now() + d);
 
         // Root VCT: 짧은 시간 안에 강제 승리 수열을 찾으면 α-β 건너뜀.
+        // Dynamic budget — 턴 예산의 1/ROOT_VCT_BUDGET_FRACTION (cap/floor 적용).
+        let vct_budget = match time_limit {
+            Some(d) => (d / ROOT_VCT_BUDGET_FRACTION)
+                .max(Duration::from_millis(ROOT_VCT_BUDGET_FLOOR_MS))
+                .min(Duration::from_millis(ROOT_VCT_BUDGET_CAP_MS)),
+            None => Duration::from_millis(ROOT_VCT_BUDGET_MS),
+        };
         let vct_cfg = VctConfig {
             max_depth: ROOT_VCT_DEPTH,
-            time_budget: Some(Duration::from_millis(ROOT_VCT_BUDGET_MS)),
+            time_budget: Some(vct_budget),
         };
         if let Some(seq) = search_vct(board, &vct_cfg) {
             if let Some(&first) = seq.first() {
@@ -137,8 +150,8 @@ impl Searcher {
     ) -> i32 {
         self.nodes += 1;
 
-        // 시간 체크 (1024 노드마다)
-        if self.nodes & 1023 == 0 {
+        // 시간 체크 (128 노드마다 — NNUE 평가가 무거워서 1024 주기는 deadline을 수십 ms 넘기곤 함)
+        if self.nodes & 127 == 0 {
             if let Some(deadline) = self.deadline {
                 if Instant::now() >= deadline {
                     self.aborted = true;

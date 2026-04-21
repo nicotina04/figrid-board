@@ -226,7 +226,7 @@ pub fn search_vct(board: &mut Board, cfg: &VctConfig) -> Option<Vec<Move>> {
     let deadline = cfg.time_budget.map(|d| Instant::now() + d);
     let attacker = board.side_to_move;
     let mut sequence = Vec::with_capacity(cfg.max_depth as usize * 2);
-    let mut tt: TransTable = HashMap::with_capacity(4096);
+    let mut tt: TransTable = HashMap::with_capacity(65536);
     if vct_or(board, attacker, cfg.max_depth, deadline, &mut sequence, &mut tt) {
         Some(sequence)
     } else {

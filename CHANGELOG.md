@@ -1,5 +1,11 @@
 # Changes
 
+## 0.4.1 (2026-04-21)
+* **Dynamic root VCT budget**: the root tactical search now scales its time budget with the turn time limit (1/8 of the per-turn budget, clamped to 100 ms–2 s). Under Piskvork's 5 s fastgame timing this gives the VCT ~625 ms instead of the previous fixed 150 ms, allowing deeper mate-sequence discovery; under the 30 s timing it scales to the 2 s cap. Arena (fixed depth, no time limit) behavior is unchanged — baseline 60% vs the heuristic is preserved.
+* **Larger VCT transposition table**: root VCT's Zobrist TT initial capacity increased from 4 096 to 65 536 entries, reducing re-expansion of duplicate nodes on deeper searches. Memory impact negligible (< 2 MB per call).
+* **Tighter time-check cadence in α-β**: deadline check frequency in `alpha_beta` increased from every 1 024 nodes to every 128. Combined with the 150 ms adapter safety margin already in `pbrain-figrid-noru`, overshoots of Piskvork's `timeout_turn` are now consistently kept under the limit (observed ~4.9 s finish under a 5 s budget, previously ~5.1 s).
+* No API changes; `Searcher::search`'s signature is unchanged and the dynamic budget is derived from the existing `time_limit` parameter.
+
 ## 0.4.0 (2026-04-21)
 * **NNUE engine integrated** (powered by the [noru](https://crates.io/crates/noru) core). New binary `pbrain-figrid-noru` targets Gomocup 2026 Freestyle 15×15. Binary name is tentative and may switch to `pbrain-figrid` once the original author's 0.3.1 submission withdrawal is confirmed.
 * **Breaking:** the pre-0.4 symbolic evaluator, record keeper, rule checker, and `Eval<SZ>` / `Rec<SZ>` / `Tree` stack are now under `figrid_board::legacy::*`. Previously top-level imports like `use figrid_board::{Eval, FreeEvaluator15, Rec, Rows, ...}` must become `use figrid_board::legacy::{...}`.

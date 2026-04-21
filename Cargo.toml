@@ -1,6 +1,6 @@
 [package]
 name = "figrid-board"
-version = "0.3.2"
+version = "0.4.0"
 authors = [
     "nicotina04 <devherdson@gmail.com>",
     "wuwbobo2021 <wuwbobo@outlook.com>",
@@ -10,21 +10,26 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/nicotina04/figrid-board"
 readme = "README.md"
 description = """
-A library for the Five-in-a-Row (Gomoku) game.
+A library for the Five-in-a-Row (Gomoku) game, powered by noru (Rust NNUE library).
 """
 
 keywords = ["game", "board", "gomoku"]
 categories = ["data-structures", "game-development"]
 
 [dependencies]
+noru = "1.2"
 
 [lib]
 name = "figrid_board"
-path = "lib.rs"
+path = "src/lib.rs"
 
 [[bin]]
 name = "pbrain-figrid"
 path = "main.rs"
+
+[[bin]]
+name = "pbrain-figrid-noru"
+path = "bin/pbrain_figrid_noru.rs"
 
 [profile.release]
 opt-level = 3

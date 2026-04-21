@@ -2,8 +2,9 @@
 
 use std::{io, time::Duration};
 
-use figrid_board::{
-    CaroEvaluator15, CaroEvaluator20, CaroSerCalc, Coord, Eval, FreeEvaluator15, FreeEvaluator20,
+use figrid_board::Coord;
+use figrid_board::legacy::{
+    CaroEvaluator15, CaroEvaluator20, CaroSerCalc, Eval, FreeEvaluator15, FreeEvaluator20,
     FreeSerCalc, Rec, StdEvaluator15, StdEvaluator20, StdSerCalc,
 };
 

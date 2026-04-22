@@ -1,6 +1,6 @@
 [package]
 name = "figrid-board"
-version = "0.4.2"
+version = "0.4.3"
 authors = [
     "nicotina04 <devherdson@gmail.com>",
     "wuwbobo2021 <wuwbobo@outlook.com>",
@@ -24,11 +24,11 @@ name = "figrid_board"
 path = "src/lib.rs"
 
 [[bin]]
-name = "pbrain-figrid"
+name = "pbrain-figrid-legacy"
 path = "main.rs"
 
 [[bin]]
-name = "pbrain-figrid-noru"
+name = "pbrain-figrid"
 path = "bin/pbrain_figrid_noru.rs"
 
 [profile.release]

@@ -1,7 +1,8 @@
 //! Gomocup (Piskvork) protocol adapter for the noru-tactic NNUE engine.
 //!
-//! Binary name is tentative — may become `pbrain-figrid` once the original
-//! author's 0.3.1 submission withdrawal is confirmed.
+//! Ships as the `pbrain-figrid` binary (the original author's 0.3.1 Gomocup
+//! submission was withdrawn on 2026-04-21). The pre-NNUE engine still ships
+//! as `pbrain-figrid-legacy` for continuity with the 0.3.x series.
 
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
@@ -336,7 +337,7 @@ fn main() {
             "ABOUT" => {
                 writeln!(
                     stdout,
-                    "name=\"figrid-noru\", version=\"0.4.2\", author=\"nicotina04\", country=\"KR\""
+                    "name=\"figrid\", version=\"0.4.3\", author=\"nicotina04 (successor to wuwbobo2021)\", country=\"KR\""
                 )
                 .ok();
             }

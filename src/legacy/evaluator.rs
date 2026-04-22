@@ -83,7 +83,18 @@ macro_rules! traversal_in_depth {
                 break;
             }
             if rel_depth == $trav_dep {
+                // Invariant requested by the original author in
+                // `docs/INHERITED_TODO.md` §1: the cursor depth must be the
+                // same after `$operation` as it was before. Catching cursor
+                // corruption early here avoids silent misbehavior in the
+                // traversal's book-keeping of `rel_depth` / `macro_stack`.
+                let _traversal_depth_before = $tree_name.cur_depth();
                 $operation
+                debug_assert_eq!(
+                    $tree_name.cur_depth(),
+                    _traversal_depth_before,
+                    "operation inside traversal_in_depth! must leave the tree cursor at the same depth it was called with",
+                );
             }
         }
     };

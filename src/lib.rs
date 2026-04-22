@@ -1,10 +1,12 @@
 //! A library for the Five-in-a-Row (Gomoku) game.
 //!
 //! Starting from 0.4.0 the primary engine is NNUE-based (powered by the
-//! [`noru`](https://crates.io/crates/noru) core). The previous symbolic
+//! [`noru`](https://crates.io/crates/noru) core). The pre-0.4 symbolic
 //! evaluator, rule/rec/tree stack, and generic `Eval<SZ>` trait live under
-//! the [`legacy`] module — they are preserved for binary compatibility of
-//! the original `pbrain-figrid` executable and downstream users.
+//! the [`legacy`] module — it is preserved alongside the new NNUE engine
+//! so the original `pbrain-figrid-legacy` executable and any 0.3.x
+//! downstream users still work. This preservation is a maintainer choice,
+//! not a promise of ABI stability.
 
 pub mod board;
 pub mod coord;

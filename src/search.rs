@@ -99,15 +99,51 @@ impl Searcher {
             nodes: 0,
         };
 
+        // PV-move priority: the best move from iteration depth-1 becomes the
+        // first move we try at iteration depth. Combined with PVS, this
+        // drastically reduces re-search cost — if the PV is still best, the
+        // null-window searches on the remaining moves almost all fail low.
+        let mut prev_best: Option<Move> = None;
+
         for depth in 1..=max_depth {
             let mut best_move = None;
             let mut alpha = -INF;
-            let moves = self.order_moves(board, 0);
+            let beta = INF;
+            let mut moves = self.order_moves(board, 0);
 
-            for mv in &moves {
-                board.make_move(*mv);
-                let score =
-                    -self.alpha_beta(board, weights, depth - 1, 1, -INF, -alpha);
+            if let Some(pv) = prev_best {
+                if let Some(pos) = moves.iter().position(|&m| m == pv) {
+                    if pos != 0 {
+                        moves.swap(0, pos);
+                    }
+                }
+            }
+
+            for (move_idx, mv) in moves.iter().enumerate() {
+                let mv = *mv;
+                board.make_move(mv);
+
+                // Root PVS: first move uses the full window; every
+                // subsequent move is proved-not-better via null window and
+                // only re-searched with the full window on fail-high.
+                let score = if move_idx == 0 {
+                    -self.alpha_beta(board, weights, depth - 1, 1, -beta, -alpha)
+                } else {
+                    let null = -self.alpha_beta(
+                        board,
+                        weights,
+                        depth - 1,
+                        1,
+                        -alpha - 1,
+                        -alpha,
+                    );
+                    if !self.aborted && null > alpha && null < beta {
+                        -self.alpha_beta(board, weights, depth - 1, 1, -beta, -alpha)
+                    } else {
+                        null
+                    }
+                };
+
                 board.undo_move();
 
                 if self.aborted {
@@ -116,7 +152,7 @@ impl Searcher {
 
                 if score > alpha {
                     alpha = score;
-                    best_move = Some(*mv);
+                    best_move = Some(mv);
                 }
             }
 
@@ -134,6 +170,8 @@ impl Searcher {
             if alpha.abs() > WIN_SCORE - 100 {
                 break;
             }
+
+            prev_best = best_move;
         }
 
         best_result
@@ -182,10 +220,44 @@ impl Searcher {
         let mut best_score = -INF;
         let side = board.side_to_move as usize;
 
-        for mv in moves {
+        // PVS (Principal Variation Search):
+        // order_moves[0] is our best guess for the PV. Search it with the
+        // full [-beta, -alpha] window. For every later move, assume
+        // order_moves got it right and first prove "this move is not
+        // better than what we have" with a null window [-alpha-1, -alpha].
+        // If the null-window search fails high (returns > alpha, < beta),
+        // the move actually could be better — re-search with full window.
+        // Large speedup when move ordering is good; costs a re-search
+        // occasionally when ordering is wrong.
+        for (move_idx, mv) in moves.iter().enumerate() {
+            let mv = *mv;
             board.make_move(mv);
-            let score =
-                -self.alpha_beta(board, weights, depth - 1, ply + 1, -beta, -alpha);
+
+            let score = if move_idx == 0 {
+                -self.alpha_beta(board, weights, depth - 1, ply + 1, -beta, -alpha)
+            } else {
+                let null_score = -self.alpha_beta(
+                    board,
+                    weights,
+                    depth - 1,
+                    ply + 1,
+                    -alpha - 1,
+                    -alpha,
+                );
+                if !self.aborted && null_score > alpha && null_score < beta {
+                    -self.alpha_beta(
+                        board,
+                        weights,
+                        depth - 1,
+                        ply + 1,
+                        -beta,
+                        -alpha,
+                    )
+                } else {
+                    null_score
+                }
+            };
+
             board.undo_move();
 
             if self.aborted {

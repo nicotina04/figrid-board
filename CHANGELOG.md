@@ -1,5 +1,42 @@
 # Changes
 
+## 0.5.0 (2026-04-24)
+* **NNUE weights updated → v13_broken_rapfi**. Training backstory in short:
+  - The 0.4.x "60% arena" baseline was found to be inflated by two bugs: (a) the
+    `compound_combo_id` extractor was filtering threats to `is_line_start`
+    stones only, so every cross-shaped double-three/four-three hotspot in a
+    line's interior was silently invisible, and (b) the internal arena
+    generated openings as "center + ±2 random", which is a narrow manifold
+    that overestimates the NNUE's real-game generalization. After fixing both
+    the clean `v10` baseline measured at **33.3%** on the new
+    Gomocup-balanced opening arena — the "60%" figure from 0.4.x was not
+    directly comparable.
+  - On top of the fixed baseline we added Rapfi self-play distillation (9 999
+    games, 222 k labeled positions) with a PSQ anchor to prevent catastrophic
+    forgetting: `v11 = v10 + Rapfi` → **50.0%** (+17 pp).
+  - Separately we added a **Broken / Jump** feature section covering gap-1
+    patterns (`_●●_●_`, `_●●●_●_`, `_●_●_●_`) that the previous `scan_line`
+    encoder could not see: `v12 = v10 + broken/jump` → **43.3%** (+10 pp).
+  - Combined: `v13 = v12 + Rapfi distillation` → **53.3%** (+20 pp from v10).
+* **Feature layout expanded** (same 4 096 slot budget): a new `[3416..3848)`
+  section encodes three broken/jump shapes × open(2) × dir(4) × zone(9) ×
+  perspective(2) = 432 slots. Reserved shrinks from 680 to 248. No change to
+  A/B/C/D/E sections.
+* **Engine-side bugfix** (inherited from noru-tactic's 2026-04-23 fix):
+  `compute_compound_threats` no longer gates on `is_line_start`, so all four
+  directions are scanned from every stone; single-direction threats are now
+  excluded from compound (covered by LP-Rich), preventing double-counting.
+* **noru bumped 1.2 → 2.0**. `NnueConfig.hidden_sizes` switched to
+  `Cow<'static, [usize]>`, eliminating the `Box::leak` memory-leak pattern in
+  FFI paths while keeping the const-friendly borrowed form at zero cost.
+* **PSQ training filter** narrowed to Freestyle only. Standard (exact-5)
+  games have a different winning-row semantics than our engine's `check_win`
+  (≥ 5) and were label-polluting the training set. Standard support, if
+  pursued, will be a separate branch.
+* Real-game validation against Pela is the next step (see
+  `docs/INHERITED_TODO.md`). The v13 weights are now the default model shipped
+  in the `pbrain-figrid` binary.
+
 ## 0.4.4 (2026-04-22)
 * **Principal Variation Search (PVS)** in `alpha_beta`: the first move from the ordered list is still searched with a full `[-β, -α]` window, but every subsequent move is first probed with a zero-width `[-α-1, -α]` null window. If the null-window result fails high (lies inside `(α, β)`), it is re-searched with the full window. When move ordering is accurate, this roughly halves the effective branching factor at interior nodes and lets the same per-turn time budget reach one to two plies deeper on average. No change when ordering is wrong (PVS degenerates to plain α-β plus one extra re-search).
 * **PV-move priority at the root**: the best move from iteration `depth-1` is pulled to the front of the move list at iteration `depth`. Combined with the root PVS this makes the null-window pass on the remaining root moves almost always fail low, which is where PVS's speedup comes from in practice.

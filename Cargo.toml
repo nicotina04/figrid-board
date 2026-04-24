@@ -1,6 +1,6 @@
 [package]
 name = "figrid-board"
-version = "0.4.4"
+version = "0.5.0"
 authors = [
     "nicotina04 <devherdson@gmail.com>",
     "wuwbobo2021 <wuwbobo@outlook.com>",
@@ -17,7 +17,7 @@ keywords = ["game", "board", "gomoku"]
 categories = ["data-structures", "game-development"]
 
 [dependencies]
-noru = "1.2"
+noru = "2.0"
 
 [lib]
 name = "figrid_board"

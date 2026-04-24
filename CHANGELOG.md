@@ -1,5 +1,27 @@
 # Changes
 
+## 0.5.2 (2026-04-25)
+* **Revert the VCT budget expansion from 0.5.1**. Live Pela matches with
+  0.5.1 were *faster* losses than 0.5.0, not slower — games ended in 28-50
+  plies (average 40) vs 48-66 plies (average 55) in 0.5.0. `analyze_psq` on
+  the 0.5.1 losses showed a paradox: the d4 vs d8 disagreement rate dropped
+  (30-54% → 14-23%), but static_eval stayed positive (Black-favor +150 to
+  +200) right up to the move before Pela's mate completed. Classic
+  "overconfident loss" pattern — d4 and d8 agreed on aggressive attacking
+  moves while both missed Pela's 10+ ply mate preparation. On top of that
+  the VCT's enlarged 1.25 s / 20-ply budget (from `ROOT_VCT_BUDGET_FRACTION
+  = 4`, `ROOT_VCT_DEPTH = 20`) ate into α-β's time for defensive reading.
+  Rolled back to `FRACTION = 8` (5 s turn → 625 ms VCT), `DEPTH = 14`, and
+  `BUDGET_MS = 150` (no-time-limit default).
+* **Keep the stone-driven feature extraction from 0.5.1**. That change was
+  orthogonal — iter_ones only touches how the feature set is enumerated,
+  not what gets emitted, and test outputs are byte-identical to 0.5.0. The
+  speedup frees a few cycles for α-β, so keeping it is a pure gain.
+* Weights unchanged — v13_broken_rapfi.bin still shipped. A v14 candidate
+  trained on 12 999-game Rapfi data (9 999 + 3 000 with wider openings) was
+  measured at 46.7% in arena vs v13's 53.3% — within the 30-game noise band
+  (σ ≈ 9 pp) but directionally worse, so not adopted.
+
 ## 0.5.1 (2026-04-24)
 * **VCT budget expanded**. Three Pela losses analysed via `analyze_psq` showed
   mate sequences were detected too late at α-β depth 4 (d4 vs d8 mismatch

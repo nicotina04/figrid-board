@@ -9,8 +9,31 @@ use crate::features::{
     MAX_ACTIVE_FEATURES,
 };
 use crate::heuristic::{scan_line, DIR};
-use noru::network::{forward, Accumulator, NnueWeights};
+use noru::network::{forward, Accumulator, FeatureDelta, NnueWeights};
 use std::sync::OnceLock;
+
+/// Incremental update시 한 수로 인해 feature가 바뀔 가능성이 있는 cell 집합 반환.
+///
+/// LP-Rich / Broken은 `scan_line`이 anchor 돌 ±4 범위를 보므로, mv 주변
+/// ±5까지의 anchor 돌들의 feature가 영향을 받는다. Cross-line은 mv 주변
+/// ±1 돌들의 3×3 window에 mv가 포함되므로 ±1 포함. Compound도 ±4 안.
+///
+/// 11×11 정사각형(중앙이 mv)을 반환 — 보드 밖은 스킵. 평균 ~100 cells.
+pub(crate) fn affected_cells(mv: usize) -> Vec<usize> {
+    let row = (mv / BOARD_SIZE) as i32;
+    let col = (mv % BOARD_SIZE) as i32;
+    let mut cells = Vec::with_capacity(121);
+    for dr in -5..=5i32 {
+        for dc in -5..=5i32 {
+            let r = row + dr;
+            let c = col + dc;
+            if r >= 0 && r < BOARD_SIZE as i32 && c >= 0 && c < BOARD_SIZE as i32 {
+                cells.push((r as usize) * BOARD_SIZE + c as usize);
+            }
+        }
+    }
+    cells
+}
 
 static COMPOUND_ENABLED: OnceLock<bool> = OnceLock::new();
 
@@ -20,8 +43,10 @@ fn compound_enabled() -> bool {
 
 /// 보드 상태에서 활성 피처를 추출.
 ///
-/// LP-Rich는 라인의 시작 셀에서 한 번만 카운트 (중복 방지). 같은 패턴이 보드의 다른 위치에
-/// 또 있으면 zone이 같을 때만 같은 인덱스로 중복 합산됨 — 이는 의도된 동작.
+/// cell-centric 구조: 각 cell에서 `features_from_cell`로 A/B/C/E/F 섹션의
+/// 그 cell에 해당하는 feature들을 emit. D (Density) 는 global이라 마지막에
+/// 별도 추가. 이 구조는 incremental update의 기반 — 한 수로 바뀌는 cell
+/// 영역만 재계산해 delta apply 가능.
 pub fn compute_active_features(board: &Board) -> (Vec<usize>, Vec<usize>) {
     let (my_bb, opp_bb) = match board.side_to_move {
         Stone::Black => (&board.black, &board.white),
@@ -31,122 +56,114 @@ pub fn compute_active_features(board: &Board) -> (Vec<usize>, Vec<usize>) {
     let mut stm = Vec::with_capacity(MAX_ACTIVE_FEATURES);
     let mut nstm = Vec::with_capacity(MAX_ACTIVE_FEATURES);
 
-    // === A. PS (stone-driven) ===
-    for sq in my_bb.iter_ones() {
-        stm.push(ps_index(0, sq));
-        nstm.push(ps_index(1, sq));
-    }
-    for sq in opp_bb.iter_ones() {
-        stm.push(ps_index(1, sq));
-        nstm.push(ps_index(0, sq));
-    }
+    let compound_on = compound_enabled();
 
-    // === B. LP-Rich (stone-driven) ===
-    // bitboard iter_ones로 돌만 스캔. `for 0..NUM_CELLS`의 빈 칸 분기 제거.
-    // iter_ones는 lowest-idx-first라 기존 순서 완전 보존 (feature push 순서 유지).
-    for idx in my_bb.iter_ones() {
-        let row = (idx / BOARD_SIZE) as i32;
-        let col = (idx % BOARD_SIZE) as i32;
-        for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
-            if is_line_start(my_bb, row, col, dr, dc) {
-                let info = scan_line(my_bb, opp_bb, row, col, dr, dc);
-                let z = zone_for(row, col);
-                let len = length_bucket(info.count);
-                let op = open_bucket(info.open_front, info.open_back);
-                stm.push(lp_rich_index(0, len, op, dir_idx, z));
-                nstm.push(lp_rich_index(1, len, op, dir_idx, z));
-            }
-        }
-    }
-    for idx in opp_bb.iter_ones() {
-        let row = (idx / BOARD_SIZE) as i32;
-        let col = (idx % BOARD_SIZE) as i32;
-        for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
-            if is_line_start(opp_bb, row, col, dr, dc) {
-                let info = scan_line(opp_bb, my_bb, row, col, dr, dc);
-                let z = zone_for(row, col);
-                let len = length_bucket(info.count);
-                let op = open_bucket(info.open_front, info.open_back);
-                stm.push(lp_rich_index(1, len, op, dir_idx, z));
-                nstm.push(lp_rich_index(0, len, op, dir_idx, z));
-            }
-        }
-    }
-
-    // === C. Compound Threats ===
-    // 각 돌에서 4방향 패턴을 수집하여, 한 돌에 다중 위협이 동시에 걸리는 경우를 인코딩.
-    // NORU_NO_COMPOUND=1 환경변수로 OFF 가능 (v3 재현/A-B 테스트용).
-    if compound_enabled() {
-        compute_compound_threats(my_bb, opp_bb, &mut stm, &mut nstm);
-    }
-
-    // === D. Density / Mobility ===
-    let my_count = my_bb.count_ones();
-    let opp_count = opp_bb.count_ones();
-    push_density(&mut stm, &mut nstm, DENSITY_CAT_MY_COUNT, count_bucket(my_count));
-    push_density(&mut stm, &mut nstm, DENSITY_CAT_OPP_COUNT, count_bucket(opp_count));
-
-    // 마지막 수 주변 3×3 밀도 (last_move 없으면 0).
-    let (my_local, opp_local) = local_density(board);
-    push_density(
-        &mut stm,
-        &mut nstm,
-        DENSITY_CAT_MY_LOCAL,
-        local_density_bucket(my_local),
-    );
-    push_density(
-        &mut stm,
-        &mut nstm,
-        DENSITY_CAT_OPP_LOCAL,
-        local_density_bucket(opp_local),
-    );
-
-    let legal = (NUM_CELLS as u32).saturating_sub(my_count + opp_count);
-    push_density(&mut stm, &mut nstm, DENSITY_CAT_LEGAL, count_bucket(legal));
-
-    // === E. Cross-line 3×3 local window hash (stone-driven) ===
-    // For every stone on the board, encode the 3×3 window around it as a
-    // D4-canonicalized 256-bucket hash. Captures 2D interactions the
-    // line-based LP-Rich encoder misses (corner squeeze, 十-shapes, etc.).
-    // iter_ones로 두 색 돌 순회 — 빈 칸에 대한 early-continue가 아예 없어짐.
+    // A/B/C/E/F: cell 단위 추출.
     for sq in my_bb.iter_ones().chain(opp_bb.iter_ones()) {
-        let row = (sq / BOARD_SIZE) as i32;
-        let col = (sq % BOARD_SIZE) as i32;
-
-        let stm_cells = collect_3x3(my_bb, opp_bb, row, col);
-        let stm_bucket = cross_line_hash(stm_cells);
-        stm.push(cross_line_index(0, stm_bucket));
-        nstm.push(cross_line_index(1, stm_bucket));
-
-        let nstm_cells = swap_mine_opp(stm_cells);
-        let nstm_bucket = cross_line_hash(nstm_cells);
-        stm.push(cross_line_index(1, nstm_bucket));
-        nstm.push(cross_line_index(0, nstm_bucket));
+        features_from_cell(my_bb, opp_bb, sq, compound_on, &mut stm, &mut nstm);
     }
 
-    // === F. Broken / Jump patterns (stone-driven) ===
-    // 각 자기 돌에서 4방향 11칸 창을 읽어 broken/jump/double 패턴을 감지.
-    // iter_ones로 돌만 스캔 — 빈 칸 분기 제거.
-    for idx in my_bb.iter_ones() {
-        let row = (idx / BOARD_SIZE) as i32;
-        let col = (idx % BOARD_SIZE) as i32;
-        for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
-            detect_broken_and_push(
-                my_bb, opp_bb, row, col, dr, dc, dir_idx, 0, 1, &mut stm, &mut nstm,
-            );
-        }
-    }
-    for idx in opp_bb.iter_ones() {
-        let row = (idx / BOARD_SIZE) as i32;
-        let col = (idx % BOARD_SIZE) as i32;
-        for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
-            detect_broken_and_push(
-                opp_bb, my_bb, row, col, dr, dc, dir_idx, 1, 0, &mut stm, &mut nstm,
-            );
-        }
-    }
+    // D: Density — global + last_move 기반 local.
+    push_density_features(board, my_bb, opp_bb, &mut stm, &mut nstm);
 
     (stm, nstm)
+}
+
+/// 한 cell에서 발생하는 non-density features (A/B/C/E/F 섹션) emit.
+/// cell이 빈 칸이면 아무것도 push하지 않음 — caller가 돌 있는 cell만 호출해야
+/// 효율적이지만, 빈 cell에 호출해도 결과는 empty (safe).
+///
+/// 이 함수가 **cell-local하게 self-contained**라는 것이 incremental update의
+/// 핵심 invariant: mv 주변 영역의 cell들 각각에 대해 before/after features를
+/// 독립 계산하고 delta를 Accumulator에 적용할 수 있다.
+#[inline]
+pub(crate) fn features_from_cell(
+    my_bb: &crate::board::BitBoard,
+    opp_bb: &crate::board::BitBoard,
+    sq: usize,
+    compound_on: bool,
+    stm: &mut Vec<usize>,
+    nstm: &mut Vec<usize>,
+) {
+    let row = (sq / BOARD_SIZE) as i32;
+    let col = (sq % BOARD_SIZE) as i32;
+
+    let (stones, opponent, persp_mine, persp_opp) = if my_bb.get(sq) {
+        (my_bb, opp_bb, 0, 1)
+    } else if opp_bb.get(sq) {
+        (opp_bb, my_bb, 1, 0)
+    } else {
+        return; // 빈 cell
+    };
+
+    // A: PS
+    stm.push(ps_index(persp_mine, sq));
+    nstm.push(ps_index(persp_opp, sq));
+
+    // B: LP-Rich — anchor(line start) 체크, 4방향
+    for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
+        if is_line_start(stones, row, col, dr, dc) {
+            let info = scan_line(stones, opponent, row, col, dr, dc);
+            let z = zone_for(row, col);
+            let len = length_bucket(info.count);
+            let op = open_bucket(info.open_front, info.open_back);
+            stm.push(lp_rich_index(persp_mine, len, op, dir_idx, z));
+            nstm.push(lp_rich_index(persp_opp, len, op, dir_idx, z));
+        }
+    }
+
+    // C: Compound — 4방향 threats 수집 후 combo (단일 위협은 None 반환됨)
+    if compound_on {
+        let mut threats = [Threat::None; 4];
+        for (di, &(dr, dc)) in DIR.iter().enumerate() {
+            let info = scan_line(stones, opponent, row, col, dr, dc);
+            let open = info.open_front as u32 + info.open_back as u32;
+            threats[di] = classify_threat(info.count, open);
+        }
+        if let Some(combo) = compound_combo_id(&threats) {
+            stm.push(compound_index(persp_mine, combo));
+            nstm.push(compound_index(persp_opp, combo));
+        }
+    }
+
+    // E: Cross-line 3×3 window (stm-perspective + nstm-perspective)
+    let stm_cells = collect_3x3(my_bb, opp_bb, row, col);
+    let stm_bucket = cross_line_hash(stm_cells);
+    stm.push(cross_line_index(0, stm_bucket));
+    nstm.push(cross_line_index(1, stm_bucket));
+
+    let nstm_cells = swap_mine_opp(stm_cells);
+    let nstm_bucket = cross_line_hash(nstm_cells);
+    stm.push(cross_line_index(1, nstm_bucket));
+    nstm.push(cross_line_index(0, nstm_bucket));
+
+    // F: Broken / Jump — 4방향, left-anchor dedup
+    for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
+        detect_broken_and_push(
+            stones, opponent, row, col, dr, dc, dir_idx, persp_mine, persp_opp, stm, nstm,
+        );
+    }
+}
+
+/// D 섹션 — 전역 카운트 + last_move 주변 3×3 local density.
+fn push_density_features(
+    board: &Board,
+    my_bb: &crate::board::BitBoard,
+    opp_bb: &crate::board::BitBoard,
+    stm: &mut Vec<usize>,
+    nstm: &mut Vec<usize>,
+) {
+    let my_count = my_bb.count_ones();
+    let opp_count = opp_bb.count_ones();
+    push_density(stm, nstm, DENSITY_CAT_MY_COUNT, count_bucket(my_count));
+    push_density(stm, nstm, DENSITY_CAT_OPP_COUNT, count_bucket(opp_count));
+
+    let (my_local, opp_local) = local_density(board);
+    push_density(stm, nstm, DENSITY_CAT_MY_LOCAL, local_density_bucket(my_local));
+    push_density(stm, nstm, DENSITY_CAT_OPP_LOCAL, local_density_bucket(opp_local));
+
+    let legal = (NUM_CELLS as u32).saturating_sub(my_count + opp_count);
+    push_density(stm, nstm, DENSITY_CAT_LEGAL, count_bucket(legal));
 }
 
 /// `(row, col)`이 `(dr, dc)` 방향 라인의 **왼쪽 앵커 돌**일 때 broken 패턴을
@@ -451,48 +468,7 @@ fn threat_rank(t: Threat) -> usize {
     }
 }
 
-/// 모든 돌에 대해 compound threats를 검출하여 피처 벡터에 추가.
-fn compute_compound_threats(
-    my_bb: &crate::board::BitBoard,
-    opp_bb: &crate::board::BitBoard,
-    stm: &mut Vec<usize>,
-    nstm: &mut Vec<usize>,
-) {
-    // 자기 돌 순회 — iter_ones로 set bit만 스캔 (225-loop-per-empty 제거).
-    // 교차점 hotspot 감지가 목적이므로 `is_line_start` 필터 없이 이 돌 기준
-    // 모든 방향 라인을 스캔한다. 중복은 compound_combo_id에서 단일 위협
-    // 컷오프로 방지.
-    for idx in my_bb.iter_ones() {
-        let row = (idx / BOARD_SIZE) as i32;
-        let col = (idx % BOARD_SIZE) as i32;
-        let mut threats = [Threat::None; 4];
-        for (di, &(dr, dc)) in DIR.iter().enumerate() {
-            let info = scan_line(my_bb, opp_bb, row, col, dr, dc);
-            let open = info.open_front as u32 + info.open_back as u32;
-            threats[di] = classify_threat(info.count, open);
-        }
-        if let Some(combo) = compound_combo_id(&threats) {
-            stm.push(compound_index(0, combo));
-            nstm.push(compound_index(1, combo));
-        }
-    }
-
-    // 상대 돌 순회
-    for idx in opp_bb.iter_ones() {
-        let row = (idx / BOARD_SIZE) as i32;
-        let col = (idx % BOARD_SIZE) as i32;
-        let mut threats = [Threat::None; 4];
-        for (di, &(dr, dc)) in DIR.iter().enumerate() {
-            let info = scan_line(opp_bb, my_bb, row, col, dr, dc);
-            let open = info.open_front as u32 + info.open_back as u32;
-            threats[di] = classify_threat(info.count, open);
-        }
-        if let Some(combo) = compound_combo_id(&threats) {
-            stm.push(compound_index(1, combo));
-            nstm.push(compound_index(0, combo));
-        }
-    }
-}
+// compute_compound_threats는 features_from_cell에 흡수됨 (cell-centric 리팩토링).
 
 /// 마지막 수 주변 3×3 안의 (자기, 상대) 돌 수.
 fn local_density(board: &Board) -> (u32, u32) {
@@ -537,39 +513,280 @@ pub fn evaluate(board: &Board, weights: &NnueWeights) -> i32 {
     forward(&acc, weights)
 }
 
-/// 증분 평가용 상태 (현재는 전체 재계산만).
+/// 진짜 incremental NNUE 평가 상태.
+///
+/// 한 수 `mv`를 `push_move`하면 mv 주변 ±5 영역의 cell features만 재계산하고
+/// 기존 accumulator에 delta를 적용한다. 225-cell 전체 재계산을 피해 leaf
+/// 평가가 훨씬 빨라짐. Undo는 snapshot 복원 방식으로 단순·안전하게 처리.
+///
+/// Invariant:
+/// - `cell_features[i]` 는 cell i가 현재 emit 중인 (stm, nstm) features.
+///   빈 cell이면 `(vec![], vec![])`.
+/// - `density_features` 는 D 섹션 (global) features.
+/// - `accumulator` 는 `∪ cell_features + density_features` 를 반영.
 pub struct IncrementalEval {
     pub accumulator: Accumulator,
-    stack: Vec<Accumulator>,
+    /// cell 인덱스별 현재 활성 features.
+    cell_features: Vec<(Vec<usize>, Vec<usize>)>,
+    /// D 섹션 features (global).
+    density_features: (Vec<usize>, Vec<usize>),
+    stack: Vec<UndoRecord>,
+}
+
+struct UndoRecord {
+    accumulator: Accumulator,
+    cell_changes: Vec<(usize, Vec<usize>, Vec<usize>)>,
+    density: (Vec<usize>, Vec<usize>),
 }
 
 impl IncrementalEval {
     pub fn new(weights: &NnueWeights) -> Self {
         Self {
             accumulator: Accumulator::new(&weights.feature_bias),
+            cell_features: vec![(Vec::new(), Vec::new()); NUM_CELLS],
+            density_features: (Vec::new(), Vec::new()),
             stack: Vec::with_capacity(225),
         }
     }
 
+    /// Full state rebuild — 탐색 시작 시 한 번 호출.
     pub fn refresh(&mut self, board: &Board, weights: &NnueWeights) {
-        let (stm_feats, nstm_feats) = compute_active_features(board);
-        self.accumulator.refresh(weights, &stm_feats, &nstm_feats);
+        let (my_bb, opp_bb) = match board.side_to_move {
+            Stone::Black => (&board.black, &board.white),
+            Stone::White => (&board.white, &board.black),
+        };
+        let compound_on = compound_enabled();
+
+        // cell_features 채우기
+        for i in 0..NUM_CELLS {
+            self.cell_features[i].0.clear();
+            self.cell_features[i].1.clear();
+        }
+        for sq in my_bb.iter_ones().chain(opp_bb.iter_ones()) {
+            let entry = &mut self.cell_features[sq];
+            features_from_cell(my_bb, opp_bb, sq, compound_on, &mut entry.0, &mut entry.1);
+        }
+
+        // density_features
+        self.density_features.0.clear();
+        self.density_features.1.clear();
+        push_density_features(
+            board,
+            my_bb,
+            opp_bb,
+            &mut self.density_features.0,
+            &mut self.density_features.1,
+        );
+
+        // accumulator 전체 재계산
+        let (all_stm, all_nstm) = self.collect_all_features();
+        self.accumulator.refresh(weights, &all_stm, &all_nstm);
+
+        self.stack.clear();
     }
 
-    pub fn push_move(&mut self, board: &Board, _mv: usize, weights: &NnueWeights) {
-        self.stack.push(self.accumulator.clone());
-        self.refresh(board, weights);
+    /// 현재 cell_features + density_features를 flatten해서 반환.
+    fn collect_all_features(&self) -> (Vec<usize>, Vec<usize>) {
+        let mut stm = Vec::with_capacity(MAX_ACTIVE_FEATURES);
+        let mut nstm = Vec::with_capacity(MAX_ACTIVE_FEATURES);
+        for (s, n) in &self.cell_features {
+            stm.extend(s.iter().copied());
+            nstm.extend(n.iter().copied());
+        }
+        stm.extend(self.density_features.0.iter().copied());
+        nstm.extend(self.density_features.1.iter().copied());
+        (stm, nstm)
     }
 
+    /// `mv`가 방금 board에 적용됐다고 가정. mv 주변 affected cells만 재계산하고
+    /// accumulator에 delta 적용.
+    ///
+    /// **관점 전환**: make_move로 `side_to_move`가 바뀌었으므로 stm/nstm
+    /// 라벨링이 반대가 됨. accumulator + 모든 cell_features + density를
+    /// swap해서 "현재 side_to_move 관점"으로 재정렬한 뒤 delta 계산.
+    pub fn push_move(&mut self, board: &Board, mv: usize, weights: &NnueWeights) {
+        // 0. Undo 스냅샷 (swap 이전 상태 저장 — pop에서 복원)
+        let mut undo = UndoRecord {
+            accumulator: self.accumulator.clone(),
+            cell_changes: Vec::new(),
+            density: self.density_features.clone(),
+        };
+
+        // 1. 관점 swap
+        self.accumulator.swap();
+        for feats in self.cell_features.iter_mut() {
+            std::mem::swap(&mut feats.0, &mut feats.1);
+        }
+        std::mem::swap(&mut self.density_features.0, &mut self.density_features.1);
+
+        let (my_bb, opp_bb) = match board.side_to_move {
+            Stone::Black => (&board.black, &board.white),
+            Stone::White => (&board.white, &board.black),
+        };
+        let compound_on = compound_enabled();
+
+        // 2. Affected cells 계산 + 각 cell의 new features 구해 delta 적용
+        let cells = affected_cells(mv);
+        let mut new_stm_buf: Vec<usize> = Vec::with_capacity(16);
+        let mut new_nstm_buf: Vec<usize> = Vec::with_capacity(16);
+
+        for &c in &cells {
+            new_stm_buf.clear();
+            new_nstm_buf.clear();
+            features_from_cell(my_bb, opp_bb, c, compound_on, &mut new_stm_buf, &mut new_nstm_buf);
+
+            let (old_stm, old_nstm) = &self.cell_features[c];
+            if old_stm.as_slice() == new_stm_buf.as_slice()
+                && old_nstm.as_slice() == new_nstm_buf.as_slice()
+            {
+                continue; // 변화 없음
+            }
+
+            apply_delta_by_chunks(
+                &mut self.accumulator,
+                weights,
+                &new_stm_buf,
+                old_stm,
+                &new_nstm_buf,
+                old_nstm,
+            );
+
+            undo.cell_changes
+                .push((c, std::mem::take(&mut self.cell_features[c].0), std::mem::take(&mut self.cell_features[c].1)));
+            self.cell_features[c].0 = new_stm_buf.clone();
+            self.cell_features[c].1 = new_nstm_buf.clone();
+        }
+
+        // 3. Density 재계산 (global)
+        let mut new_dens_stm: Vec<usize> = Vec::with_capacity(8);
+        let mut new_dens_nstm: Vec<usize> = Vec::with_capacity(8);
+        push_density_features(board, my_bb, opp_bb, &mut new_dens_stm, &mut new_dens_nstm);
+
+        if new_dens_stm != self.density_features.0 || new_dens_nstm != self.density_features.1 {
+            apply_delta_by_chunks(
+                &mut self.accumulator,
+                weights,
+                &new_dens_stm,
+                &self.density_features.0,
+                &new_dens_nstm,
+                &self.density_features.1,
+            );
+            self.density_features.0 = new_dens_stm;
+            self.density_features.1 = new_dens_nstm;
+        }
+
+        self.stack.push(undo);
+    }
+
+    /// Undo 마지막 push_move.
+    ///
+    /// `undo.cell_changes` 는 push 시점의 **post-swap** (새 side_to_move)
+    /// 관점의 이전 값이므로, 복원 후 전체 cell_features를 한 번 더 swap해
+    /// push **이전** 관점으로 되돌린다. accumulator와 density_features는
+    /// push 이전 snapshot 그대로 복원됨.
     pub fn pop_move(&mut self) {
-        if let Some(prev) = self.stack.pop() {
-            self.accumulator = prev;
+        if let Some(undo) = self.stack.pop() {
+            self.accumulator = undo.accumulator;
+            self.density_features = undo.density;
+            for (c, old_stm, old_nstm) in undo.cell_changes {
+                self.cell_features[c].0 = old_stm;
+                self.cell_features[c].1 = old_nstm;
+            }
+            // Perspective 되돌림 (push_move에서 한 swap 상쇄)
+            for feats in self.cell_features.iter_mut() {
+                std::mem::swap(&mut feats.0, &mut feats.1);
+            }
         }
     }
 
     pub fn eval(&self, weights: &NnueWeights) -> i32 {
         forward(&self.accumulator, weights)
     }
+}
+
+/// Multiset diff 기반 incremental accumulator update.
+/// `old`에서 `new`로 변화한 features만 add/remove로 추출해 `FeatureDelta`
+/// (32 슬롯)에 채워 넣고 `update_incremental`을 호출한다. 한 cell의 feature
+/// 변경은 실전에선 10개 미만이라 한 번의 FeatureDelta 호출로 충분하지만,
+/// 혹시 넘치면 `MAX_FEATURE_DELTA` 단위로 chunk 나눠서 여러 번 호출.
+fn apply_delta_by_chunks(
+    acc: &mut Accumulator,
+    weights: &NnueWeights,
+    new_stm: &[usize],
+    old_stm: &[usize],
+    new_nstm: &[usize],
+    old_nstm: &[usize],
+) {
+    let (stm_add, stm_rem) = multiset_diff(new_stm, old_stm);
+    let (nstm_add, nstm_rem) = multiset_diff(new_nstm, old_nstm);
+
+    const MAX_FD: usize = noru::network::MAX_FEATURE_DELTA;
+
+    // stm/nstm의 add·remove를 동일 chunk로 묶어 처리 (FeatureDelta는 한 쪽만
+    // 넘쳐도 실패하므로 보수적으로 작은 쪽 맞춤).
+    let max_chunk = MAX_FD;
+
+    let stm_chunks = chunk_pairs(&stm_add, &stm_rem, max_chunk);
+    let nstm_chunks = chunk_pairs(&nstm_add, &nstm_rem, max_chunk);
+    let n = stm_chunks.len().max(nstm_chunks.len());
+
+    for i in 0..n {
+        let (sa, sr) = stm_chunks.get(i).cloned().unwrap_or((&[][..], &[][..]));
+        let (na, nr) = nstm_chunks.get(i).cloned().unwrap_or((&[][..], &[][..]));
+
+        let stm_delta = FeatureDelta::from_slices(sa, sr).expect("stm chunk overflow");
+        let nstm_delta = FeatureDelta::from_slices(na, nr).expect("nstm chunk overflow");
+        acc.update_incremental(weights, &stm_delta, &nstm_delta);
+    }
+}
+
+/// add/rem slice 쌍을 `max_chunk` 단위로 쪼갠다. 각 chunk가 FeatureDelta의
+/// 32 슬롯에 들어갈 수 있도록 add와 rem을 같은 i에서 잘라 나란히 반환.
+fn chunk_pairs<'a>(
+    add: &'a [usize],
+    rem: &'a [usize],
+    max_chunk: usize,
+) -> Vec<(&'a [usize], &'a [usize])> {
+    let n_add = add.len();
+    let n_rem = rem.len();
+    let chunks = n_add.div_ceil(max_chunk).max(n_rem.div_ceil(max_chunk)).max(1);
+    let mut out = Vec::with_capacity(chunks);
+    for i in 0..chunks {
+        let a_start = (i * max_chunk).min(n_add);
+        let a_end = ((i + 1) * max_chunk).min(n_add);
+        let r_start = (i * max_chunk).min(n_rem);
+        let r_end = ((i + 1) * max_chunk).min(n_rem);
+        out.push((&add[a_start..a_end], &rem[r_start..r_end]));
+    }
+    out
+}
+
+/// `new`에 있고 `old`에 없는 항목 (add), `old`에 있고 `new`에 없는 항목 (remove).
+/// multiset 개념: 같은 index가 여러 번 나올 수 있음 (compound / density 중복).
+fn multiset_diff(new: &[usize], old: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    // 일반적인 cell delta는 작음 (<16개)이라 O(n²) 비교로 충분.
+    let mut new_count: std::collections::HashMap<usize, i32> = std::collections::HashMap::new();
+    for &x in new {
+        *new_count.entry(x).or_insert(0) += 1;
+    }
+    for &x in old {
+        *new_count.entry(x).or_insert(0) -= 1;
+    }
+
+    let mut add = Vec::new();
+    let mut rem = Vec::new();
+    for (&idx, &count) in new_count.iter() {
+        if count > 0 {
+            for _ in 0..count {
+                add.push(idx);
+            }
+        } else if count < 0 {
+            for _ in 0..(-count) {
+                rem.push(idx);
+            }
+        }
+    }
+    (add, rem)
 }
 
 #[cfg(test)]
@@ -660,6 +877,118 @@ mod tests {
 
         // PS_BASE silence
         let _ = PS_BASE;
+    }
+
+    /// Consistency harness — push_move incremental 이 full refresh와 동일
+    /// 한 accumulator state를 만드는지 여러 수순에 걸쳐 검증.
+    ///
+    /// 규칙: 랜덤 가중치로 고정된 보드 수순에 대해 매 make_move 후
+    /// incremental eval 값 = 새로 refresh한 eval 값이어야 함.
+    #[test]
+    fn incremental_matches_full_refresh() {
+        // deterministic weight 생성 (zeros로는 모든 eval이 0이라 무의미)
+        let mut weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let acc_size = GOMOKU_NNUE_CONFIG.accumulator_size;
+        for f in 0..TOTAL_FEATURE_SIZE {
+            for i in 0..acc_size {
+                weights.feature_weights[f][i] =
+                    ((f.wrapping_mul(13).wrapping_add(i) % 31) as i16) - 15;
+            }
+            weights.feature_bias[i_mod(f, acc_size)] =
+                ((f.wrapping_mul(7) % 19) as i16) - 9;
+        }
+
+        let moves = [
+            112, 113, 97, 98, 127, 128, 111, 114, 96, 99, // 대각·직선 혼합
+            126, 129, 82, 83, 84, 85, 100, 101, 115, 116,
+        ];
+
+        let mut board = Board::new();
+        let mut inc = IncrementalEval::new(&weights);
+        inc.refresh(&board, &weights);
+
+        let initial = inc.eval(&weights);
+        assert_eq!(initial, evaluate(&board, &weights), "refresh mismatch at empty");
+
+        for (i, &mv) in moves.iter().enumerate() {
+            if !board.is_empty(mv) {
+                continue;
+            }
+            board.make_move(mv);
+            inc.push_move(&board, mv, &weights);
+
+            let inc_val = inc.eval(&weights);
+            let full_val = evaluate(&board, &weights);
+            assert_eq!(
+                inc_val, full_val,
+                "mismatch after move {} (ply {}): inc={} full={}",
+                mv, i + 1, inc_val, full_val
+            );
+        }
+
+        // 모든 수 undo해서 다시 초기값으로 돌아가야 함
+        for _ in 0..moves.len() {
+            board.undo_move();
+            inc.pop_move();
+            let inc_val = inc.eval(&weights);
+            let full_val = evaluate(&board, &weights);
+            assert_eq!(inc_val, full_val, "mismatch during undo");
+        }
+    }
+
+    fn i_mod(f: usize, acc: usize) -> usize {
+        f % acc
+    }
+
+    /// Far-apart consistency test — 수들이 서로 ±5 cell 밖으로 떨어져 있어
+    /// affected_cells에 서로 포함되지 않는 상황을 만들어 perspective swap
+    /// 로직이 올바른지 검증. 근처 수만 놓는 기본 테스트로는 이 버그를 못 잡음.
+    #[test]
+    fn incremental_matches_full_refresh_far_apart() {
+        let mut weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let acc_size = GOMOKU_NNUE_CONFIG.accumulator_size;
+        for f in 0..TOTAL_FEATURE_SIZE {
+            for i in 0..acc_size {
+                weights.feature_weights[f][i] =
+                    ((f.wrapping_mul(17).wrapping_add(i) % 37) as i16) - 18;
+            }
+        }
+        for i in 0..acc_size {
+            weights.feature_bias[i] = ((i % 23) as i16) - 11;
+        }
+
+        // 보드 극단 cell들 (서로 ±5 영역 밖)
+        // 0=(0,0), 14=(0,14), 210=(14,0), 224=(14,14), 112=(7,7), 30=(2,0), 200=(13,5)
+        let moves = [0, 224, 14, 210, 112, 30, 200, 58, 101, 150, 7, 217];
+
+        let mut board = Board::new();
+        let mut inc = IncrementalEval::new(&weights);
+        inc.refresh(&board, &weights);
+
+        assert_eq!(inc.eval(&weights), evaluate(&board, &weights));
+
+        for (i, &mv) in moves.iter().enumerate() {
+            if !board.is_empty(mv) {
+                continue;
+            }
+            board.make_move(mv);
+            inc.push_move(&board, mv, &weights);
+
+            let inc_val = inc.eval(&weights);
+            let full_val = evaluate(&board, &weights);
+            assert_eq!(
+                inc_val, full_val,
+                "far-apart mismatch after move {} (ply {}): inc={} full={}",
+                mv, i + 1, inc_val, full_val
+            );
+        }
+
+        // Undo까지 검증
+        for _ in 0..moves.len() {
+            board.undo_move();
+            inc.pop_move();
+            assert_eq!(inc.eval(&weights), evaluate(&board, &weights), "undo mismatch");
+        }
     }
 
     /// 수정 전 compound 로직은 각 방향에서 `is_line_start` 돌에서만

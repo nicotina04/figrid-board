@@ -1,5 +1,43 @@
 # Changes
 
+## 0.5.3 (2026-04-25)
+* **True incremental NNUE evaluation**. The 0.5.x pipeline had been paying
+  for a full `compute_active_features` pass (225-cell × 6 feature sections)
+  at every α-β leaf — almost all of the leaf cost. `analyze_psq` on 0.5.2
+  losses showed a "slow grind" pattern: static_eval drifts between +200 and
+  −100 while Pela assembles a winning row figrid's d4 α-β never sees. The
+  only remaining lever is deeper search within the same turn budget, and the
+  only way to get that without a faster CPU is to stop redoing the feature
+  extraction at every leaf.
+* Refactor: (1) `compute_active_features` is now a loop of a new
+  `features_from_cell(my, opp, sq, …)` emitter that returns the A/B/C/E/F
+  features produced *by that one cell*; density (D) stays global. Output is
+  byte-identical to 0.5.2 (all existing tests pass). (2) `IncrementalEval`
+  is rewritten from a snapshot wrapper into a real incremental state: it
+  caches per-cell features (and density), and on `push_move(board_after,
+  mv)` it recomputes only the 11×11 `affected_cells(mv)` window, diffs the
+  emitted features against the cache, and applies chunked `FeatureDelta`s
+  through `Accumulator::update_incremental`. Perspective swap (stm ↔ nstm)
+  is applied to the accumulator, every cached cell, and density since the
+  side-to-move just flipped. `pop_move` restores an accumulator snapshot
+  plus per-cell rollback and unwinds the swap.
+* `Searcher` now plumbs `&mut IncrementalEval` through `alpha_beta`: the
+  root calls `refresh` once, recursive `make_move/push_move` and
+  `undo_move/pop_move` stay paired. Leaf evaluation is pure forward pass.
+* Correctness is guarded by two tests: the near-centre harness from 0.5.1
+  plus a new far-apart harness that places moves at opposite corners so
+  later moves fall outside each other's `affected_cells` window — this is
+  what actually catches the perspective-swap bug in the partial-update path
+  (the near-centre harness passes even with the bug present because every
+  cell is re-emitted every ply). Both harnesses assert `inc.eval(weights)`
+  equals `evaluate(board, weights)` over a 20-move sequence in both push
+  and pop directions.
+* Weights unchanged — v13_broken_rapfi.bin still shipped. A v14 trained on
+  12 999-game data measured 46.7% arena vs v13's 53.3%, not adopted yet.
+* Practical effect for Pela: same 5 s turn, more plies in α-β. Whether
+  that translates to wins depends on how quickly Pela's plan reaches
+  within reach of the extra depth — validation is live Piskvork play.
+
 ## 0.5.2 (2026-04-25)
 * **Revert the VCT budget expansion from 0.5.1**. Live Pela matches with
   0.5.1 were *faster* losses than 0.5.0, not slower — games ended in 28-50

@@ -7,7 +7,7 @@
 /// - 시간 제한
 
 use crate::board::{Board, GameResult, Move, Stone, BOARD_SIZE, NUM_CELLS};
-use crate::eval::evaluate;
+use crate::eval::IncrementalEval;
 use crate::heuristic::{scan_line, DIR};
 use crate::vct::{classify_move, search_vct, ThreatKind, VctConfig};
 use noru::network::NnueWeights;
@@ -99,6 +99,12 @@ impl Searcher {
             nodes: 0,
         };
 
+        // Incremental NNUE state — 탐색 시작 시 한 번 full refresh, 이후
+        // make_move/undo_move와 쌍으로 push/pop해서 매 leaf에서 full
+        // compute_active_features를 돌지 않고 Accumulator forward만 수행.
+        let mut inc = IncrementalEval::new(weights);
+        inc.refresh(board, weights);
+
         // PV-move priority: the best move from iteration depth-1 becomes the
         // first move we try at iteration depth. Combined with PVS, this
         // drastically reduces re-search cost — if the PV is still best, the
@@ -122,28 +128,31 @@ impl Searcher {
             for (move_idx, mv) in moves.iter().enumerate() {
                 let mv = *mv;
                 board.make_move(mv);
+                inc.push_move(board, mv, weights);
 
                 // Root PVS: first move uses the full window; every
                 // subsequent move is proved-not-better via null window and
                 // only re-searched with the full window on fail-high.
                 let score = if move_idx == 0 {
-                    -self.alpha_beta(board, weights, depth - 1, 1, -beta, -alpha)
+                    -self.alpha_beta(board, weights, &mut inc, depth - 1, 1, -beta, -alpha)
                 } else {
                     let null = -self.alpha_beta(
                         board,
                         weights,
+                        &mut inc,
                         depth - 1,
                         1,
                         -alpha - 1,
                         -alpha,
                     );
                     if !self.aborted && null > alpha && null < beta {
-                        -self.alpha_beta(board, weights, depth - 1, 1, -beta, -alpha)
+                        -self.alpha_beta(board, weights, &mut inc, depth - 1, 1, -beta, -alpha)
                     } else {
                         null
                     }
                 };
 
+                inc.pop_move();
                 board.undo_move();
 
                 if self.aborted {
@@ -181,6 +190,7 @@ impl Searcher {
         &mut self,
         board: &mut Board,
         weights: &NnueWeights,
+        inc: &mut IncrementalEval,
         depth: u32,
         ply: usize,
         mut alpha: i32,
@@ -188,7 +198,7 @@ impl Searcher {
     ) -> i32 {
         self.nodes += 1;
 
-        // 시간 체크 (128 노드마다 — NNUE 평가가 무거워서 1024 주기는 deadline을 수십 ms 넘기곤 함)
+        // 시간 체크 (1024 노드마다)
         if self.nodes & 127 == 0 {
             if let Some(deadline) = self.deadline {
                 if Instant::now() >= deadline {
@@ -207,9 +217,9 @@ impl Searcher {
             GameResult::Ongoing => {}
         }
 
-        // 깊이 도달 → NNUE 정적 평가 (전체 재계산)
+        // 깊이 도달 → NNUE 정적 평가 (incremental accumulator의 forward만)
         if depth == 0 {
-            return evaluate(board, weights);
+            return inc.eval(weights);
         }
 
         let moves = self.order_moves(board, ply);
@@ -232,32 +242,28 @@ impl Searcher {
         for (move_idx, mv) in moves.iter().enumerate() {
             let mv = *mv;
             board.make_move(mv);
+            inc.push_move(board, mv, weights);
 
             let score = if move_idx == 0 {
-                -self.alpha_beta(board, weights, depth - 1, ply + 1, -beta, -alpha)
+                -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -alpha)
             } else {
                 let null_score = -self.alpha_beta(
                     board,
                     weights,
+                    inc,
                     depth - 1,
                     ply + 1,
                     -alpha - 1,
                     -alpha,
                 );
                 if !self.aborted && null_score > alpha && null_score < beta {
-                    -self.alpha_beta(
-                        board,
-                        weights,
-                        depth - 1,
-                        ply + 1,
-                        -beta,
-                        -alpha,
-                    )
+                    -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -alpha)
                 } else {
                     null_score
                 }
             };
 
+            inc.pop_move();
             board.undo_move();
 
             if self.aborted {

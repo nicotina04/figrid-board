@@ -991,6 +991,57 @@ mod tests {
         }
     }
 
+    /// Real-weights consistency harness. noru의 i16 accumulator 연산은
+    /// saturating이라 incremental(기존 값에 delta 적용)과 full refresh
+    /// (bias에서 재합산)가 이론적으로 saturation 영역에서 분기될 수 있다.
+    /// 재학습된 weights가 saturation 근접 영역을 건드리는지 자동 적발.
+    ///
+    /// 평시 `cargo test`에서는 `#[ignore]`로 빠짐. weights 파일 경로를
+    /// 환경변수로 지정해서 `cargo test -- --ignored --exact …` 로 실행.
+    /// 기본 경로는 crate 루트의 `models/gomoku_v13_broken_rapfi.bin`.
+    #[test]
+    #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v13_broken_rapfi.bin)"]
+    fn incremental_matches_full_refresh_real_weights() {
+        use crate::board::GameResult;
+        use noru::trainer::SimpleRng;
+
+        let path = std::env::var("NORU_TEST_WEIGHTS").unwrap_or_else(|_| {
+            let manifest = env!("CARGO_MANIFEST_DIR");
+            format!("{}/models/gomoku_v13_broken_rapfi.bin", manifest)
+        });
+        let data = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("failed to read weights from {path}: {e}"));
+        let weights = NnueWeights::load_from_bytes(&data, Some(GOMOKU_NNUE_CONFIG.clone()))
+            .unwrap_or_else(|e| panic!("load_from_bytes failed for {path}: {e}"));
+
+        let mut rng = SimpleRng::new(2026);
+        for trial in 0..100 {
+            let mut board = Board::new();
+            let mut inc = IncrementalEval::new(&weights);
+            inc.refresh(&board, &weights);
+
+            for ply in 0..160 {
+                if board.game_result() != GameResult::Ongoing {
+                    break;
+                }
+                let moves = board.candidate_moves();
+                if moves.is_empty() {
+                    break;
+                }
+                let mv = moves[rng.next_usize(moves.len())];
+                board.make_move(mv);
+                inc.push_move(&board, mv, &weights);
+
+                let inc_val = inc.eval(&weights);
+                let full_val = evaluate(&board, &weights);
+                assert_eq!(
+                    inc_val, full_val,
+                    "trial {trial} ply {ply} (move {mv}): inc={inc_val} full={full_val}"
+                );
+            }
+        }
+    }
+
     /// 수정 전 compound 로직은 각 방향에서 `is_line_start` 돌에서만
     /// threats를 수집했기 때문에, 라인의 **중간 돌**이 여러 방향으로 open-three
     /// 교차점이 되어도 compound double-three 피처가 붙지 않았다. 이 테스트는

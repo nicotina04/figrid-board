@@ -198,7 +198,7 @@ impl Searcher {
     ) -> i32 {
         self.nodes += 1;
 
-        // 시간 체크 (1024 노드마다)
+        // 시간 체크 (128 노드마다 — NNUE 평가가 무거워서 1024 주기는 deadline을 수십 ms 넘기곤 함)
         if self.nodes & 127 == 0 {
             if let Some(deadline) = self.deadline {
                 if Instant::now() >= deadline {

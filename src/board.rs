@@ -73,6 +73,41 @@ impl BitBoard {
     pub fn count_ones(&self) -> u32 {
         self.lo.count_ones() + self.hi.count_ones()
     }
+
+    /// Iterate over the indices of set bits, lowest first.
+    /// Enables feature extraction loops to skip empty cells entirely —
+    /// critical when the board is sparse (early/midgame), since a
+    /// stone-driven pass is ~6× cheaper than scanning all 225 cells.
+    #[inline]
+    pub fn iter_ones(&self) -> BitBoardIter {
+        BitBoardIter {
+            lo: self.lo,
+            hi: self.hi,
+        }
+    }
+}
+
+pub struct BitBoardIter {
+    lo: u128,
+    hi: u128,
+}
+
+impl Iterator for BitBoardIter {
+    type Item = usize;
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        if self.lo != 0 {
+            let idx = self.lo.trailing_zeros() as usize;
+            self.lo &= self.lo - 1;
+            Some(idx)
+        } else if self.hi != 0 {
+            let idx = 128 + self.hi.trailing_zeros() as usize;
+            self.hi &= self.hi - 1;
+            Some(idx)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

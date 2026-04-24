@@ -17,11 +17,11 @@ const INF: i32 = 1_000_000;
 const WIN_SCORE: i32 = 999_000;
 
 /// Root VCT 기본 시간 예산 (time_limit이 없을 때 사용). 아레나 등 고정 depth 탐색용.
-const ROOT_VCT_BUDGET_MS: u64 = 150;
+const ROOT_VCT_BUDGET_MS: u64 = 300;
 /// Root VCT 최대 재귀 깊이 (공격-수비 쌍).
-const ROOT_VCT_DEPTH: u32 = 14;
+const ROOT_VCT_DEPTH: u32 = 20;
 /// Root VCT가 턴 예산에서 차지할 비율. 5s 턴 → VCT 625ms, 30s 턴 → 3.75s.
-const ROOT_VCT_BUDGET_FRACTION: u32 = 8;
+const ROOT_VCT_BUDGET_FRACTION: u32 = 4;
 /// Root VCT 예산 상한 (α-β 시간 확보). 2초.
 const ROOT_VCT_BUDGET_CAP_MS: u64 = 2_000;
 /// Root VCT 예산 하한 (너무 짧으면 TT warmup도 못 함).

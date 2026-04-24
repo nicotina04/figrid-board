@@ -31,25 +31,24 @@ pub fn compute_active_features(board: &Board) -> (Vec<usize>, Vec<usize>) {
     let mut stm = Vec::with_capacity(MAX_ACTIVE_FEATURES);
     let mut nstm = Vec::with_capacity(MAX_ACTIVE_FEATURES);
 
-    // === A. PS ===
-    for sq in 0..NUM_CELLS {
-        if my_bb.get(sq) {
-            stm.push(ps_index(0, sq));
-            nstm.push(ps_index(1, sq));
-        } else if opp_bb.get(sq) {
-            stm.push(ps_index(1, sq));
-            nstm.push(ps_index(0, sq));
-        }
+    // === A. PS (stone-driven) ===
+    for sq in my_bb.iter_ones() {
+        stm.push(ps_index(0, sq));
+        nstm.push(ps_index(1, sq));
+    }
+    for sq in opp_bb.iter_ones() {
+        stm.push(ps_index(1, sq));
+        nstm.push(ps_index(0, sq));
     }
 
-    // === B. LP-Rich ===
-    for idx in 0..NUM_CELLS {
+    // === B. LP-Rich (stone-driven) ===
+    // bitboard iter_ones로 돌만 스캔. `for 0..NUM_CELLS`의 빈 칸 분기 제거.
+    // iter_ones는 lowest-idx-first라 기존 순서 완전 보존 (feature push 순서 유지).
+    for idx in my_bb.iter_ones() {
         let row = (idx / BOARD_SIZE) as i32;
         let col = (idx % BOARD_SIZE) as i32;
-
         for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
-            // 자기 라인 (시작 셀에서만)
-            if my_bb.get(idx) && is_line_start(my_bb, row, col, dr, dc) {
+            if is_line_start(my_bb, row, col, dr, dc) {
                 let info = scan_line(my_bb, opp_bb, row, col, dr, dc);
                 let z = zone_for(row, col);
                 let len = length_bucket(info.count);
@@ -57,9 +56,13 @@ pub fn compute_active_features(board: &Board) -> (Vec<usize>, Vec<usize>) {
                 stm.push(lp_rich_index(0, len, op, dir_idx, z));
                 nstm.push(lp_rich_index(1, len, op, dir_idx, z));
             }
-
-            // 상대 라인
-            if opp_bb.get(idx) && is_line_start(opp_bb, row, col, dr, dc) {
+        }
+    }
+    for idx in opp_bb.iter_ones() {
+        let row = (idx / BOARD_SIZE) as i32;
+        let col = (idx % BOARD_SIZE) as i32;
+        for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
+            if is_line_start(opp_bb, row, col, dr, dc) {
                 let info = scan_line(opp_bb, my_bb, row, col, dr, dc);
                 let z = zone_for(row, col);
                 let len = length_bucket(info.count);
@@ -101,56 +104,45 @@ pub fn compute_active_features(board: &Board) -> (Vec<usize>, Vec<usize>) {
     let legal = (NUM_CELLS as u32).saturating_sub(my_count + opp_count);
     push_density(&mut stm, &mut nstm, DENSITY_CAT_LEGAL, count_bucket(legal));
 
-    // === E. Cross-line 3×3 local window hash ===
+    // === E. Cross-line 3×3 local window hash (stone-driven) ===
     // For every stone on the board, encode the 3×3 window around it as a
     // D4-canonicalized 256-bucket hash. Captures 2D interactions the
     // line-based LP-Rich encoder misses (corner squeeze, 十-shapes, etc.).
-    // One activation per stone per perspective: ~40 stones × 2 = ~80 adds
-    // in a filled midgame, well within MAX_ACTIVE_FEATURES = 1024.
-    for sq in 0..NUM_CELLS {
-        if !my_bb.get(sq) && !opp_bb.get(sq) {
-            continue;
-        }
+    // iter_ones로 두 색 돌 순회 — 빈 칸에 대한 early-continue가 아예 없어짐.
+    for sq in my_bb.iter_ones().chain(opp_bb.iter_ones()) {
         let row = (sq / BOARD_SIZE) as i32;
         let col = (sq % BOARD_SIZE) as i32;
 
-        // STM-perspective encoding: mine=1, opp=2, boundary=3.
         let stm_cells = collect_3x3(my_bb, opp_bb, row, col);
         let stm_bucket = cross_line_hash(stm_cells);
         stm.push(cross_line_index(0, stm_bucket));
         nstm.push(cross_line_index(1, stm_bucket));
 
-        // NSTM perspective swaps mine↔opp; the same window under role
-        // swap gets a different canonical bucket, so we emit both
-        // separately rather than sharing.
         let nstm_cells = swap_mine_opp(stm_cells);
         let nstm_bucket = cross_line_hash(nstm_cells);
         stm.push(cross_line_index(1, nstm_bucket));
         nstm.push(cross_line_index(0, nstm_bucket));
     }
 
-    // === F. Broken / Jump patterns ===
-    // 각 자기 돌에서 4방향으로 11칸 창을 읽어 broken three, jump four,
-    // double-broken three 패턴을 감지. scan_line의 연속-only 스캔에서 놓치던
-    // gap 1칸 허용 패턴이 표현 공간에 들어간다. dedup을 위해 방향별 "왼쪽
-    // 앵커 돌"일 때만 push (단일 broken shape 당 최대 1회).
-    for idx in 0..NUM_CELLS {
+    // === F. Broken / Jump patterns (stone-driven) ===
+    // 각 자기 돌에서 4방향 11칸 창을 읽어 broken/jump/double 패턴을 감지.
+    // iter_ones로 돌만 스캔 — 빈 칸 분기 제거.
+    for idx in my_bb.iter_ones() {
         let row = (idx / BOARD_SIZE) as i32;
         let col = (idx % BOARD_SIZE) as i32;
-
-        if my_bb.get(idx) {
-            for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
-                detect_broken_and_push(
-                    my_bb, opp_bb, row, col, dr, dc, dir_idx, 0, 1, &mut stm, &mut nstm,
-                );
-            }
+        for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
+            detect_broken_and_push(
+                my_bb, opp_bb, row, col, dr, dc, dir_idx, 0, 1, &mut stm, &mut nstm,
+            );
         }
-        if opp_bb.get(idx) {
-            for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
-                detect_broken_and_push(
-                    opp_bb, my_bb, row, col, dr, dc, dir_idx, 1, 0, &mut stm, &mut nstm,
-                );
-            }
+    }
+    for idx in opp_bb.iter_ones() {
+        let row = (idx / BOARD_SIZE) as i32;
+        let col = (idx % BOARD_SIZE) as i32;
+        for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
+            detect_broken_and_push(
+                opp_bb, my_bb, row, col, dr, dc, dir_idx, 1, 0, &mut stm, &mut nstm,
+            );
         }
     }
 
@@ -466,39 +458,38 @@ fn compute_compound_threats(
     stm: &mut Vec<usize>,
     nstm: &mut Vec<usize>,
 ) {
-    for idx in 0..NUM_CELLS {
+    // 자기 돌 순회 — iter_ones로 set bit만 스캔 (225-loop-per-empty 제거).
+    // 교차점 hotspot 감지가 목적이므로 `is_line_start` 필터 없이 이 돌 기준
+    // 모든 방향 라인을 스캔한다. 중복은 compound_combo_id에서 단일 위협
+    // 컷오프로 방지.
+    for idx in my_bb.iter_ones() {
         let row = (idx / BOARD_SIZE) as i32;
         let col = (idx % BOARD_SIZE) as i32;
-
-        // 자기 돌에서 4방향 위협 수집 — 교차점 hotspot 감지가 목적이므로
-        // `is_line_start` 필터 없이 이 돌 기준 모든 방향의 라인을 스캔한다.
-        // scan_line 자체가 양방향 스캔이라 중간 돌에서 호출해도 count/openness가
-        // 올바르게 집계됨. 중복은 compound_combo_id에서 단일 위협 컷오프로 방지.
-        if my_bb.get(idx) {
-            let mut threats = [Threat::None; 4];
-            for (di, &(dr, dc)) in DIR.iter().enumerate() {
-                let info = scan_line(my_bb, opp_bb, row, col, dr, dc);
-                let open = info.open_front as u32 + info.open_back as u32;
-                threats[di] = classify_threat(info.count, open);
-            }
-            if let Some(combo) = compound_combo_id(&threats) {
-                stm.push(compound_index(0, combo));
-                nstm.push(compound_index(1, combo));
-            }
+        let mut threats = [Threat::None; 4];
+        for (di, &(dr, dc)) in DIR.iter().enumerate() {
+            let info = scan_line(my_bb, opp_bb, row, col, dr, dc);
+            let open = info.open_front as u32 + info.open_back as u32;
+            threats[di] = classify_threat(info.count, open);
         }
+        if let Some(combo) = compound_combo_id(&threats) {
+            stm.push(compound_index(0, combo));
+            nstm.push(compound_index(1, combo));
+        }
+    }
 
-        // 상대 돌
-        if opp_bb.get(idx) {
-            let mut threats = [Threat::None; 4];
-            for (di, &(dr, dc)) in DIR.iter().enumerate() {
-                let info = scan_line(opp_bb, my_bb, row, col, dr, dc);
-                let open = info.open_front as u32 + info.open_back as u32;
-                threats[di] = classify_threat(info.count, open);
-            }
-            if let Some(combo) = compound_combo_id(&threats) {
-                stm.push(compound_index(1, combo));
-                nstm.push(compound_index(0, combo));
-            }
+    // 상대 돌 순회
+    for idx in opp_bb.iter_ones() {
+        let row = (idx / BOARD_SIZE) as i32;
+        let col = (idx % BOARD_SIZE) as i32;
+        let mut threats = [Threat::None; 4];
+        for (di, &(dr, dc)) in DIR.iter().enumerate() {
+            let info = scan_line(opp_bb, my_bb, row, col, dr, dc);
+            let open = info.open_front as u32 + info.open_back as u32;
+            threats[di] = classify_threat(info.count, open);
+        }
+        if let Some(combo) = compound_combo_id(&threats) {
+            stm.push(compound_index(1, combo));
+            nstm.push(compound_index(0, combo));
         }
     }
 }

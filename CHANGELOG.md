@@ -1,5 +1,21 @@
 # Changes
 
+## 0.5.1 (2026-04-24)
+* **VCT budget expanded**. Three Pela losses analysed via `analyze_psq` showed
+  mate sequences were detected too late at α-β depth 4 (d4 vs d8 mismatch
+  rate 30-54%), while VCT's 625 ms / 14-ply budget was not catching 10+ ply
+  chains that Pela routinely builds. Adjusted to `ROOT_VCT_DEPTH = 20`
+  (10-ply mutual search) and `ROOT_VCT_BUDGET_FRACTION = 4` (5 s turn →
+  1.25 s VCT). `α-β` still gets the remaining 3.75 s.
+* **Stone-driven feature extraction**. `compute_active_features` previously
+  scanned all 225 cells × 6 feature sections with an `if empty` branch on
+  every cell. Replaced with `BitBoard::iter_ones()` (u128×2 bit-walking
+  iterator) so feature loops only visit actual stones. Order-preserving
+  (lowest index first), so feature push order and downstream weights are
+  identical. Net effect: fewer cycles per leaf evaluation, enabling the
+  existing α-β to reach slightly deeper within the same turn budget.
+* No weight changes — v13_broken_rapfi.bin still shipped.
+
 ## 0.5.0 (2026-04-24)
 * **NNUE weights updated → v13_broken_rapfi**. Training backstory in short:
   - The 0.4.x "60% arena" baseline was found to be inflated by two bugs: (a) the

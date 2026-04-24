@@ -998,16 +998,16 @@ mod tests {
     ///
     /// 평시 `cargo test`에서는 `#[ignore]`로 빠짐. weights 파일 경로를
     /// 환경변수로 지정해서 `cargo test -- --ignored --exact …` 로 실행.
-    /// 기본 경로는 crate 루트의 `models/gomoku_v13_broken_rapfi.bin`.
+    /// 기본 경로는 crate 루트의 `models/gomoku_v14_broken_rapfi_wide.bin`.
     #[test]
-    #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v13_broken_rapfi.bin)"]
+    #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v14_broken_rapfi_wide.bin)"]
     fn incremental_matches_full_refresh_real_weights() {
         use crate::board::GameResult;
         use noru::trainer::SimpleRng;
 
         let path = std::env::var("NORU_TEST_WEIGHTS").unwrap_or_else(|_| {
             let manifest = env!("CARGO_MANIFEST_DIR");
-            format!("{}/models/gomoku_v13_broken_rapfi.bin", manifest)
+            format!("{}/models/gomoku_v14_broken_rapfi_wide.bin", manifest)
         });
         let data = std::fs::read(&path)
             .unwrap_or_else(|e| panic!("failed to read weights from {path}: {e}"));

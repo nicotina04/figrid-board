@@ -1,5 +1,26 @@
 # Changes
 
+## 0.5.4 (2026-04-25)
+* **Weights swap: v13 → v14_broken_rapfi_wide**. v14 was trained on a
+  12 999-game Rapfi corpus (9 999 + 3 000 with wider random openings,
+  `--opening-moves 6`) versus v13's 9 999. Internal arena measured v14 at
+  46.7% vs v13's 53.3%, but the arena uses a narrow balanced-opening set
+  and that ~7 pp gap is inside the 30-game noise band (σ ≈ 9 pp). Live
+  Pela matches against 0.5.3 (v13) kept losing with a "slow-grind"
+  trajectory rather than sudden blunders, which points at eval-space
+  blindness to Pela's more off-centre play. The wider-opening v14 saw a
+  lot more of that distribution during distillation, so it's the better
+  candidate to probe whether Pela's wins survive a broader training
+  prior, despite the lower arena number.
+* No engine code change: incremental NNUE, VCT budget, and deadline
+  plumbing are all carried over unmodified from 0.5.3. This release is
+  purely a weights replacement so the comparison stays clean.
+* Default path for the real-weights consistency test is bumped to
+  `models/gomoku_v14_broken_rapfi_wide.bin` to match the shipped binary.
+* Real-game validation once again goes through Piskvork. The arena
+  number on its own cannot decide between v13 and v14; Pela score is
+  the tie-breaker.
+
 ## 0.5.3 (2026-04-25)
 * **True incremental NNUE evaluation**. The 0.5.x pipeline had been paying
   for a full `compute_active_features` pass (225-cell × 6 feature sections)

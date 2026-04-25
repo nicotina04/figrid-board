@@ -3,12 +3,13 @@
 use crate::board::{Board, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::features::{
     broken_index, compound_index, count_bucket, cross_line_hash, cross_line_index, density_index,
-    length_bucket, local_density_bucket, lp_rich_index, open_bucket, ps_index, zone_for,
-    BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE, DENSITY_CAT_LEGAL,
-    DENSITY_CAT_MY_COUNT, DENSITY_CAT_MY_LOCAL, DENSITY_CAT_OPP_COUNT, DENSITY_CAT_OPP_LOCAL,
-    MAX_ACTIVE_FEATURES,
+    length_bucket, local_density_bucket, lp_rich_index, open_bucket, pattern_index, ps_index,
+    zone_for, BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE,
+    DENSITY_CAT_LEGAL, DENSITY_CAT_MY_COUNT, DENSITY_CAT_MY_LOCAL, DENSITY_CAT_OPP_COUNT,
+    DENSITY_CAT_OPP_LOCAL, MAX_ACTIVE_FEATURES,
 };
 use crate::heuristic::{scan_line, DIR};
+use crate::pattern_table::swap_mapped_id;
 use noru::network::{forward, Accumulator, FeatureDelta, NnueWeights};
 use std::sync::OnceLock;
 
@@ -58,9 +59,9 @@ pub fn compute_active_features(board: &Board) -> (Vec<usize>, Vec<usize>) {
 
     let compound_on = compound_enabled();
 
-    // A/B/C/E/F: cell 단위 추출.
+    // A/B/C/E/F/G: cell 단위 추출.
     for sq in my_bb.iter_ones().chain(opp_bb.iter_ones()) {
-        features_from_cell(my_bb, opp_bb, sq, compound_on, &mut stm, &mut nstm);
+        features_from_cell(board, sq, compound_on, &mut stm, &mut nstm);
     }
 
     // D: Density — global + last_move 기반 local.
@@ -78,8 +79,7 @@ pub fn compute_active_features(board: &Board) -> (Vec<usize>, Vec<usize>) {
 /// 독립 계산하고 delta를 Accumulator에 적용할 수 있다.
 #[inline]
 pub(crate) fn features_from_cell(
-    my_bb: &crate::board::BitBoard,
-    opp_bb: &crate::board::BitBoard,
+    board: &Board,
     sq: usize,
     compound_on: bool,
     stm: &mut Vec<usize>,
@@ -88,12 +88,18 @@ pub(crate) fn features_from_cell(
     let row = (sq / BOARD_SIZE) as i32;
     let col = (sq % BOARD_SIZE) as i32;
 
+    // stm 관점에서 my/opp 결정
+    let (my_bb, opp_bb) = match board.side_to_move {
+        Stone::Black => (&board.black, &board.white),
+        Stone::White => (&board.white, &board.black),
+    };
+
     let (stones, opponent, persp_mine, persp_opp) = if my_bb.get(sq) {
         (my_bb, opp_bb, 0, 1)
     } else if opp_bb.get(sq) {
         (opp_bb, my_bb, 1, 0)
     } else {
-        return; // 빈 cell
+        return; // 빈 cell — A/B/C/E/F/G 모두 emit 안 함
     };
 
     // A: PS
@@ -142,6 +148,26 @@ pub(crate) fn features_from_cell(
         detect_broken_and_push(
             stones, opponent, row, col, dr, dc, dir_idx, persp_mine, persp_opp, stm, nstm,
         );
+    }
+
+    // G: Pattern4 mini — line_pattern_ids는 black-relative이므로 stm 관점에
+    // 따라 swap 필요. cell × 4 dir = 4 mapped IDs per perspective.
+    let is_stm_black = matches!(board.side_to_move, Stone::Black);
+    for dir_idx in 0..4 {
+        let id_black = board.line_pattern_ids[sq][dir_idx];
+        let (stm_id, nstm_id) = if is_stm_black {
+            (id_black, swap_mapped_id(id_black))
+        } else {
+            (swap_mapped_id(id_black), id_black)
+        };
+        // stm 관점에서 본 pattern, 그리고 nstm 관점에서 본 pattern.
+        // perspective index 0 = "내 관점에서 mine=stm color"; persp 1 = "내 관점에서 mine=nstm color".
+        // stm features Vec: stm 관점 → mine=stm(persp 0). nstm features Vec: nstm 관점 → mine=nstm(persp 0).
+        // Cross-line 패턴과 통일: stm bucket을 nstm 관점에선 perspective 1 으로 push.
+        stm.push(pattern_index(0, stm_id));
+        nstm.push(pattern_index(1, stm_id));
+        stm.push(pattern_index(1, nstm_id));
+        nstm.push(pattern_index(0, nstm_id));
     }
 }
 
@@ -564,7 +590,7 @@ impl IncrementalEval {
         }
         for sq in my_bb.iter_ones().chain(opp_bb.iter_ones()) {
             let entry = &mut self.cell_features[sq];
-            features_from_cell(my_bb, opp_bb, sq, compound_on, &mut entry.0, &mut entry.1);
+            features_from_cell(board, sq, compound_on, &mut entry.0, &mut entry.1);
         }
 
         // density_features
@@ -633,7 +659,7 @@ impl IncrementalEval {
         for &c in &cells {
             new_stm_buf.clear();
             new_nstm_buf.clear();
-            features_from_cell(my_bb, opp_bb, c, compound_on, &mut new_stm_buf, &mut new_nstm_buf);
+            features_from_cell(board, c, compound_on, &mut new_stm_buf, &mut new_nstm_buf);
 
             let (old_stm, old_nstm) = &self.cell_features[c];
             if old_stm.as_slice() == new_stm_buf.as_slice()
@@ -998,9 +1024,9 @@ mod tests {
     ///
     /// 평시 `cargo test`에서는 `#[ignore]`로 빠짐 — weights 파일 경로를
     /// 환경변수로 지정해서 `cargo test -- --ignored --exact …` 로 실행.
-    /// 기본 경로는 워크스페이스 루트의 `models/gomoku_v13_broken_rapfi.bin`.
+    /// 기본 경로는 워크스페이스 루트의 `models/gomoku_v18_small_p4_rapfi.bin`.
     #[test]
-    #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v13_broken_rapfi.bin)"]
+    #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v18_small_p4_rapfi.bin)"]
     fn incremental_matches_full_refresh_real_weights() {
         use crate::board::GameResult;
         use noru::trainer::SimpleRng;
@@ -1008,7 +1034,7 @@ mod tests {
         let path = std::env::var("NORU_TEST_WEIGHTS").unwrap_or_else(|_| {
             // crate는 crates/gomoku-engine, weights는 workspace root의 models/.
             let manifest = env!("CARGO_MANIFEST_DIR");
-            format!("{}/../../models/gomoku_v13_broken_rapfi.bin", manifest)
+            format!("{}/models/gomoku_v18_small_p4_rapfi.bin", manifest)
         });
         let data = std::fs::read(&path)
             .unwrap_or_else(|e| panic!("failed to read weights from {path}: {e}"));

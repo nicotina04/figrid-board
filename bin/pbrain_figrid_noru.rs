@@ -10,7 +10,7 @@ use std::time::Duration;
 use figrid_board::{to_idx, Board, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
 use noru::network::NnueWeights;
 
-const WEIGHTS_BYTES: &[u8] = include_bytes!("../models/gomoku_v14_broken_rapfi_wide.bin");
+const WEIGHTS_BYTES: &[u8] = include_bytes!("../models/gomoku_v18_small_p4_rapfi.bin");
 
 const MAX_DEPTH: u32 = 20;
 const DEFAULT_TIMEOUT_MS: i64 = 30_000;

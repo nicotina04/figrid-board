@@ -181,6 +181,15 @@ pub const fn zobrist_stone_key(stone: Stone, cell: usize) -> u64 {
     zobrist::key_for(stone, cell)
 }
 
+/// 4 directional 11-cell line pattern mapped IDs per cell.
+/// Pattern4 mini의 incremental state cache. 값 ∈ [0, PATTERN_NUM_IDS)
+/// (= 0..16385): top 16K mapped + rare bucket 16384. u16에 들어감.
+///
+/// Black-relative storage: 1=black, 2=white로 read_window. side_to_move
+/// 변경에 따라 ID 재계산 안 함 (perspective 변환은 NNUE feature 매핑
+/// 단계에서 처리).
+pub type LinePatternState = Box<[[u16; 4]; NUM_CELLS]>;
+
 #[derive(Clone)]
 pub struct Board {
     pub black: BitBoard,
@@ -194,21 +203,53 @@ pub struct Board {
     /// 보드 상태(돌 배치 + side_to_move)의 64-bit fingerprint —
     /// transposition table 키로 사용.
     pub zobrist: u64,
+    /// Pattern4 mini state cache. 각 (cell, dir) 11-cell 윈도우의
+    /// canonical pattern ID (black-relative). 빈 보드는 모두 ID 0
+    /// (empty_pattern_id). make/undo가 영향받는 cell의 ID만 lookup으로
+    /// 재계산해 region recompute를 피함. NNUE feature 매핑은 Phase 3에서.
+    pub line_pattern_ids: LinePatternState,
 }
 
 impl Board {
     pub fn new() -> Self {
-        Self {
+        let mut b = Self {
             black: BitBoard::EMPTY,
             white: BitBoard::EMPTY,
             side_to_move: Stone::Black,
             move_count: 0,
             last_move: None,
             history: Vec::with_capacity(NUM_CELLS),
-            // 빈 보드 + Black to move = 0 ^ SIDE = SIDE.
-            // 관례: side_to_move == Black일 때 SIDE 키 없음.
-            // 더 단순하게 빈 키 0으로 시작하고 side toggle은 make_move 마다 XOR.
+            // 빈 보드 + Black to move 의 zobrist 는 0.
             zobrist: 0,
+            // 정확한 초기값은 fill_initial_pattern_ids 에서 채움 (가장자리는
+            // boundary 포함이라 ID ≠ 0).
+            line_pattern_ids: Box::new([[0u16; 4]; NUM_CELLS]),
+        };
+        b.fill_initial_pattern_ids();
+        b
+    }
+
+    /// 빈 보드 기준 모든 (cell, dir) line pattern mapped ID를 lookup해 채움.
+    /// new() 에서만 호출. 가장자리 cell은 boundary 포함 패턴이라 빈 cell의
+    /// 안쪽 ID(보통 0)과 다른 mapped ID로 채워짐.
+    fn fill_initial_pattern_ids(&mut self) {
+        const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+        for cell in 0..NUM_CELLS {
+            let row = (cell / BOARD_SIZE) as i32;
+            let col = (cell % BOARD_SIZE) as i32;
+            for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
+                let w = crate::pattern_table::read_window(
+                    &self.black,
+                    &self.white,
+                    row,
+                    col,
+                    dr,
+                    dc,
+                );
+                let packed = crate::pattern_table::pack_window(&w);
+                self.line_pattern_ids[cell][dir_idx] =
+                    crate::pattern_table::lookup_mapped_id(packed);
+            }
         }
     }
 
@@ -305,6 +346,10 @@ impl Board {
         self.last_move = Some(mv);
         self.move_count += 1;
         self.side_to_move = placed.opponent();
+
+        // Pattern4 mini state cache: mv 주변 4방향 ±5 cell의 pattern_id 갱신.
+        // black-relative: read_window의 첫 인자 = black. side_to_move 무관.
+        self.update_line_patterns_around(mv);
     }
 
     /// 착수 취소
@@ -322,6 +367,41 @@ impl Board {
             self.zobrist ^= ZOBRIST_SIDE;
 
             self.last_move = self.history.last().copied();
+
+            // Pattern4 state cache: mv 주변 4방향 ±5 cell 다시 read+lookup.
+            // mv는 이미 cleared된 상태라 새 윈도우에서 mv = empty.
+            self.update_line_patterns_around(mv);
+        }
+    }
+
+    /// `mv` 주변 4방향 각 ±5 cell (총 ~30~44 cell-dir 쌍)의 11-cell window
+    /// pattern ID를 다시 lookup해 cache 갱신. 보드 경계로 일부 잘림.
+    /// black-relative — read_window의 첫 인자 = black, 둘째 = white.
+    #[inline]
+    fn update_line_patterns_around(&mut self, mv: Move) {
+        const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+        let row = (mv / BOARD_SIZE) as i32;
+        let col = (mv % BOARD_SIZE) as i32;
+        for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
+            for offset in -5i32..=5 {
+                let r = row + dr * offset;
+                let c = col + dc * offset;
+                if r < 0 || r >= BOARD_SIZE as i32 || c < 0 || c >= BOARD_SIZE as i32 {
+                    continue;
+                }
+                let cell = (r as usize) * BOARD_SIZE + c as usize;
+                let w = crate::pattern_table::read_window(
+                    &self.black,
+                    &self.white,
+                    r,
+                    c,
+                    dr,
+                    dc,
+                );
+                let packed = crate::pattern_table::pack_window(&w);
+                self.line_pattern_ids[cell][dir_idx] =
+                    crate::pattern_table::lookup_mapped_id(packed);
+            }
         }
     }
 
@@ -469,6 +549,77 @@ mod tests {
             );
         }
         assert_eq!(board.zobrist, 0, "zobrist did not return to 0 after full undo");
+    }
+
+    /// Pattern4 state cache 정합성: incremental update 결과가 같은 보드를
+    /// 처음부터 fill_initial_pattern_ids 로 채운 결과와 모든 (cell, dir)에서
+    /// 동일해야 한다. region recompute가 아닌 진짜 incremental의 핵심 invariant.
+    #[test]
+    fn line_pattern_state_make_undo_consistency() {
+        const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+        let moves = [112, 113, 97, 98, 127, 128, 200, 14, 0, 224, 7, 217, 50, 100];
+
+        let mut board = Board::new();
+        let initial_ids = board.line_pattern_ids.clone();
+
+        // make_move 각 단계마다 incremental ids == 처음부터 재계산한 ids
+        for (i, &mv) in moves.iter().enumerate() {
+            if !board.is_empty(mv) {
+                continue;
+            }
+            board.make_move(mv);
+
+            // incremental 후 fresh 보드 재구성 (history replay) + fill_initial 비교
+            let mut fresh = Board::new();
+            for &m in &moves[..=i] {
+                if fresh.is_empty(m) {
+                    fresh.make_move(m);
+                }
+            }
+            // 또는 더 강하게: 직접 처음부터 재구성한 board의 line_pattern_ids
+            // == 우리 incremental board의 line_pattern_ids
+            // fresh 도 incremental 사용하므로 다른 검증: 직접 read_window 계산
+            for cell in 0..NUM_CELLS {
+                let row = (cell / BOARD_SIZE) as i32;
+                let col = (cell % BOARD_SIZE) as i32;
+                for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
+                    let w = crate::pattern_table::read_window(
+                        &board.black,
+                        &board.white,
+                        row,
+                        col,
+                        dr,
+                        dc,
+                    );
+                    let packed = crate::pattern_table::pack_window(&w);
+                    let expected = crate::pattern_table::lookup_mapped_id(packed);
+                    let actual = board.line_pattern_ids[cell][dir_idx];
+                    assert_eq!(
+                        actual, expected,
+                        "mismatch at cell {} dir {} after move {} (ply {})",
+                        cell, dir_idx, mv, i + 1
+                    );
+                }
+            }
+        }
+
+        // undo 모두 → initial ids 복원
+        for _ in 0..moves.len() {
+            if !board.history.is_empty() {
+                board.undo_move();
+            }
+        }
+        assert_eq!(board.move_count, 0);
+        // initial board 와 같은 ids
+        for cell in 0..NUM_CELLS {
+            for d in 0..4 {
+                assert_eq!(
+                    board.line_pattern_ids[cell][d], initial_ids[cell][d],
+                    "after full undo: cell {} dir {} not restored",
+                    cell, d
+                );
+            }
+        }
     }
 
     /// 수 순서 무관 same position → same zobrist.

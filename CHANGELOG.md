@@ -1,5 +1,33 @@
 # Changes
 
+## 0.6.0 (2026-04-25)
+* **Pattern4 mini integrated.** Eleven-cell line patterns are now part of
+  the NNUE feature space. The new `pattern_table` module enumerates the
+  ~200k canonical 11-cell windows, dumps the top 16 384 by frequency
+  (measured on PSQ + Rapfi data, 99.24% coverage) into a 64 KB
+  `data/top16k.bin`, and at runtime serves an O(1) `lookup_mapped_id` from
+  a 4 M-entry lazy dense table. Each cell carries 4 line pattern IDs (one
+  per direction) maintained incrementally on `make_move`/`undo_move` —
+  black-relative storage, with a small swap table for stm-perspective
+  lookups. A new G section in the feature layout adds 16 385 IDs ×
+  perspective(2) = 32 770 features, growing `TOTAL_FEATURE_SIZE` from
+  4 096 to 36 864.
+* **Weights swap to v18_small_p4_rapfi.** Trained from scratch on the
+  expanded feature space: small network (512 acc / 1×64 hidden) + PSQ 1 M
+  base (15 epoch, lr 1e-3) + Rapfi 33 k distillation with PSQ 500 k
+  anchor (3 epoch, lr 2e-6). Real-weights consistency harness passes 100
+  trials × 160 plies with no saturation divergence.
+* Internal arena puts v18 at 53.3 %, identical to v13. The Pattern4
+  mini's contribution does not show up against the heuristic opponent —
+  loss did drop further (0.564 → 0.472), but the win rate stays flat,
+  consistent with feature redundancy against existing PS / LP-Rich /
+  Compound / Cross-line / Broken sections. The arena alone cannot tell
+  whether the new line patterns help in real play; this release ships
+  the weights specifically so live Pela matches can be inspected.
+* No engine algorithm change. TT, iterative deepening, VCT budget, and
+  the Searcher plumbing all carry over from 0.5.5 unchanged. The 128-node
+  deadline check remains figrid-specific.
+
 ## 0.5.5 (2026-04-25)
 * **Transposition table on the α-β path.** A 2 MB table (16-bit bucket index,
   two slots per bucket: depth-preferred + always-replace) caches each node's

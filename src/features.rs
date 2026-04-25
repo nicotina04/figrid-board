@@ -1,14 +1,19 @@
-//! 오목 NNUE 피처 인코딩 (4096 슬롯).
+//! 오목 NNUE 피처 인코딩 (Pattern4 mini 확장 후 36 864 슬롯).
 //!
 //! ```text
-//! [0..450)      A. PS (Piece-Square)              : 225 × persp(2) = 450
-//! [450..2754)   B. LP-Rich                        : persp(2) × len(8) × open(4) × dir(4) × zone(9) = 2304
-//! [2754..2854)  C. Compound Threats               : combo(50) × persp(2) = 100
-//! [2854..2904)  D. Density / Mobility             : category(5) × bucket(10) = 50
-//! [2904..3416)  E. Cross-line (3×3 local hash)    : bucket(256) × persp(2) = 512
-//! [3416..3848)  F. Broken / Jump patterns         : shape(3) × open(2) × dir(4) × zone(9) × persp(2) = 432
-//! [3848..4096)  R. Reserved (학습 후 확장용)       : 248
+//! [0..450)         A. PS (Piece-Square)              : 225 × persp(2) = 450
+//! [450..2754)      B. LP-Rich                        : persp(2) × len(8) × open(4) × dir(4) × zone(9) = 2304
+//! [2754..2854)     C. Compound Threats               : combo(50) × persp(2) = 100
+//! [2854..2904)     D. Density / Mobility             : category(5) × bucket(10) = 50
+//! [2904..3416)     E. Cross-line (3×3 local hash)    : bucket(256) × persp(2) = 512
+//! [3416..3848)     F. Broken / Jump patterns         : shape(3) × open(2) × dir(4) × zone(9) × persp(2) = 432
+//! [3848..36 618)   G. Pattern4 mini (line patterns)  : mapped_id(16385) × persp(2) = 32 770
+//! [36 618..36 864) R. Reserved (정렬용 padding)       : 246
 //! ```
+//! G section은 Pattern4 mini의 NNUE 통합. Top 16K canonical 11-cell line
+//! patterns + 1 rare bucket을 perspective 2개로 emit. dir 정보는 같은
+//! pattern_id가 가로/세로/대각 모두 같은 weights를 공유하도록 통합 (lossy
+//! 절충). 학습 시 stone cell의 4방향 mapped IDs가 모두 활성.
 
 use noru::config::{Activation, NnueConfig};
 
@@ -22,8 +27,11 @@ pub const COMPOUND_BASE: usize = 2754;
 pub const DENSITY_BASE: usize = 2854;
 pub const CROSS_LINE_BASE: usize = 2904;
 pub const BROKEN_BASE: usize = 3416;
-pub const RESERVED_BASE: usize = 3848;
-pub const TOTAL_FEATURE_SIZE: usize = 4096;
+pub const PATTERN_BASE: usize = 3848;
+/// Pattern4 mini: 16 384 mapped + 1 rare bucket = 16 385 IDs per perspective.
+pub const PATTERN_PER_PERSP: usize = crate::pattern_table::PATTERN_NUM_IDS; // 16 385
+pub const RESERVED_BASE: usize = PATTERN_BASE + PATTERN_PER_PERSP * 2; // 36 618
+pub const TOTAL_FEATURE_SIZE: usize = 36_864; // 36 618 + 246 padding (multiple of 256)
 
 // ===== A. PS =====
 pub const PS_PER_PERSP: usize = NUM_SQUARES; // 225
@@ -79,11 +87,11 @@ pub const CROSS_LINE_BUCKETS: usize = 256;
 pub const CROSS_LINE_PER_PERSP: usize = CROSS_LINE_BUCKETS;
 
 // ===== 활성 피처 상한 =====
-// Cross-line activates ~4 per stone (2 perspectives × 2 colors), so a
-// fully packed 225-stone board adds ~900. Keep headroom over the old
-// 1024 ceiling; 1536 still fits in the sparse feature buffer without
-// heap churn in practice.
-pub const MAX_ACTIVE_FEATURES: usize = 1536;
+// Pattern4 mini 추가로 stone cell마다 4방향 × 2 perspective = 8 emit.
+// 30 stones × 8 = 240 추가. 기존 cap 1536 + 600 여유 = 2400.
+// 빈 보드에서도 가장자리 boundary patterns가 emit될 수 있어 보수적으로
+// 4096까지 확장.
+pub const MAX_ACTIVE_FEATURES: usize = 4096;
 
 // 큰 네트워크(1024 acc + 2×128 hidden, v15/v16) 실험 결과 generalization
 // 악화 (v16 아레나 30%, v13의 53%보다 -23pp). 4.5M params / 1.1M samples
@@ -101,7 +109,8 @@ const _: () = assert!(COMPOUND_BASE == LP_BASE + LP_PER_PERSP * 2);
 const _: () = assert!(DENSITY_BASE == COMPOUND_BASE + COMPOUND_PER_PERSP * 2);
 const _: () = assert!(CROSS_LINE_BASE == DENSITY_BASE + DENSITY_NUM_CATEGORIES * DENSITY_NUM_BUCKETS);
 const _: () = assert!(BROKEN_BASE == CROSS_LINE_BASE + CROSS_LINE_PER_PERSP * 2);
-const _: () = assert!(RESERVED_BASE == BROKEN_BASE + BROKEN_PER_PERSP * 2);
+const _: () = assert!(PATTERN_BASE == BROKEN_BASE + BROKEN_PER_PERSP * 2);
+const _: () = assert!(RESERVED_BASE == PATTERN_BASE + PATTERN_PER_PERSP * 2);
 const _: () = assert!(RESERVED_BASE <= TOTAL_FEATURE_SIZE);
 
 // ===================================================================
@@ -114,6 +123,15 @@ pub fn ps_index(perspective: usize, square: usize) -> usize {
     debug_assert!(perspective < 2);
     debug_assert!(square < NUM_SQUARES);
     PS_BASE + perspective * PS_PER_PERSP + square
+}
+
+/// G 섹션 (Pattern4 mini) 인덱스. mapped pattern ID는 0..PATTERN_NUM_IDS,
+/// perspective는 0=stm, 1=nstm.
+#[inline]
+pub fn pattern_index(perspective: usize, mapped_id: u16) -> usize {
+    debug_assert!(perspective < 2);
+    debug_assert!((mapped_id as usize) < PATTERN_PER_PERSP);
+    PATTERN_BASE + perspective * PATTERN_PER_PERSP + mapped_id as usize
 }
 
 /// LP-Rich 인덱스.
@@ -320,9 +338,13 @@ mod tests {
         assert_eq!(CROSS_LINE_PER_PERSP * 2 + CROSS_LINE_BASE, BROKEN_BASE);
         assert_eq!(BROKEN_BASE, 3416);
         assert_eq!(BROKEN_PER_PERSP, 216);
-        assert_eq!(BROKEN_PER_PERSP * 2 + BROKEN_BASE, RESERVED_BASE);
-        assert_eq!(RESERVED_BASE, 3848);
-        assert!(RESERVED_BASE < TOTAL_FEATURE_SIZE);
+        assert_eq!(BROKEN_PER_PERSP * 2 + BROKEN_BASE, PATTERN_BASE);
+        assert_eq!(PATTERN_BASE, 3848);
+        assert_eq!(PATTERN_PER_PERSP, 16_385); // 16 384 + 1 rare
+        assert_eq!(PATTERN_PER_PERSP * 2 + PATTERN_BASE, RESERVED_BASE);
+        assert_eq!(RESERVED_BASE, 36_618);
+        assert!(RESERVED_BASE <= TOTAL_FEATURE_SIZE);
+        assert_eq!(TOTAL_FEATURE_SIZE, 36_864);
     }
 
     #[test]

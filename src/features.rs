@@ -85,6 +85,9 @@ pub const CROSS_LINE_PER_PERSP: usize = CROSS_LINE_BUCKETS;
 // heap churn in practice.
 pub const MAX_ACTIVE_FEATURES: usize = 1536;
 
+// 큰 네트워크(1024 acc + 2×128 hidden, v15/v16) 실험 결과 generalization
+// 악화 (v16 아레나 30%, v13의 53%보다 -23pp). 4.5M params / 1.1M samples
+// 비율(4:1)에서 overfit 의심. 작은 네트워크(v13 검증)로 회귀.
 pub const GOMOKU_NNUE_CONFIG: NnueConfig = NnueConfig {
     feature_size: TOTAL_FEATURE_SIZE,
     accumulator_size: 512,

@@ -131,6 +131,56 @@ pub fn to_idx(row: usize, col: usize) -> usize {
     row * BOARD_SIZE + col
 }
 
+/// Zobrist 키 — 보드 상태의 고유 해시.
+/// `(cell, color)` 별로 고정 random u64를 XOR 해서 만든다.
+/// `side_to_move` 도 별도 키로 toggle. make/undo 시 incremental XOR 갱신.
+mod zobrist {
+    use super::{NUM_CELLS, Stone};
+
+    /// 결정적이지만 잘 분산된 splitmix64 변형으로 컴파일 타임 키 생성.
+    const fn splitmix64(seed: u64) -> u64 {
+        let mut x = seed;
+        x = x.wrapping_add(0x9E3779B97F4A7C15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+        x ^ (x >> 31)
+    }
+
+    const fn build_keys() -> [[u64; NUM_CELLS]; 2] {
+        let mut out = [[0u64; NUM_CELLS]; 2];
+        let mut color = 0;
+        while color < 2 {
+            let mut cell = 0;
+            while cell < NUM_CELLS {
+                let seed = (color as u64) * 0x9E3779B97F4A7C15 ^ (cell as u64);
+                out[color][cell] = splitmix64(seed);
+                cell += 1;
+            }
+            color += 1;
+        }
+        out
+    }
+
+    pub const STONE_KEYS: [[u64; NUM_CELLS]; 2] = build_keys();
+    pub const SIDE_TO_MOVE_KEY: u64 = splitmix64(0xCAFE_BABE_DEAD_BEEF);
+
+    #[inline]
+    pub const fn key_for(stone: Stone, cell: usize) -> u64 {
+        let color = match stone {
+            Stone::Black => 0,
+            Stone::White => 1,
+        };
+        STONE_KEYS[color][cell]
+    }
+}
+
+pub use zobrist::SIDE_TO_MOVE_KEY as ZOBRIST_SIDE;
+
+#[inline]
+pub const fn zobrist_stone_key(stone: Stone, cell: usize) -> u64 {
+    zobrist::key_for(stone, cell)
+}
+
 #[derive(Clone)]
 pub struct Board {
     pub black: BitBoard,
@@ -140,6 +190,10 @@ pub struct Board {
     pub last_move: Option<Move>,
     /// 착수 이력 (undo를 위해)
     pub history: Vec<Move>,
+    /// Zobrist 해시. make_move/undo_move에서 XOR로 incremental 갱신.
+    /// 보드 상태(돌 배치 + side_to_move)의 64-bit fingerprint —
+    /// transposition table 키로 사용.
+    pub zobrist: u64,
 }
 
 impl Board {
@@ -151,6 +205,10 @@ impl Board {
             move_count: 0,
             last_move: None,
             history: Vec::with_capacity(NUM_CELLS),
+            // 빈 보드 + Black to move = 0 ^ SIDE = SIDE.
+            // 관례: side_to_move == Black일 때 SIDE 키 없음.
+            // 더 단순하게 빈 키 0으로 시작하고 side toggle은 make_move 마다 XOR.
+            zobrist: 0,
         }
     }
 
@@ -234,25 +292,35 @@ impl Board {
         debug_assert!(mv < NUM_CELLS);
         debug_assert!(self.is_empty(mv));
 
-        match self.side_to_move {
+        let placed = self.side_to_move;
+        match placed {
             Stone::Black => self.black.set(mv),
             Stone::White => self.white.set(mv),
         }
+        // Zobrist incremental: 새 돌의 (color, cell) 키 XOR + side toggle.
+        self.zobrist ^= zobrist_stone_key(placed, mv);
+        self.zobrist ^= ZOBRIST_SIDE;
+
         self.history.push(mv);
         self.last_move = Some(mv);
         self.move_count += 1;
-        self.side_to_move = self.side_to_move.opponent();
+        self.side_to_move = placed.opponent();
     }
 
     /// 착수 취소
     pub fn undo_move(&mut self) {
         if let Some(mv) = self.history.pop() {
             self.side_to_move = self.side_to_move.opponent();
+            let placed = self.side_to_move;
             self.move_count -= 1;
-            match self.side_to_move {
+            match placed {
                 Stone::Black => self.black.clear(mv),
                 Stone::White => self.white.clear(mv),
             }
+            // Zobrist는 XOR이라 같은 키 한 번 더 적용 = 원복.
+            self.zobrist ^= zobrist_stone_key(placed, mv);
+            self.zobrist ^= ZOBRIST_SIDE;
+
             self.last_move = self.history.last().copied();
         }
     }
@@ -371,6 +439,63 @@ mod tests {
         assert!(!board.black.get(mv));
         assert_eq!(board.side_to_move, Stone::Black);
         assert_eq!(board.move_count, 0);
+    }
+
+    /// Zobrist 정합성: make/undo가 incremental XOR로 정확히 원복되는지.
+    #[test]
+    fn zobrist_make_undo_roundtrip() {
+        let mut board = Board::new();
+        let initial = board.zobrist;
+        assert_eq!(initial, 0, "empty board zobrist should be 0");
+
+        let moves = [112, 113, 97, 98, 127, 128, 200, 14];
+        let mut keys = vec![initial];
+        for &m in &moves {
+            board.make_move(m);
+            keys.push(board.zobrist);
+        }
+        // 모든 중간 키가 unique해야 함 (충돌 없는 상태에서)
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), keys.len(), "zobrist sequence collided");
+
+        // undo 시 역순으로 정확히 같은 키 복귀
+        for i in (1..keys.len()).rev() {
+            board.undo_move();
+            assert_eq!(
+                board.zobrist, keys[i - 1],
+                "zobrist mismatch after undo step {i}"
+            );
+        }
+        assert_eq!(board.zobrist, 0, "zobrist did not return to 0 after full undo");
+    }
+
+    /// 수 순서 무관 same position → same zobrist.
+    /// 두 시퀀스가 같은 final position을 만들면 zobrist도 같아야 함.
+    #[test]
+    fn zobrist_path_independence() {
+        let seq1 = [112, 113, 97, 98]; // B(7,7) W(7,8) B(6,7) W(6,8)
+        let seq2 = [112, 98, 97, 113]; // 같은 4 돌, 다른 순서 — 단 흑/백 같은 셀에 두는 순서 보존되어야 함
+
+        // seq2 invalid (흑이 (7,7)→(6,8)→(6,7)→(7,8) 순서로 두면 백도 다른 셀)
+        // 정확한 path-equivalent 짝: 두 흑 수 순서 바꾸기
+        // seq1: B(112), W(113), B(97), W(98)  → black={112,97}, white={113,98}
+        // seq2: B(97), W(113), B(112), W(98)  → black={97,112}, white={113,98}  같은 final
+        let seq2 = [97, 113, 112, 98];
+
+        let mut b1 = Board::new();
+        for &m in &seq1 { b1.make_move(m); }
+        let mut b2 = Board::new();
+        for &m in &seq2 { b2.make_move(m); }
+
+        assert_eq!(b1.black.lo, b2.black.lo);
+        assert_eq!(b1.black.hi, b2.black.hi);
+        assert_eq!(b1.white.lo, b2.white.lo);
+        assert_eq!(b1.white.hi, b2.white.hi);
+        assert_eq!(b1.side_to_move, b2.side_to_move);
+
+        assert_eq!(b1.zobrist, b2.zobrist, "same position should have same zobrist");
     }
 
     #[test]

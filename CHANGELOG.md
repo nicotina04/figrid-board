@@ -1,5 +1,34 @@
 # Changes
 
+## 0.5.5 (2026-04-25)
+* **Transposition table on the α-β path.** A 2 MB table (16-bit bucket index,
+  two slots per bucket: depth-preferred + always-replace) caches each node's
+  result keyed by Zobrist hash. Iterative deepening now reuses the previous
+  iteration's PV and cutoffs without re-searching the same positions, and
+  the TT-best move is pulled to the front of the move list so the PVS
+  null-window search hits the right move first. Empty bound, exact / lower
+  / upper kinds are all handled; only entries whose stored depth meets or
+  exceeds the current need can short-circuit.
+* **Zobrist hashing on `Board`.** A new `zobrist: u64` field is updated
+  incrementally in `make_move` / `undo_move` (XOR of the placed stone's
+  `(color, square)` key plus the side-to-move toggle). Stone keys are
+  generated at compile time from a deterministic splitmix64 seed schedule,
+  so no runtime initialization or randomness is involved. Two regression
+  tests cover make/undo round-trip back to zero and same-position-same-key
+  invariance under move-order permutations.
+* **Reverted the 1024-acc / 2×128 hidden network experiment.** It was
+  shipped briefly as a 0.5.x prototype on noru-tactic v15/v16 weights, but
+  the 30-game arena landed at 30 % (vs. v13's 53 %): a parameter-to-sample
+  ratio of roughly 4-to-1 that was clearly over-fitting on our distillation
+  set. `GOMOKU_NNUE_CONFIG` is back to 512-acc / 1×64 hidden, the same
+  shape `v13_broken_rapfi.bin` was trained against, so existing v13/v14
+  weights load cleanly again.
+* The shipped binary still embeds `v14_broken_rapfi_wide.bin` from 0.5.4
+  unchanged. The expected gain in this release is search-side: live
+  Piskvork play should reach one or two extra plies inside the same time
+  budget, and the TT/PV interaction should reduce the kind of "self
+  re-discovery" patterns the 0.5.4 analyses showed in the middlegame.
+
 ## 0.5.4 (2026-04-25)
 * **Weights swap: v13 → v14_broken_rapfi_wide**. v14 was trained on a
   12 999-game Rapfi corpus (9 999 + 3 000 with wider random openings,

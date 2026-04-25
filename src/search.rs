@@ -9,6 +9,7 @@
 use crate::board::{Board, GameResult, Move, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::eval::IncrementalEval;
 use crate::heuristic::{scan_line, DIR};
+use crate::transposition::{Bound, TranspositionTable};
 use crate::vct::{classify_move, search_vct, ThreatKind, VctConfig};
 use noru::network::NnueWeights;
 use std::time::{Duration, Instant};
@@ -27,6 +28,9 @@ const ROOT_VCT_BUDGET_CAP_MS: u64 = 2_000;
 /// Root VCT 예산 하한 (너무 짧으면 TT warmup도 못 함).
 const ROOT_VCT_BUDGET_FLOOR_MS: u64 = 100;
 
+/// α-β TT 버킷 수 = 2^N. 16 → 65 536 버킷 = 2 MB.
+const TT_BUCKET_BITS: u32 = 16;
+
 /// 탐색 결과
 pub struct SearchResult {
     pub best_move: Option<Move>,
@@ -42,6 +46,10 @@ pub struct Searcher {
     history: [[i32; NUM_CELLS]; 2],
     deadline: Option<Instant>,
     aborted: bool,
+    /// α-β 노드 결과 캐시. 같은 포지션을 여러 번 탐색 안 하도록.
+    /// search 호출 사이에 보존되어 iterative deepening 다음 iteration에서
+    /// 이전 iteration의 PV/cutoff 정보를 그대로 활용.
+    tt: TranspositionTable,
 }
 
 impl Searcher {
@@ -52,6 +60,7 @@ impl Searcher {
             history: [[0; NUM_CELLS]; 2],
             deadline: None,
             aborted: false,
+            tt: TranspositionTable::new(TT_BUCKET_BITS),
         }
     }
 
@@ -68,6 +77,10 @@ impl Searcher {
         self.killers = [[None; 2]; 64];
         self.history = [[0; NUM_CELLS]; 2];
         self.deadline = time_limit.map(|d| Instant::now() + d);
+        // 다음 search 호출이 새 게임 포지션부터일 수 있으므로 TT 비움.
+        // 같은 search() 호출 내 iterative deepening 사이에는 TT가 유지되어
+        // 깊은 iteration이 얕은 iteration의 cutoff/PV 정보를 그대로 활용.
+        self.tt.clear();
 
         // Root VCT: 짧은 시간 안에 강제 승리 수열을 찾으면 α-β 건너뜀.
         // Dynamic budget — 턴 예산의 1/ROOT_VCT_BUDGET_FRACTION (cap/floor 적용).
@@ -198,7 +211,7 @@ impl Searcher {
     ) -> i32 {
         self.nodes += 1;
 
-        // 시간 체크 (128 노드마다 — NNUE 평가가 무거워서 1024 주기는 deadline을 수십 ms 넘기곤 함)
+        // 시간 체크 (1024 노드마다)
         if self.nodes & 127 == 0 {
             if let Some(deadline) = self.deadline {
                 if Instant::now() >= deadline {
@@ -222,12 +235,45 @@ impl Searcher {
             return inc.eval(weights);
         }
 
-        let moves = self.order_moves(board, ply);
+        // === TT lookup ===
+        // 같은 zobrist key + 충분한 depth로 이미 탐색했다면 재사용.
+        // bound 종류에 따라 alpha/beta cutoff 가능.
+        let original_alpha = alpha;
+        let tt_hit = self.tt.probe(board.zobrist);
+        let mut tt_move: Option<Move> = None;
+        if let Some(entry) = tt_hit {
+            tt_move = if entry.best_move == u16::MAX {
+                None
+            } else {
+                Some(entry.best_move as Move)
+            };
+            if entry.depth as u32 >= depth {
+                let cached = entry.score;
+                match entry.bound {
+                    Bound::Exact => return cached,
+                    Bound::Lower if cached >= beta => return cached,
+                    Bound::Upper if cached <= alpha => return cached,
+                    _ => {}
+                }
+            }
+        }
+
+        let mut moves = self.order_moves(board, ply);
         if moves.is_empty() {
             return 0;
         }
 
+        // TT-best move를 맨 앞으로 (PVS에서 가장 큰 cutoff 효과).
+        if let Some(tt_mv) = tt_move {
+            if let Some(pos) = moves.iter().position(|&m| m == tt_mv) {
+                if pos != 0 {
+                    moves.swap(0, pos);
+                }
+            }
+        }
+
         let mut best_score = -INF;
+        let mut best_move_at_node: Option<Move> = None;
         let side = board.side_to_move as usize;
 
         // PVS (Principal Variation Search):
@@ -272,6 +318,7 @@ impl Searcher {
 
             if score > best_score {
                 best_score = score;
+                best_move_at_node = Some(mv);
             }
             if score > alpha {
                 alpha = score;
@@ -285,6 +332,27 @@ impl Searcher {
                 break;
             }
         }
+
+        // === TT store ===
+        // bound 분류:
+        //   - best_score <= original_alpha → fail-low (Upper bound, true value ≤)
+        //   - best_score >= beta            → fail-high (Lower bound, true value ≥)
+        //   - 그 외                          → Exact PV node
+        let bound = if best_score <= original_alpha {
+            Bound::Upper
+        } else if best_score >= beta {
+            Bound::Lower
+        } else {
+            Bound::Exact
+        };
+        // depth가 u8로 들어가니 saturate. 우리 max_depth ≤ 20이라 문제 없음.
+        self.tt.store(
+            board.zobrist,
+            best_score,
+            depth.min(255) as u8,
+            bound,
+            best_move_at_node,
+        );
 
         best_score
     }

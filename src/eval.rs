@@ -992,28 +992,32 @@ mod tests {
     }
 
     /// Real-weights consistency harness. noru의 i16 accumulator 연산은
-    /// saturating이라 incremental(기존 값에 delta 적용)과 full refresh
+    /// saturating이라, incremental(기존 값에 delta 적용)과 full refresh
     /// (bias에서 재합산)가 이론적으로 saturation 영역에서 분기될 수 있다.
     /// 재학습된 weights가 saturation 근접 영역을 건드리는지 자동 적발.
     ///
-    /// 평시 `cargo test`에서는 `#[ignore]`로 빠짐. weights 파일 경로를
+    /// 평시 `cargo test`에서는 `#[ignore]`로 빠짐 — weights 파일 경로를
     /// 환경변수로 지정해서 `cargo test -- --ignored --exact …` 로 실행.
-    /// 기본 경로는 crate 루트의 `models/gomoku_v14_broken_rapfi_wide.bin`.
+    /// 기본 경로는 워크스페이스 루트의 `models/gomoku_v13_broken_rapfi.bin`.
     #[test]
-    #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v14_broken_rapfi_wide.bin)"]
+    #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v13_broken_rapfi.bin)"]
     fn incremental_matches_full_refresh_real_weights() {
         use crate::board::GameResult;
         use noru::trainer::SimpleRng;
 
         let path = std::env::var("NORU_TEST_WEIGHTS").unwrap_or_else(|_| {
+            // crate는 crates/gomoku-engine, weights는 workspace root의 models/.
             let manifest = env!("CARGO_MANIFEST_DIR");
-            format!("{}/models/gomoku_v14_broken_rapfi_wide.bin", manifest)
+            format!("{}/../../models/gomoku_v13_broken_rapfi.bin", manifest)
         });
         let data = std::fs::read(&path)
             .unwrap_or_else(|e| panic!("failed to read weights from {path}: {e}"));
-        let weights = NnueWeights::load_from_bytes(&data, Some(GOMOKU_NNUE_CONFIG.clone()))
-            .unwrap_or_else(|e| panic!("load_from_bytes failed for {path}: {e}"));
+        let weights =
+            NnueWeights::load_from_bytes(&data, Some(GOMOKU_NNUE_CONFIG.clone()))
+                .unwrap_or_else(|e| panic!("load_from_bytes failed for {path}: {e}"));
 
+        // 100 random 160-ply trials — Codex가 수동 harness로 확인한 것과
+        // 동일한 커버리지. 재학습 시 saturation divergence 자동 적발.
         let mut rng = SimpleRng::new(2026);
         for trial in 0..100 {
             let mut board = Board::new();

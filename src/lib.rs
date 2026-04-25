@@ -14,6 +14,7 @@ pub mod eval;
 pub mod features;
 pub mod heuristic;
 pub mod search;
+pub mod transposition;
 pub mod vct;
 
 pub mod legacy;

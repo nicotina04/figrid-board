@@ -31,6 +31,28 @@ const ROOT_VCT_BUDGET_FLOOR_MS: u64 = 100;
 /// α-β TT 버킷 수 = 2^N. 16 → 65 536 버킷 = 2 MB.
 const TT_BUCKET_BITS: u32 = 16;
 
+/// Aspiration windows: 이전 iteration score 주변 좁은 window. depth ≥ 이 값
+/// 부터 적용. 1~3 ply는 score 변동이 커서 widening cost가 절약 효과 상회.
+const ASPIRATION_MIN_DEPTH: u32 = 4;
+/// 초기 window half-width (centipawn). 너무 작으면 widening 자주, 크면 효과
+/// 작음. 검증된 chess engine 50~100 정도. 우리 BCE eval scale 기준 50.
+const ASPIRATION_INITIAL_DELTA: i32 = 50;
+
+/// Quiescence lite 최대 ply. depth==0 도달 시 NNUE static eval 반환 대신,
+/// 강제수(즉시승/즉시방어/오픈4/더블4/4-3/오픈4 차단)만 이 ply 한도까지
+/// 추가 탐색해서 horizon effect 완화. 일반 무브는 stand-pat. Codex 권장
+/// (2026-04-26): "win/must-block/open-four/double-four/four-three 정도만
+/// 2-4 ply 제한". 너무 크면 leaf 폭발, 작으면 효과 미미.
+const QSEARCH_MAX_PLY: u32 = 4;
+
+/// Threat-gated LMR (Late Move Reductions): non-PV / non-killer / non-forcing
+/// 무브를 r ply 줄여서 빠르게 본 뒤 fail-high 시 full depth로 재탐색.
+/// "naive LMR -43%p" 회귀의 원인은 강제수까지 reduce했기 때문 → tier 기반
+/// gating으로 위협 라인은 절대 줄이지 않는다. 5초 예산에서 한 ply 더 들어가는
+/// 효과가 직접적인 승률 향상.
+const LMR_MIN_DEPTH: u32 = 3;
+const LMR_MIN_MOVE_IDX: usize = 3;
+
 /// 탐색 결과
 pub struct SearchResult {
     pub best_move: Option<Move>,
@@ -119,62 +141,75 @@ impl Searcher {
         inc.refresh(board, weights);
 
         // PV-move priority: the best move from iteration depth-1 becomes the
-        // first move we try at iteration depth. Combined with PVS, this
-        // drastically reduces re-search cost — if the PV is still best, the
-        // null-window searches on the remaining moves almost all fail low.
+        // first move we try at iteration depth. Combined with PVS + Aspiration,
+        // this drastically reduces re-search cost.
         let mut prev_best: Option<Move> = None;
+        let mut prev_score: Option<i32> = None;
 
         for depth in 1..=max_depth {
-            let mut best_move = None;
-            let mut alpha = -INF;
-            let beta = INF;
-            let mut moves = self.order_moves(board, 0);
-
-            if let Some(pv) = prev_best {
-                if let Some(pos) = moves.iter().position(|&m| m == pv) {
-                    if pos != 0 {
-                        moves.swap(0, pos);
-                    }
-                }
+            // Aspiration windows: depth ≥ 4 부터 이전 iteration score 주변
+            // 좁은 [s-delta, s+delta] 로 시작. fail-low/high 시 재탐색.
+            // 정확한 score는 보통 좁은 window 안 → 첫 시도에서 cutoff 효과
+            // 극대화. window 빗나갈 때만 widening.
+            let mut alpha_init: i32;
+            let mut beta_init: i32;
+            let aspirate = depth >= ASPIRATION_MIN_DEPTH && prev_score.is_some();
+            if aspirate {
+                let s = prev_score.unwrap();
+                alpha_init = s - ASPIRATION_INITIAL_DELTA;
+                beta_init = s + ASPIRATION_INITIAL_DELTA;
+            } else {
+                alpha_init = -INF;
+                beta_init = INF;
             }
 
-            for (move_idx, mv) in moves.iter().enumerate() {
-                let mv = *mv;
-                board.make_move(mv);
-                inc.push_move(board, mv, weights);
+            let mut alpha = alpha_init;
+            let mut beta = beta_init;
+            let mut delta = ASPIRATION_INITIAL_DELTA;
+            let mut iter_result: (Option<Move>, i32) = (None, 0);
 
-                // Root PVS: first move uses the full window; every
-                // subsequent move is proved-not-better via null window and
-                // only re-searched with the full window on fail-high.
-                let score = if move_idx == 0 {
-                    -self.alpha_beta(board, weights, &mut inc, depth - 1, 1, -beta, -alpha)
-                } else {
-                    let null = -self.alpha_beta(
-                        board,
-                        weights,
-                        &mut inc,
-                        depth - 1,
-                        1,
-                        -alpha - 1,
-                        -alpha,
-                    );
-                    if !self.aborted && null > alpha && null < beta {
-                        -self.alpha_beta(board, weights, &mut inc, depth - 1, 1, -beta, -alpha)
-                    } else {
-                        null
-                    }
-                };
-
-                inc.pop_move();
-                board.undo_move();
-
+            // Aspiration re-search loop. fail-high/low 마다 window widen.
+            loop {
+                iter_result = self.root_pvs_iteration(
+                    board, weights, &mut inc, depth, alpha, beta, prev_best,
+                );
                 if self.aborted {
                     break;
                 }
-
-                if score > alpha {
-                    alpha = score;
-                    best_move = Some(mv);
+                let score = iter_result.1;
+                if !aspirate {
+                    break;
+                }
+                if score <= alpha {
+                    // fail-low: alpha 더 낮춤
+                    delta = (delta * 2).min(INF / 4);
+                    alpha = (alpha - delta).max(-INF);
+                    if alpha == -INF {
+                        // 한 번 더 시도하면 full window라 break해도 됨,
+                        // 그 결과는 다음 iteration에서 사용. 여기선 break 후
+                        // 다시 -INF/INF로.
+                        beta = INF;
+                        // re-search with full window once
+                        iter_result = self.root_pvs_iteration(
+                            board, weights, &mut inc, depth,
+                            -INF, INF, prev_best,
+                        );
+                        break;
+                    }
+                } else if score >= beta {
+                    delta = (delta * 2).min(INF / 4);
+                    beta = (beta + delta).min(INF);
+                    if beta == INF {
+                        alpha = -INF;
+                        iter_result = self.root_pvs_iteration(
+                            board, weights, &mut inc, depth,
+                            -INF, INF, prev_best,
+                        );
+                        break;
+                    }
+                } else {
+                    // window 안 → OK
+                    break;
                 }
             }
 
@@ -182,21 +217,93 @@ impl Searcher {
                 break;
             }
 
+            let (best_move, score) = iter_result;
             best_result = SearchResult {
                 best_move,
-                score: alpha,
+                score,
                 depth,
                 nodes: self.nodes,
             };
 
-            if alpha.abs() > WIN_SCORE - 100 {
+            if score.abs() > WIN_SCORE - 100 {
                 break;
             }
 
             prev_best = best_move;
+            prev_score = Some(score);
         }
 
         best_result
+    }
+
+    /// 한 iteration의 root-level PVS 탐색.
+    /// `[alpha_init, beta_init]` window 안에서 모든 root move를 탐색하고
+    /// best move + alpha 반환. Aspiration loop의 inner step.
+    fn root_pvs_iteration(
+        &mut self,
+        board: &mut Board,
+        weights: &NnueWeights,
+        inc: &mut IncrementalEval,
+        depth: u32,
+        alpha_init: i32,
+        beta_init: i32,
+        prev_best: Option<Move>,
+    ) -> (Option<Move>, i32) {
+        let mut alpha = alpha_init;
+        let beta = beta_init;
+        let mut best_move: Option<Move> = None;
+
+        let mut moves = self.order_moves(board, 0);
+        if let Some(pv) = prev_best {
+            if let Some(pos) = moves.iter().position(|&(m, _)| m == pv) {
+                if pos != 0 {
+                    moves.swap(0, pos);
+                }
+            }
+        }
+
+        for (move_idx, &(mv, is_forcing)) in moves.iter().enumerate() {
+            board.make_move(mv);
+            inc.push_move(board, mv, weights);
+
+            let is_killer = self.killers[0][0] == Some(mv) || self.killers[0][1] == Some(mv);
+
+            let score = if move_idx == 0 {
+                -self.alpha_beta(board, weights, inc, depth - 1, 1, -beta, -alpha)
+            } else {
+                let reduction = lmr_reduction(depth, move_idx, is_forcing, is_killer);
+                let reduced_depth = (depth - 1).saturating_sub(reduction);
+                let mut null = -self.alpha_beta(
+                    board, weights, inc, reduced_depth, 1, -alpha - 1, -alpha,
+                );
+                // LMR re-search (same null window): reduced 결과가 alpha 넘으면
+                // full depth로 다시 본다 — 진짜 fail-high인지 검증.
+                if !self.aborted && reduction > 0 && null > alpha {
+                    null = -self.alpha_beta(
+                        board, weights, inc, depth - 1, 1, -alpha - 1, -alpha,
+                    );
+                }
+                if !self.aborted && null > alpha && null < beta {
+                    -self.alpha_beta(board, weights, inc, depth - 1, 1, -beta, -alpha)
+                } else {
+                    null
+                }
+            };
+
+            inc.pop_move();
+            board.undo_move();
+
+            if self.aborted {
+                break;
+            }
+
+            if score > alpha {
+                alpha = score;
+                best_move = Some(mv);
+            }
+        }
+
+        (best_move, alpha)
     }
 
     fn alpha_beta(
@@ -230,9 +337,10 @@ impl Searcher {
             GameResult::Ongoing => {}
         }
 
-        // 깊이 도달 → NNUE 정적 평가 (incremental accumulator의 forward만)
+        // 깊이 도달 → quiescence lite로 forcing line만 마저 풀기.
+        // stand-pat = NNUE static eval. 강제수가 stand-pat을 깰 때만 확장.
         if depth == 0 {
-            return inc.eval(weights);
+            return self.qsearch(board, weights, inc, 0, ply, alpha, beta);
         }
 
         // === TT lookup ===
@@ -265,7 +373,7 @@ impl Searcher {
 
         // TT-best move를 맨 앞으로 (PVS에서 가장 큰 cutoff 효과).
         if let Some(tt_mv) = tt_move {
-            if let Some(pos) = moves.iter().position(|&m| m == tt_mv) {
+            if let Some(pos) = moves.iter().position(|&(m, _)| m == tt_mv) {
                 if pos != 0 {
                     moves.swap(0, pos);
                 }
@@ -276,32 +384,32 @@ impl Searcher {
         let mut best_move_at_node: Option<Move> = None;
         let side = board.side_to_move as usize;
 
-        // PVS (Principal Variation Search):
-        // order_moves[0] is our best guess for the PV. Search it with the
-        // full [-beta, -alpha] window. For every later move, assume
-        // order_moves got it right and first prove "this move is not
-        // better than what we have" with a null window [-alpha-1, -alpha].
-        // If the null-window search fails high (returns > alpha, < beta),
-        // the move actually could be better — re-search with full window.
-        // Large speedup when move ordering is good; costs a re-search
-        // occasionally when ordering is wrong.
-        for (move_idx, mv) in moves.iter().enumerate() {
-            let mv = *mv;
+        // PVS + Threat-gated LMR:
+        // order_moves[0] = PV 예측 → full window 탐색.
+        // 이후 모든 무브는 null-window로 빠르게 본 뒤 fail-high만 full re-search.
+        // LMR 추가: 비-PV / 비-killer / 비-forcing 무브는 reduction r ply 줄여서
+        // 본다. 줄여서도 alpha 넘으면 full depth로 재탐색. tier 기반 gating으로
+        // 강제수는 절대 reduce하지 않아 horizon effect 유지.
+        for (move_idx, &(mv, is_forcing)) in moves.iter().enumerate() {
             board.make_move(mv);
             inc.push_move(board, mv, weights);
+
+            let is_killer = ply < 64
+                && (self.killers[ply][0] == Some(mv) || self.killers[ply][1] == Some(mv));
 
             let score = if move_idx == 0 {
                 -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -alpha)
             } else {
-                let null_score = -self.alpha_beta(
-                    board,
-                    weights,
-                    inc,
-                    depth - 1,
-                    ply + 1,
-                    -alpha - 1,
-                    -alpha,
+                let reduction = lmr_reduction(depth, move_idx, is_forcing, is_killer);
+                let reduced_depth = (depth - 1).saturating_sub(reduction);
+                let mut null_score = -self.alpha_beta(
+                    board, weights, inc, reduced_depth, ply + 1, -alpha - 1, -alpha,
                 );
+                if !self.aborted && reduction > 0 && null_score > alpha {
+                    null_score = -self.alpha_beta(
+                        board, weights, inc, depth - 1, ply + 1, -alpha - 1, -alpha,
+                    );
+                }
                 if !self.aborted && null_score > alpha && null_score < beta {
                     -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -alpha)
                 } else {
@@ -357,9 +465,138 @@ impl Searcher {
         best_score
     }
 
-    /// 수 정렬: 위협 탐지 → 킬러 무브 → 히스토리 휴리스틱
-    fn order_moves(&self, board: &Board, ply: usize) -> Vec<Move> {
-        let mut moves = board.candidate_moves();
+    /// Quiescence lite. 강제수만 확장해 horizon effect 완화.
+    /// - stand-pat (NNUE static eval) 로 fail-high 빠른 cutoff
+    /// - 즉시승/즉시방어/오픈4/더블4/4-3/오픈4 차단 만 후보
+    /// - QSEARCH_MAX_PLY 도달 시 stand-pat 반환
+    fn qsearch(
+        &mut self,
+        board: &mut Board,
+        weights: &NnueWeights,
+        inc: &mut IncrementalEval,
+        qply: u32,
+        ply: usize,
+        mut alpha: i32,
+        beta: i32,
+    ) -> i32 {
+        self.nodes += 1;
+
+        if self.nodes & 127 == 0 {
+            if let Some(deadline) = self.deadline {
+                if Instant::now() >= deadline {
+                    self.aborted = true;
+                    return 0;
+                }
+            }
+        }
+
+        match board.game_result() {
+            GameResult::BlackWin | GameResult::WhiteWin => {
+                return -(WIN_SCORE - ply as i32);
+            }
+            GameResult::Draw => return 0,
+            GameResult::Ongoing => {}
+        }
+
+        let stand_pat = inc.eval(weights);
+        if qply >= QSEARCH_MAX_PLY {
+            return stand_pat;
+        }
+        if stand_pat >= beta {
+            return stand_pat;
+        }
+        if stand_pat > alpha {
+            alpha = stand_pat;
+        }
+
+        let candidates = board.candidate_moves();
+        if candidates.is_empty() {
+            return stand_pat;
+        }
+
+        let (my, opp) = match board.side_to_move {
+            Stone::Black => (&board.black, &board.white),
+            Stone::White => (&board.white, &board.black),
+        };
+
+        // 상대가 어디든 Five 만들 수 있으면 must-block 모드 — 그 차단수만 본다.
+        let opp_has_five = candidates
+            .iter()
+            .any(|&m| matches!(classify_move(opp, my, m), ThreatKind::Five));
+
+        let mut forcing: Vec<(Move, i32)> = Vec::new();
+        for &mv in &candidates {
+            let my_kind = classify_move(my, opp, mv);
+
+            // 즉시 승리는 must-block 여부와 무관하게 항상 우선.
+            if matches!(my_kind, ThreatKind::Five) {
+                forcing.push((mv, 1_000_000));
+                continue;
+            }
+
+            if opp_has_five {
+                // Must-block 모드: 상대 Five 차단수만.
+                let opp_kind = classify_move(opp, my, mv);
+                if matches!(opp_kind, ThreatKind::Five) {
+                    forcing.push((mv, 900_000));
+                }
+                continue;
+            }
+
+            // 공격 강제수.
+            let attack_score = match my_kind {
+                ThreatKind::OpenFour => Some(800_000),
+                ThreatKind::DoubleFour | ThreatKind::FourThree => Some(600_000),
+                _ => None,
+            };
+            if let Some(s) = attack_score {
+                forcing.push((mv, s));
+                continue;
+            }
+
+            // 상대 OpenFour 차단도 강제수.
+            let opp_kind = classify_move(opp, my, mv);
+            if matches!(opp_kind, ThreatKind::OpenFour) {
+                forcing.push((mv, 700_000));
+            }
+        }
+
+        if forcing.is_empty() {
+            return stand_pat;
+        }
+
+        forcing.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+        let mut best = stand_pat;
+        for &(mv, _) in &forcing {
+            board.make_move(mv);
+            inc.push_move(board, mv, weights);
+            let score = -self.qsearch(board, weights, inc, qply + 1, ply + 1, -beta, -alpha);
+            inc.pop_move();
+            board.undo_move();
+
+            if self.aborted {
+                return 0;
+            }
+
+            if score > best {
+                best = score;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+            if alpha >= beta {
+                break;
+            }
+        }
+
+        best
+    }
+
+    /// 수 정렬: 위협 탐지 → 킬러 무브 → 히스토리 휴리스틱.
+    /// 반환은 (mv, is_forcing) — is_forcing은 LMR gating에 사용되는 위협 태그.
+    fn order_moves(&self, board: &Board, ply: usize) -> Vec<(Move, bool)> {
+        let candidates = board.candidate_moves();
         let side = board.side_to_move as usize;
 
         let (my, opp) = match board.side_to_move {
@@ -367,88 +604,150 @@ impl Searcher {
             Stone::White => (&board.white, &board.black),
         };
 
-        moves.sort_unstable_by(|&a, &b| {
-            let score_a = self.move_score(a, ply, side, my, opp);
-            let score_b = self.move_score(b, ply, side, my, opp);
-            score_b.cmp(&score_a)
-        });
-
-        moves
+        let mut scored: Vec<(Move, i32, bool)> = candidates
+            .into_iter()
+            .map(|m| {
+                let (s, f) = self.move_score_and_forcing(m, ply, side, my, opp);
+                (m, s, f)
+            })
+            .collect();
+        scored.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        scored.into_iter().map(|(m, _, f)| (m, f)).collect()
     }
 
-    fn move_score(
+    /// 한 무브의 정렬 점수 + LMR-gating 용 is_forcing 동시 산출.
+    /// is_forcing = 어느 쪽이든 OpenThree 이상 위협이면 true.
+    /// → 이 무브는 LMR로 reduce하지 않는다.
+    fn move_score_and_forcing(
         &self,
         mv: Move,
         ply: usize,
         side: usize,
         my: &crate::board::BitBoard,
         opp: &crate::board::BitBoard,
-    ) -> i32 {
-        let mut score = self.history[side][mv];
+    ) -> (i32, bool) {
         let row = (mv / BOARD_SIZE) as i32;
         let col = (mv % BOARD_SIZE) as i32;
 
-        // === Composite threat (multi-direction) ===
-        // DIR-local scan은 방향별 패턴만 보기 때문에 3-3, 4-3, double-four 같은
-        // 다방향 복합 위협을 놓침. classify_move는 4방향 종합 등급을 반환.
-        // 수비 측(opp_kind)을 크게 반영해야 Pela 같은 상대가 3-3으로 떡발리지 않음.
-        score += threat_priority(classify_move(my, opp, mv), /*defending=*/ false);
-        score += threat_priority(classify_move(opp, my, mv), /*defending=*/ true);
+        let my_kind = classify_move(my, opp, mv);
+        let opp_kind = classify_move(opp, my, mv);
 
-        // 위협 탐지: 이 수를 두면 어떤 패턴이 만들어지는지 체크
-        for &(dr, dc) in &DIR {
-            // 내 돌 연장
-            let my_info = scan_line(my, opp, row, col, dr, dc);
-            if my_info.count >= 4 {
-                score += 500_000; // 승리수 또는 4목
-            } else if my_info.count >= 3 {
-                let open = my_info.open_front as u32 + my_info.open_back as u32;
-                if open >= 2 {
-                    score += 50_000; // 열린 3 완성
-                } else if open >= 1 {
-                    score += 5_000; // 닫힌 3
-                }
-            } else if my_info.count >= 2 {
-                let open = my_info.open_front as u32 + my_info.open_back as u32;
-                if open >= 2 {
-                    score += 500; // 열린 2
-                }
-            }
+        let is_forcing = matches!(
+            my_kind,
+            ThreatKind::Five
+                | ThreatKind::OpenFour
+                | ThreatKind::DoubleFour
+                | ThreatKind::FourThree
+                | ThreatKind::ClosedFour
+                | ThreatKind::OpenThree
+        ) || matches!(
+            opp_kind,
+            ThreatKind::Five
+                | ThreatKind::OpenFour
+                | ThreatKind::DoubleFour
+                | ThreatKind::FourThree
+                | ThreatKind::ClosedFour
+                | ThreatKind::OpenThree
+        );
 
-            // 상대 위협 차단
-            let opp_info = scan_line(opp, my, row, col, dr, dc);
-            if opp_info.count >= 4 {
-                score += 400_000; // 상대 5목 방어
-            } else if opp_info.count >= 3 {
-                let open = opp_info.open_front as u32 + opp_info.open_back as u32;
-                if open >= 2 {
-                    score += 40_000; // 상대 열린 3 방어
-                } else if open >= 1 {
-                    score += 4_000; // 상대 닫힌 3 방어
-                }
-            }
+        if matches!(my_kind, ThreatKind::Five) {
+            return (TIER_WIN, true);
+        }
+        if matches!(opp_kind, ThreatKind::Five) {
+            return (TIER_BLOCK_WIN, true);
         }
 
-        // 킬러 무브
+        let tier_score = if matches!(my_kind, ThreatKind::OpenFour) {
+            TIER_OPEN_FOUR
+        } else if matches!(opp_kind, ThreatKind::OpenFour) {
+            TIER_BLOCK_OPEN_FOUR
+        } else if matches!(my_kind, ThreatKind::DoubleFour | ThreatKind::FourThree) {
+            TIER_DOUBLE_FOUR
+        } else if matches!(opp_kind, ThreatKind::DoubleFour | ThreatKind::FourThree) {
+            TIER_BLOCK_DOUBLE_FOUR
+        } else if matches!(my_kind, ThreatKind::DoubleThree) {
+            TIER_DOUBLE_THREE
+        } else if matches!(opp_kind, ThreatKind::DoubleThree) {
+            TIER_BLOCK_DOUBLE_THREE
+        } else if matches!(my_kind, ThreatKind::ClosedFour) {
+            TIER_CLOSED_FOUR
+        } else if matches!(opp_kind, ThreatKind::ClosedFour) {
+            TIER_BLOCK_CLOSED_FOUR
+        } else if matches!(my_kind, ThreatKind::OpenThree) {
+            TIER_OPEN_THREE
+        } else if matches!(opp_kind, ThreatKind::OpenThree) {
+            TIER_BLOCK_OPEN_THREE
+        } else {
+            0
+        };
+
+        let mut score = tier_score;
+
         if ply < 64 {
             if self.killers[ply][0] == Some(mv) {
-                score += 10_000;
+                score += 80_000;
             } else if self.killers[ply][1] == Some(mv) {
-                score += 5_000;
+                score += 40_000;
+            }
+        }
+        score += self.history[side][mv].min(50_000);
+
+        for &(dr, dc) in &DIR {
+            let my_info = scan_line(my, opp, row, col, dr, dc);
+            if my_info.count == 2 && my_info.open_front && my_info.open_back {
+                score += 200;
+            }
+            let opp_info = scan_line(opp, my, row, col, dr, dc);
+            if opp_info.count == 2 && opp_info.open_front && opp_info.open_back {
+                score += 150;
             }
         }
 
-        // 중앙 선호
         let center_dist = ((row - 7).abs() + (col - 7).abs()) as i32;
-        score += (14 - center_dist) * 2;
+        score += 14 - center_dist;
 
-        score
+        (score, is_forcing)
     }
+
 }
 
-/// `classify_move` 결과를 move ordering priority 점수로 매핑.
-/// `defending=true`이면 상대 관점 위협 (차단 우선순위).
+// === Move ordering tier 점수 ===
+// 각 tier 사이 buffer가 ≥ 100 000이라 어떤 history/killer/center 합산도
+// 다른 tier와 절대 충돌하지 않음.
+const TIER_WIN: i32 = 10_000_000;
+const TIER_BLOCK_WIN: i32 = 9_000_000;
+const TIER_OPEN_FOUR: i32 = 8_000_000;
+const TIER_BLOCK_OPEN_FOUR: i32 = 7_000_000;
+const TIER_DOUBLE_FOUR: i32 = 6_000_000;
+const TIER_BLOCK_DOUBLE_FOUR: i32 = 5_000_000;
+const TIER_DOUBLE_THREE: i32 = 4_000_000;
+const TIER_BLOCK_DOUBLE_THREE: i32 = 3_000_000;
+const TIER_CLOSED_FOUR: i32 = 1_500_000;
+const TIER_BLOCK_CLOSED_FOUR: i32 = 1_400_000;
+const TIER_OPEN_THREE: i32 = 1_000_000;
+const TIER_BLOCK_OPEN_THREE: i32 = 900_000;
+
+/// Threat-gated LMR reduction 계산.
+/// 강제수 / killer / 첫 LMR_MIN_MOVE_IDX 무브 / 얕은 depth는 0 (안 줄임).
+/// 그 외 비-forcing tier 0 무브: depth/idx에 따라 1~2 ply.
+/// reduction은 depth-2를 넘지 않도록 cap (qsearch 직행 방지).
+fn lmr_reduction(depth: u32, move_idx: usize, is_forcing: bool, is_killer: bool) -> u32 {
+    if depth < LMR_MIN_DEPTH || move_idx < LMR_MIN_MOVE_IDX || is_forcing || is_killer {
+        return 0;
+    }
+    let mut r = 1u32;
+    if depth >= 6 {
+        r += 1;
+    }
+    if move_idx >= 6 {
+        r += 1;
+    }
+    r.min(depth.saturating_sub(2))
+}
+
+#[allow(dead_code)]
 fn threat_priority(kind: ThreatKind, defending: bool) -> i32 {
+    // 호환용 stub — 새 move_score는 inline tier로 직접 처리.
     let base = match kind {
         ThreatKind::Five => 1_000_000,
         ThreatKind::OpenFour => 500_000,

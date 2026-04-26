@@ -3,13 +3,12 @@
 use crate::board::{Board, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::features::{
     broken_index, compound_index, count_bucket, cross_line_hash, cross_line_index, density_index,
-    length_bucket, local_density_bucket, lp_rich_index, open_bucket, pattern_index, ps_index,
-    zone_for, BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE,
-    DENSITY_CAT_LEGAL, DENSITY_CAT_MY_COUNT, DENSITY_CAT_MY_LOCAL, DENSITY_CAT_OPP_COUNT,
-    DENSITY_CAT_OPP_LOCAL, MAX_ACTIVE_FEATURES,
+    length_bucket, local_density_bucket, lp_rich_index, open_bucket, ps_index, zone_for,
+    BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE, DENSITY_CAT_LEGAL,
+    DENSITY_CAT_MY_COUNT, DENSITY_CAT_MY_LOCAL, DENSITY_CAT_OPP_COUNT, DENSITY_CAT_OPP_LOCAL,
+    MAX_ACTIVE_FEATURES,
 };
 use crate::heuristic::{scan_line, DIR};
-use crate::pattern_table::swap_mapped_id;
 use noru::network::{forward, Accumulator, FeatureDelta, NnueWeights};
 use std::sync::OnceLock;
 
@@ -150,25 +149,10 @@ pub(crate) fn features_from_cell(
         );
     }
 
-    // G: Pattern4 mini — line_pattern_ids는 black-relative이므로 stm 관점에
-    // 따라 swap 필요. cell × 4 dir = 4 mapped IDs per perspective.
-    let is_stm_black = matches!(board.side_to_move, Stone::Black);
-    for dir_idx in 0..4 {
-        let id_black = board.line_pattern_ids[sq][dir_idx];
-        let (stm_id, nstm_id) = if is_stm_black {
-            (id_black, swap_mapped_id(id_black))
-        } else {
-            (swap_mapped_id(id_black), id_black)
-        };
-        // stm 관점에서 본 pattern, 그리고 nstm 관점에서 본 pattern.
-        // perspective index 0 = "내 관점에서 mine=stm color"; persp 1 = "내 관점에서 mine=nstm color".
-        // stm features Vec: stm 관점 → mine=stm(persp 0). nstm features Vec: nstm 관점 → mine=nstm(persp 0).
-        // Cross-line 패턴과 통일: stm bucket을 nstm 관점에선 perspective 1 으로 push.
-        stm.push(pattern_index(0, stm_id));
-        nstm.push(pattern_index(1, stm_id));
-        stm.push(pattern_index(1, nstm_id));
-        nstm.push(pattern_index(0, nstm_id));
-    }
+    // G section (Pattern4 mini NNUE feature) emit는 v17~v20 실험에서 효과
+    // 입증 안 됨 (v18 = v13 동등 53.3%, v19 회귀 26.7%)이라 제거.
+    // pattern_table 인프라 + Board::line_pattern_ids 는 보존됨 — 미래 다른
+    // 활용 (예: TT key augmentation, move ordering hint)을 위해.
 }
 
 /// D 섹션 — 전역 카운트 + last_move 주변 3×3 local density.
@@ -1024,17 +1008,16 @@ mod tests {
     ///
     /// 평시 `cargo test`에서는 `#[ignore]`로 빠짐 — weights 파일 경로를
     /// 환경변수로 지정해서 `cargo test -- --ignored --exact …` 로 실행.
-    /// 기본 경로는 워크스페이스 루트의 `models/gomoku_v18_small_p4_rapfi.bin`.
+    /// 기본 경로는 figrid 루트의 `models/gomoku_v14_broken_rapfi_wide.bin`.
     #[test]
-    #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v18_small_p4_rapfi.bin)"]
+    #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v14_broken_rapfi_wide.bin)"]
     fn incremental_matches_full_refresh_real_weights() {
         use crate::board::GameResult;
         use noru::trainer::SimpleRng;
 
         let path = std::env::var("NORU_TEST_WEIGHTS").unwrap_or_else(|_| {
-            // crate는 crates/gomoku-engine, weights는 workspace root의 models/.
             let manifest = env!("CARGO_MANIFEST_DIR");
-            format!("{}/models/gomoku_v18_small_p4_rapfi.bin", manifest)
+            format!("{}/models/gomoku_v14_broken_rapfi_wide.bin", manifest)
         });
         let data = std::fs::read(&path)
             .unwrap_or_else(|e| panic!("failed to read weights from {path}: {e}"));

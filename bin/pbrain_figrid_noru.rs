@@ -10,14 +10,14 @@ use std::time::Duration;
 use figrid_board::{to_idx, Board, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
 use noru::network::NnueWeights;
 
-const WEIGHTS_BYTES: &[u8] = include_bytes!("../models/gomoku_v18_small_p4_rapfi.bin");
+const WEIGHTS_BYTES: &[u8] = include_bytes!("../models/gomoku_v14_broken_rapfi_wide.bin");
 
 const MAX_DEPTH: u32 = 20;
 const DEFAULT_TIMEOUT_MS: i64 = 30_000;
 const DEFAULT_MATCH_MS: i64 = 1_000_000_000;
 /// Headroom subtracted from the turn budget so the last node batch finishes
-/// well before Piskvork's deadline. Without this, the 1024-node deadline
-/// check can overshoot by ~100 ms on NNUE-heavy positions.
+/// well before Piskvork's deadline. Without this, the 128-node deadline
+/// check can overshoot by ~50 ms on NNUE-heavy positions.
 const SAFETY_MARGIN_MS: i64 = 150;
 
 struct ProtocolInfo {
@@ -337,7 +337,7 @@ fn main() {
             "ABOUT" => {
                 writeln!(
                     stdout,
-                    "name=\"figrid\", version=\"0.4.4\", author=\"nicotina04 (successor to wuwbobo2021)\", country=\"KR\""
+                    "name=\"figrid\", version=\"0.6.1\", author=\"nicotina04 (successor to wuwbobo2021)\", country=\"KR\""
                 )
                 .ok();
             }

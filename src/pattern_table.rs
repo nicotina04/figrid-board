@@ -145,14 +145,17 @@ pub fn enumerate_patterns() -> HashMap<u32, PatternId> {
 
 /// 우리 NNUE에서 실제로 추적하는 mapped pattern ID 수.
 /// Top 16384 = 학습 데이터에서 99.24% 커버 + rare bucket 1개 = 16385.
-pub const PATTERN_TOP_K: usize = 16_384;
-pub const PATTERN_RARE_ID: u16 = PATTERN_TOP_K as u16; // = 16384, "그 외" bucket
-pub const PATTERN_NUM_IDS: usize = PATTERN_TOP_K + 1;  // = 16385
+// Top-K를 4096으로 축소 — 16384에서 17:1 (params:samples) ratio 였던 것을
+// 4:1 (v13 수준)로 정상화. coverage는 99.24% → 약 97.5% (top 5K가 97.81%).
+// 거의 lossless이면서 Pattern4 weights 대부분이 학습 가능 영역에 진입.
+pub const PATTERN_TOP_K: usize = 4096;
+pub const PATTERN_RARE_ID: u16 = PATTERN_TOP_K as u16; // = 4096, "그 외" bucket
+pub const PATTERN_NUM_IDS: usize = PATTERN_TOP_K + 1;  // = 4097
 
 /// `pattern_freq_stats --dump-top-k 16384` 가 만든 binary embed.
 /// 16384 × u32 little-endian = 65 536 bytes. canonical packed value를
 /// 빈도 내림차순으로 나열.
-const TOP16K_BYTES: &[u8] = include_bytes!("../data/top16k.bin");
+const TOPK_BYTES: &[u8] = include_bytes!("../data/topk.bin");
 
 /// 4M 엔트리 dense lookup table. raw packed window → mapped pattern ID
 /// (u16). Top 16K canonical packed에 들어가는 packed/reflection은 0..16383
@@ -171,13 +174,13 @@ fn build_dense_mapped_table() -> Vec<u16> {
 
     // Top 16K canonical packed → mapped ID 0..16383
     let mut canonical_to_mapped: HashMap<u32, u16> = HashMap::with_capacity(PATTERN_TOP_K);
-    debug_assert!(TOP16K_BYTES.len() == PATTERN_TOP_K * 4);
-    for (i, chunk) in TOP16K_BYTES.chunks(4).enumerate() {
+    debug_assert!(TOPK_BYTES.len() == PATTERN_TOP_K * 4);
+    for (i, chunk) in TOPK_BYTES.chunks(4).enumerate() {
         let p = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         canonical_to_mapped.insert(p, i as u16);
     }
 
-    // 모든 raw → canonicalize → top16k 안이면 그 mapped id, 아니면 rare.
+    // 모든 raw → canonicalize → topk 안이면 그 mapped id, 아니면 rare.
     for raw in 0..(n as u32) {
         let w = unpack_window(raw);
         if !is_realizable(&w) {
@@ -230,13 +233,13 @@ fn build_swap_table() -> [u16; PATTERN_NUM_IDS] {
     // 1) canonical_packed → mapped 사전 재구성.
     let mut canonical_to_mapped: HashMap<u32, u16> =
         HashMap::with_capacity(PATTERN_TOP_K);
-    for (i, chunk) in TOP16K_BYTES.chunks(4).enumerate() {
+    for (i, chunk) in TOPK_BYTES.chunks(4).enumerate() {
         let p = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         canonical_to_mapped.insert(p, i as u16);
     }
 
     // 2) 각 mapped id의 canonical → mine/opp swap → re-canonicalize → mapped.
-    for (i, chunk) in TOP16K_BYTES.chunks(4).enumerate() {
+    for (i, chunk) in TOPK_BYTES.chunks(4).enumerate() {
         let canonical_packed =
             u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let w = unpack_window(canonical_packed);

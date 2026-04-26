@@ -1,5 +1,50 @@
 # Changes
 
+## 0.6.1 (2026-04-26)
+* **Search overhaul** — internal NNUE arena win rate at 5 s time budget
+  jumps from 40 % to 63.3 % (30-game), powered by four orthogonal changes
+  layered on top of 0.6.0's PVS + TT + root VCT engine:
+  * **Move ordering tier separation.** Threat priorities (win, must-block,
+    open-four, double-four / four-three, double-three, closed-four,
+    open-three) now live in absolute non-overlapping buckets ≥10⁵ apart so
+    no killer / history / center bonus can ever lift a quiet move past a
+    tactical one. The PVS first-move quality this guarantees is the gate
+    every other search trick depends on.
+  * **Aspiration windows.** From depth 4 onward the root iteration starts
+    with `[score-50, score+50]` and re-searches with exponentially growing
+    deltas only on fail-low / fail-high. Most iterations land first try.
+  * **Quiescence lite.** When `alpha_beta` reaches depth 0 the leaf is
+    handed to a forcing-only quiescence search (immediate win, must-block,
+    open-four, double-four, four-three, open-four block) capped at 4 ply.
+    The NNUE static eval still scores both the stand-pat and the leaf at
+    the end of every quiet line — qsearch only changes *where* the eval
+    is sampled, not what does the sampling.
+  * **Threat-gated late-move reductions.** Non-PV / non-killer / non-
+    forcing moves at depth ≥ 3 and `move_idx ≥ 3` are reduced by 1–2 ply
+    in the null window; reduced fail-highs trigger a full-depth re-search
+    before the PVS full-window verification. Forcing moves (open-three or
+    higher, either side) are *never* reduced — that gating is what makes
+    LMR safe here, where the naive 0.4.x experiment lost 43 percentage
+    points.
+* Combined effect on a 5 s/move arena vs the depth-4 heuristic: mean
+  completed depth 3.73 → 5.67, p50 4 → 7, max 6 → 10. The new ply budget
+  is what materializes as win rate; fixed-depth-4 arena stays at 50 %
+  because there is nothing to reduce.
+* **Weights revert to v14_broken_rapfi_wide.** Pattern4 mini (G section)
+  emits are removed from `eval.rs`; `TOTAL_FEATURE_SIZE` returns to 4 096.
+  v17–v20 retraining did not move the win rate against Rapfi-equivalent
+  opponents (feature redundancy), and the larger 36 864-feature variant
+  cost depth in the 5 s search budget. The `pattern_table` infrastructure
+  (canonicalisation, top-K dense table, swap table, board-side
+  `line_pattern_ids` maintained incrementally on make/undo) is preserved
+  for future move-ordering / TT-augmentation experiments. The bundled
+  top-K table shrinks to 4 096 entries (`data/topk.bin`, 16 KB);
+  `top16k.bin` is removed.
+* `pbrain_figrid_noru` now embeds `models/gomoku_v14_broken_rapfi_wide.bin`
+  (4.3 MB, the same baseline used through 0.5.x).
+* No protocol or API change. The 128-node deadline check, dynamic VCT
+  budget, and 150 ms safety margin all carry over from 0.4.1 unchanged.
+
 ## 0.6.0 (2026-04-25)
 * **Pattern4 mini integrated.** Eleven-cell line patterns are now part of
   the NNUE feature space. The new `pattern_table` module enumerates the

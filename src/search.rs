@@ -56,6 +56,13 @@ const QSEARCH_MAX_PLY: u32 = 4;
 const LMR_MIN_DEPTH: u32 = 3;
 const LMR_MIN_MOVE_IDX: usize = 3;
 
+/// IIR (Internal Iterative Reduction): TT-miss 노드 + non-PV + 충분히 깊을 때
+/// 1 ply 줄여서 빠르게 본다. TT-miss는 좋은 PV 무브를 모르는 상태라 정상
+/// search 시 ordering이 약함 → cutoff 비효율. 1 ply 줄여 빠르게 끝내고
+/// store된 entry로 다음 iteration에서 PV 확보. chess engine에서 검증된
+/// cheap 기법 (~+30 elo).
+const IIR_MIN_DEPTH: u32 = 4;
+
 /// 탐색 결과
 pub struct SearchResult {
     pub best_move: Option<Move>,
@@ -395,6 +402,17 @@ impl Searcher {
             }
         }
 
+        // === IIR (Internal Iterative Reduction) ===
+        // TT-miss + 깊은 비-PV 노드는 1 ply 줄여서 본다. ordering이 약한
+        // 노드라 정상 깊이로는 cutoff 비효율. 줄여서 빨리 끝내고 store된
+        // entry가 다음 iteration의 PV 가이드 역할.
+        let is_pv = beta - alpha > 1;
+        let depth = if depth >= IIR_MIN_DEPTH && tt_move.is_none() && !is_pv {
+            depth - 1
+        } else {
+            depth
+        };
+
         let mut moves = self.order_moves(board, ply);
         if moves.is_empty() {
             return 0;
@@ -420,11 +438,11 @@ impl Searcher {
         // 본다. 줄여서도 alpha 넘으면 full depth로 재탐색. tier 기반 gating으로
         // 강제수는 절대 reduce하지 않아 horizon effect 유지.
         for (move_idx, &(mv, is_forcing)) in moves.iter().enumerate() {
-            board.make_move(mv);
-            inc.push_move(board, mv, weights);
-
             let is_killer = ply < 64
                 && (self.killers[ply][0] == Some(mv) || self.killers[ply][1] == Some(mv));
+
+            board.make_move(mv);
+            inc.push_move(board, mv, weights);
 
             let score = if move_idx == 0 {
                 -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -alpha)

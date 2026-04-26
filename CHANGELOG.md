@@ -1,5 +1,31 @@
 # Changes
 
+## 0.6.3 (2026-04-27)
+* **Internal Iterative Reduction (IIR).** TT-miss non-PV nodes at
+  `depth ≥ 4` now search at `depth - 1`. The standard chess-engine
+  trick: a node with no transposition entry has no good first-move
+  guess, so its full-depth search wastes branching factor on weak
+  ordering. Reducing one ply lets the search finish faster, and the
+  resulting TT entry guides ordering at the same node when iterative
+  deepening reaches it again the following iteration. One-line change
+  inside `alpha_beta`.
+* Internal NNUE arena win rate at 5 s time budget: 73.3 % (0.6.2) →
+  **80.0 %** (24 W − 6 L over 30 games, σ ≈ 7 %, +6.7 percentage points).
+  Mean completed depth 5.53 → 5.63, p95 8 → 9 — same time budget,
+  one extra ply at the high end.
+* Razoring and futility pruning were prototyped on the 0.6.2 base and
+  did **not** make this release. Two configurations (margins 200 / 400
+  and 80 / 150 for razor; 50 + 80 d and 20 + 30 d for futility) both
+  measured at 73.3 % — identical to the 0.6.2 baseline down to the
+  TT-cutoff rate. Our NNUE was trained against sigmoid (BCE) targets,
+  so its static-eval distribution stays inside ±100 cp on quiet
+  positions; razor/futility margins built for cp-regression engines
+  (Stockfish-style) almost never trigger here. The code was reverted
+  rather than left as dead-code.
+* No protocol or API regression. TT, Aspiration, qsearch, threat-gated
+  LMR, and the 128-node deadline check all carry over from 0.6.2
+  unchanged.
+
 ## 0.6.2 (2026-04-27)
 * **Transposition table grown from 64 K to 256 K buckets.** A diagnostic
   pass on 0.6.1 (5 s budget, 5-game arena) recorded 28.5 % of stores

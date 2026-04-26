@@ -63,6 +63,15 @@ const LMR_MIN_MOVE_IDX: usize = 3;
 /// cheap 기법 (~+30 elo).
 const IIR_MIN_DEPTH: u32 = 4;
 
+/// LMP (Late Move Pruning): 얕은 비-PV 노드에서 move_idx가 임계값 이상인
+/// 비-forcing / 비-killer 무브 skip. count 기반이라 razoring/futility가
+/// 실패했던 NNUE eval scale 좁음 문제 회피. tier 정렬 끝에 있는 quiet
+/// move는 좋은 후보일 가능성 매우 낮음.
+const LMP_MIN_DEPTH: u32 = 1;
+const LMP_MAX_DEPTH: u32 = 3;
+const LMP_BASE: usize = 8;
+const LMP_PER_DEPTH: usize = 4;
+
 /// 탐색 결과
 pub struct SearchResult {
     pub best_move: Option<Move>,
@@ -440,6 +449,20 @@ impl Searcher {
         for (move_idx, &(mv, is_forcing)) in moves.iter().enumerate() {
             let is_killer = ply < 64
                 && (self.killers[ply][0] == Some(mv) || self.killers[ply][1] == Some(mv));
+
+            // === LMP (Late Move Pruning) ===
+            // 비-PV / 비-forcing / 비-killer / 얕은 depth에서 move_idx가
+            // 임계값 이상이면 quiet move skip. count-based라 eval 분포
+            // 무관, 항상 trigger 보장. tier 정렬 끝의 quiet move는 좋은
+            // 후보 가능성 매우 낮음.
+            if !is_pv && !is_forcing && !is_killer
+                && depth >= LMP_MIN_DEPTH && depth <= LMP_MAX_DEPTH
+            {
+                let lmp_threshold = LMP_BASE + LMP_PER_DEPTH * depth as usize;
+                if move_idx >= lmp_threshold {
+                    continue;
+                }
+            }
 
             board.make_move(mv);
             inc.push_move(board, mv, weights);

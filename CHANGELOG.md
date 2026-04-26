@@ -1,5 +1,25 @@
 # Changes
 
+## 0.6.4 (2026-04-27)
+* **Late Move Pruning (LMP).** At non-PV nodes with depth in 1..=3,
+  quiet (non-forcing, non-killer) moves whose `move_idx ≥ 8 + 4 × depth`
+  are skipped outright. Count-based instead of eval-based, so it sidesteps
+  the BCE-narrow eval-distribution problem that made 0.6.3's razoring /
+  futility prototypes inert.
+* Internal NNUE arena win rate at 5 s time budget stays at **80.0 %**
+  (24 W − 6 L over 30 games) — the same as 0.6.3. The fixed-depth-4
+  heuristic is the ceiling at this rate; the lift shows up elsewhere:
+  * Mean completed depth 5.63 → **6.00**, p50 7 → 8, p95 9 → 10, max
+    10 → 11. One extra ply at the high end and at the median.
+  * Average game time 60.62 s → 42.37 s (-30 %), the engine reaches
+    decisive lines faster.
+* The lose-game analysis on 0.6.1 placed Pela's killing mate sequences
+  7–9 ply ahead of our typical search horizon. Adding a ply at the high
+  end is exactly where this matters; the arena ceiling does not capture it.
+* No protocol or API regression. IIR, TT 256 K + push-down, Aspiration,
+  qsearch, threat-gated LMR, and the 128-node deadline check all carry
+  over from 0.6.3 unchanged.
+
 ## 0.6.3 (2026-04-27)
 * **Internal Iterative Reduction (IIR).** TT-miss non-PV nodes at
   `depth ≥ 4` now search at `depth - 1`. The standard chess-engine

@@ -9,7 +9,7 @@
 use crate::board::{Board, GameResult, Move, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::eval::IncrementalEval;
 use crate::heuristic::{scan_line, DIR};
-use crate::transposition::{Bound, TranspositionTable};
+use crate::transposition::{Bound, TranspositionTable, TtStats};
 use crate::vct::{classify_move, search_vct, ThreatKind, VctConfig};
 use noru::network::NnueWeights;
 use std::time::{Duration, Instant};
@@ -28,8 +28,11 @@ const ROOT_VCT_BUDGET_CAP_MS: u64 = 2_000;
 /// Root VCT 예산 하한 (너무 짧으면 TT warmup도 못 함).
 const ROOT_VCT_BUDGET_FLOOR_MS: u64 = 100;
 
-/// α-β TT 버킷 수 = 2^N. 16 → 65 536 버킷 = 2 MB.
-const TT_BUCKET_BITS: u32 = 16;
+/// α-β TT 버킷 수 = 2^N. 18 → 262 144 버킷 = 8 MB.
+/// 0.6.1 진단(2026-04-27)에서 16 bits(2 MB)로는 displaced 28.5% / always-replace
+/// 사용 2.1%로 collision-driven eviction 발생. 18 bits면 같은 게임에서
+/// displaced 5~10% 예상. Piskvork 대회 메모리 ≥350 MB 여유 안에서 무리 없음.
+const TT_BUCKET_BITS: u32 = 18;
 
 /// Aspiration windows: 이전 iteration score 주변 좁은 window. depth ≥ 이 값
 /// 부터 적용. 1~3 ply는 score 변동이 커서 widening cost가 절약 효과 상회.
@@ -64,6 +67,9 @@ pub struct SearchResult {
 /// 탐색기
 pub struct Searcher {
     pub nodes: u64,
+    /// TT cutoff 횟수 — probe()로 가져온 entry가 depth/bound 충족해서
+    /// 즉시 score 반환한 횟수. TT 효과 측정의 핵심 지표.
+    pub tt_cutoffs: u64,
     killers: [[Option<Move>; 2]; 64],
     history: [[i32; NUM_CELLS]; 2],
     deadline: Option<Instant>,
@@ -78,12 +84,23 @@ impl Searcher {
     pub fn new() -> Self {
         Self {
             nodes: 0,
+            tt_cutoffs: 0,
             killers: [[None; 2]; 64],
             history: [[0; NUM_CELLS]; 2],
             deadline: None,
             aborted: false,
             tt: TranspositionTable::new(TT_BUCKET_BITS),
         }
+    }
+
+    /// TT 진단 카운터 반환 — search() 끝난 직후 호출 가능.
+    pub fn tt_stats(&self) -> TtStats {
+        self.tt.stats()
+    }
+
+    /// TT 점유율 — `(non-empty depth_pref, non-empty always_replace, 총 bucket)`.
+    pub fn tt_occupancy(&self) -> (usize, usize, usize) {
+        self.tt.occupancy()
     }
 
     /// 반복 심화 탐색
@@ -95,10 +112,13 @@ impl Searcher {
         time_limit: Option<Duration>,
     ) -> SearchResult {
         self.nodes = 0;
+        self.tt_cutoffs = 0;
         self.aborted = false;
         self.killers = [[None; 2]; 64];
         self.history = [[0; NUM_CELLS]; 2];
         self.deadline = time_limit.map(|d| Instant::now() + d);
+        // TT 진단 카운터도 리셋 — 한 search() 호출이 한 측정 단위.
+        self.tt.reset_stats();
         // 다음 search 호출이 새 게임 포지션부터일 수 있으므로 TT 비움.
         // 같은 search() 호출 내 iterative deepening 사이에는 TT가 유지되어
         // 깊은 iteration이 얕은 iteration의 cutoff/PV 정보를 그대로 활용.
@@ -358,9 +378,18 @@ impl Searcher {
             if entry.depth as u32 >= depth {
                 let cached = entry.score;
                 match entry.bound {
-                    Bound::Exact => return cached,
-                    Bound::Lower if cached >= beta => return cached,
-                    Bound::Upper if cached <= alpha => return cached,
+                    Bound::Exact => {
+                        self.tt_cutoffs += 1;
+                        return cached;
+                    }
+                    Bound::Lower if cached >= beta => {
+                        self.tt_cutoffs += 1;
+                        return cached;
+                    }
+                    Bound::Upper if cached <= alpha => {
+                        self.tt_cutoffs += 1;
+                        return cached;
+                    }
                     _ => {}
                 }
             }

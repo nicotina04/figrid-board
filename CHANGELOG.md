@@ -1,5 +1,32 @@
 # Changes
 
+## 0.6.2 (2026-04-27)
+* **Transposition table grown from 64 K to 256 K buckets.** A diagnostic
+  pass on 0.6.1 (5 s budget, 5-game arena) recorded 28.5 % of stores
+  evicting an existing depth-preferred entry while the always-replace
+  slot stayed at 2.1 % usage — a textbook bucket-shortage signature.
+  `TT_BUCKET_BITS` rises from 16 to 18 (2 MB → 8 MB), still well inside
+  Piskvork's ≥350 MB budget. Same diagnostic on the larger table drops
+  displaced rate to 15.3 % and lifts hit rate from 36.6 % to 39.2 %.
+* **Push-down replacement on the depth-preferred slot.** When a new
+  store evicts a non-empty depth-preferred entry whose key differs from
+  the incoming one, the evicted entry is now copied into the
+  always-replace slot before being overwritten — instead of being
+  silently discarded as in 0.6.1. The always-replace slot now actually
+  acts as the second-best entry per bucket, the role its name implies.
+  Same-key updates (the common case during iterative deepening) skip the
+  push-down so a stale shallow entry doesn't shadow the fresh deep one.
+* **TT diagnostic counters**: `probes`, `hits`, `stores`,
+  `displaced_depth_pref`, `stored_to_always`, and a 16-bucket store
+  depth histogram, exposed via `TranspositionTable::stats()` and
+  `Searcher::tt_cutoffs`. Counters live in `Cell<u64>` so the hot
+  `probe()` path stays `&self`. Cost is ~1 ns per probe and the
+  Piskvork binary does not print them — the data is for the trainer's
+  arena harness.
+* No protocol or API regression. Engine algorithm is unchanged in 0.6.2;
+  the ply budget materializes purely as fewer collisions plus a small
+  cutoff-rate lift.
+
 ## 0.6.1 (2026-04-26)
 * **Search overhaul** — internal NNUE arena win rate at 5 s time budget
   jumps from 40 % to 63.3 % (30-game), powered by four orthogonal changes

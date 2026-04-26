@@ -8,6 +8,7 @@
 //! 시작 (figrid Piskvork submission 메모리 여유 안에).
 
 use crate::board::Move;
+use std::cell::Cell;
 
 /// TT entry value의 bound 종류.
 /// - Exact: PV 노드, 정확한 score
@@ -58,9 +59,28 @@ const EMPTY_BUCKET: Bucket = Bucket {
     always_replace: TtEntry::EMPTY,
 };
 
+/// 진단용 카운터 — TT 효과 측정. `Cell`이라 `&self probe()`에서도 갱신 가능.
+/// 비용은 매 probe/store당 ~1ns. 정상 동작에 영향 없음.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TtStats {
+    pub probes: u64,            // probe() 호출 총수
+    pub hits: u64,               // 키 일치한 횟수 (cutoff 가능 여부 별개)
+    pub stores: u64,             // store() 호출 총수
+    pub displaced_depth_pref: u64, // depth_pref slot이 비어있지 않은데 덮어쓴 횟수
+    pub stored_to_always: u64,   // always_replace slot에 저장한 횟수 (= depth_pref가 더 깊어서 보존)
+    /// 저장 시점의 depth 분포 (0..15는 그 depth, 15는 15+ 통합).
+    pub depth_hist: [u64; 16],
+}
+
 pub struct TranspositionTable {
     buckets: Vec<Bucket>,
     mask: usize, // index = key as usize & mask (buckets.len()는 2^N)
+    probes: Cell<u64>,
+    hits: Cell<u64>,
+    stores: Cell<u64>,
+    displaced_depth_pref: Cell<u64>,
+    stored_to_always: Cell<u64>,
+    depth_hist: [Cell<u64>; 16],
 }
 
 impl TranspositionTable {
@@ -70,10 +90,16 @@ impl TranspositionTable {
         Self {
             buckets: vec![EMPTY_BUCKET; n],
             mask: n - 1,
+            probes: Cell::new(0),
+            hits: Cell::new(0),
+            stores: Cell::new(0),
+            displaced_depth_pref: Cell::new(0),
+            stored_to_always: Cell::new(0),
+            depth_hist: Default::default(),
         }
     }
 
-    /// 모든 슬롯 비우기 (탐색 시작 시).
+    /// 모든 슬롯 비우기 (탐색 시작 시). 카운터는 보존 — search() 호출 누적.
     pub fn clear(&mut self) {
         for b in self.buckets.iter_mut() {
             b.depth_pref = TtEntry::EMPTY;
@@ -81,14 +107,56 @@ impl TranspositionTable {
         }
     }
 
+    /// 진단 카운터 리셋 (한 search() 단위 측정 시작 시).
+    pub fn reset_stats(&self) {
+        self.probes.set(0);
+        self.hits.set(0);
+        self.stores.set(0);
+        self.displaced_depth_pref.set(0);
+        self.stored_to_always.set(0);
+        for c in &self.depth_hist {
+            c.set(0);
+        }
+    }
+
+    pub fn stats(&self) -> TtStats {
+        let mut hist = [0u64; 16];
+        for (i, c) in self.depth_hist.iter().enumerate() {
+            hist[i] = c.get();
+        }
+        TtStats {
+            probes: self.probes.get(),
+            hits: self.hits.get(),
+            stores: self.stores.get(),
+            displaced_depth_pref: self.displaced_depth_pref.get(),
+            stored_to_always: self.stored_to_always.get(),
+            depth_hist: hist,
+        }
+    }
+
+    /// Bucket 점유율 — `(non-empty depth_pref 수, non-empty always_replace 수, 총 bucket 수)`.
+    /// search 끝난 직후 호출하면 saturation 측정 가능.
+    pub fn occupancy(&self) -> (usize, usize, usize) {
+        let mut dp = 0usize;
+        let mut ar = 0usize;
+        for b in &self.buckets {
+            if !b.depth_pref.is_empty() { dp += 1; }
+            if !b.always_replace.is_empty() { ar += 1; }
+        }
+        (dp, ar, self.buckets.len())
+    }
+
     /// Lookup. 키 일치하는 entry 있으면 반환.
     #[inline]
     pub fn probe(&self, key: u64) -> Option<TtEntry> {
+        self.probes.set(self.probes.get() + 1);
         let bucket = &self.buckets[(key as usize) & self.mask];
         if bucket.depth_pref.key == key && !bucket.depth_pref.is_empty() {
+            self.hits.set(self.hits.get() + 1);
             return Some(bucket.depth_pref);
         }
         if bucket.always_replace.key == key && !bucket.always_replace.is_empty() {
+            self.hits.set(self.hits.get() + 1);
             return Some(bucket.always_replace);
         }
         None
@@ -96,8 +164,18 @@ impl TranspositionTable {
 
     /// Store. depth-preferred slot에 더 깊거나 같으면 저장, 아니면
     /// always-replace slot으로.
+    ///
+    /// Push-down 정책 (0.6.2~): depth_pref에 새 entry가 들어가야 할 때
+    /// 기존 entry가 비어있지 않으면 그걸 always-replace로 밀어낸다. 이전
+    /// 정책은 displaced된 entry를 그냥 버려서 always-replace slot이 거의
+    /// 비어있는 채로 활용 안 됨 (진단 2026-04-27: always 사용률 2.1%).
+    /// Push-down 후엔 always-replace가 "두 번째로 좋은 entry" 역할을 함.
     #[inline]
     pub fn store(&mut self, key: u64, score: i32, depth: u8, bound: Bound, best_move: Option<Move>) {
+        self.stores.set(self.stores.get() + 1);
+        let depth_idx = (depth as usize).min(15);
+        let h = &self.depth_hist[depth_idx];
+        h.set(h.get() + 1);
         let entry = TtEntry {
             key,
             score,
@@ -107,8 +185,17 @@ impl TranspositionTable {
         };
         let bucket = &mut self.buckets[(key as usize) & self.mask];
         if bucket.depth_pref.is_empty() || depth >= bucket.depth_pref.depth {
+            if !bucket.depth_pref.is_empty() {
+                self.displaced_depth_pref.set(self.displaced_depth_pref.get() + 1);
+                // Push-down: 같은 키 update가 아닐 때만 always-replace로 보존.
+                // 같은 키면 새 entry가 갱신본이라 기존을 보존할 이유 없음.
+                if bucket.depth_pref.key != key {
+                    bucket.always_replace = bucket.depth_pref;
+                }
+            }
             bucket.depth_pref = entry;
         } else {
+            self.stored_to_always.set(self.stored_to_always.get() + 1);
             bucket.always_replace = entry;
         }
     }

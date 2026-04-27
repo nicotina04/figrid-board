@@ -1,5 +1,32 @@
 # Changes
 
+## 0.6.5 (2026-04-27)
+* **Center-distance bonus removed from quiet-move ordering.** A 4-game
+  Pela analysis on 0.6.4 surfaced a clustering tendency: when given a
+  non-standard (corner-seeded) opening, our pieces drifted back toward
+  the centre and bunched up — a structurally losing pattern in Gomoku.
+  Tracing it inside `move_score_and_forcing`, the culprit was the
+  trailing `score += 14 - center_dist` line. Forcing moves are tier-
+  separated by ≥10⁵ so the bonus never affected them, but for tier-0
+  quiet moves the bonus dominated the killer/history/scan-line signals
+  the rest of the function relies on, dragging ordering toward the
+  centre on every empty board area. Deleting the line lets the quiet
+  ordering fall back to genuine signals.
+* Internal NNUE arena win rate at 5 s/move stays inside noise (80.0 % →
+  **83.3 %**, +3.3 percentage points, σ ≈ 7 % over 30 games), but the
+  more interesting effect is on game length: average game time drops
+  60.62 s → 41.50 s (-32 %), TT hit rate rises 39.7 % → 42.5 %, mean
+  completed depth holds at 6.06. The engine reaches decisive lines
+  faster because the ordering no longer wastes its first-move slot on
+  a cosmetic centre move.
+* This change is targeted at the corner-opening (swap2-style) regime
+  observed in live Pela matches, where the heuristic-arena ceiling does
+  not measure the regression. Pela re-runs are needed to confirm the
+  clustering itself is gone.
+* No protocol or API regression. LMP, IIR, TT 256 K + push-down,
+  Aspiration, qsearch, threat-gated LMR, and the 128-node deadline
+  check all carry over from 0.6.4 unchanged.
+
 ## 0.6.4 (2026-04-27)
 * **Late Move Pruning (LMP).** At non-PV nodes with depth in 1..=3,
   quiet (non-forcing, non-killer) moves whose `move_idx ≥ 8 + 4 × depth`

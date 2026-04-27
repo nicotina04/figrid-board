@@ -773,8 +773,11 @@ impl Searcher {
             }
         }
 
-        let center_dist = ((row - 7).abs() + (col - 7).abs()) as i32;
-        score += 14 - center_dist;
+        // 0.6.5 (2026-04-27): center bonus 삭제. quiet move ordering에서
+        // 안쪽 우대 → 자기 돌 뭉침 + 코너 opening (Pela swap2 등) 대응 약함
+        // 진단 결과. 14 - center_dist는 보드 끝까지 14 차이라 한 라인을
+        // 지배. 삭제 후 quiet 무브는 killer/history/scan-line(open-2)만으로
+        // tie-break.
 
         (score, is_forcing)
     }

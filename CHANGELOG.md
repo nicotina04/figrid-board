@@ -1,5 +1,38 @@
 # Changes
 
+## 0.6.6 (2026-04-27)
+* **NNUE architecture upgrade — hidden layer expanded from `[64]` to
+  `[128, 64]`.** The accumulator stays at 512 features, the binary
+  weights file grows from 4.3 MB to 4.5 MB, and forward latency rises
+  ~20 % per node. Driven by a 4-game Pela analysis on 0.6.5 that put
+  every losing position's killing mate inside the d4..d8 search
+  window — the search reaches there but the static eval fails to
+  *anticipate* the mate setup. Multi-step threat composition lives in
+  the hidden layer, so the layer was widened first to test that
+  hypothesis directly.
+* **Weights swap to `gomoku_v23_h128_64_psq.bin`.** Trained from
+  scratch on Gomocup PSQ (1 M positions, 15 epochs, lr 1e-3, heuristic
+  label) — the same recipe v6-A used. No Rapfi distillation step in
+  this release; an earlier `v23 + Rapfi distill` candidate
+  (`v23_rapfi.bin`) measured worse against v14 in head-to-head
+  (43.3 % over 30 games at d4 vs 63.3 % for the PSQ-only v23), so the
+  shorter pipeline wins.
+* Internal NNUE arena vs the depth-4 heuristic at 5 s/move drops 80 %
+  → 76.7 %, but heuristic-arena scores have lost their meaning at this
+  level. PSQ heuristic-label training makes any NNUE that follows the
+  same recipe somewhat aligned with what the arena opponent is doing,
+  so they cluster together. The honest measurement is NNUE-vs-NNUE:
+  v23 beats v14 in 19 of 30 games (63.3 %, +13.3 percentage points,
+  σ ≈ 9 %) at fixed depth 4. Pela re-runs are needed to confirm.
+* The earlier v22 experiment (D4 augmentation + mate over-sample, same
+  acc/hidden as v14) shows the same fixed-depth-4 head-to-head at
+  43.3 % — i.e. it lost to v14. Together those two results say data
+  augmentation at the input is not what this engine needs at this
+  scale; capacity at the composition layer is.
+* No protocol or API regression. Centre-distance-bonus removal, LMP,
+  IIR, TT 256 K + push-down, Aspiration, qsearch, threat-gated LMR,
+  and the 128-node deadline check all carry over from 0.6.5 unchanged.
+
 ## 0.6.5 (2026-04-27)
 * **Center-distance bonus removed from quiet-move ordering.** A 4-game
   Pela analysis on 0.6.4 surfaced a clustering tendency: when given a

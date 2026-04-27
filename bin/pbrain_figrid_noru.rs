@@ -10,7 +10,7 @@ use std::time::Duration;
 use figrid_board::{to_idx, Board, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
 use noru::network::NnueWeights;
 
-const WEIGHTS_BYTES: &[u8] = include_bytes!("../models/gomoku_v14_broken_rapfi_wide.bin");
+const WEIGHTS_BYTES: &[u8] = include_bytes!("../models/gomoku_v23_h128_64_psq.bin");
 
 const MAX_DEPTH: u32 = 20;
 const DEFAULT_TIMEOUT_MS: i64 = 30_000;
@@ -337,7 +337,7 @@ fn main() {
             "ABOUT" => {
                 writeln!(
                     stdout,
-                    "name=\"figrid\", version=\"0.6.5\", author=\"nicotina04 (successor to wuwbobo2021)\", country=\"KR\""
+                    "name=\"figrid\", version=\"0.6.6\", author=\"nicotina04 (successor to wuwbobo2021)\", country=\"KR\""
                 )
                 .ok();
             }

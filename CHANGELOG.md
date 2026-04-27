@@ -1,5 +1,27 @@
 # Changes
 
+## 0.6.7 (2026-04-27)
+* **Revert: 0.6.6's hidden-layer expansion is rolled back.** v23
+  (hidden=[128, 64], PSQ-only) lost 5 of 5 against Pela in live play —
+  worse than 0.6.5's 1-of-5. Hidden-vs-NNUE results suggested v23 was
+  stronger than v14 (63.3 % over 30 head-to-head games at d4), but
+  that signal failed to transfer.
+* Probable cause is a training-data trap, not an architecture
+  ceiling: PSQ heuristic-label scoring rewards line-extension shapes,
+  so a wider hidden layer trained on it overfits to a "keep your stones
+  connected" preference that Pela exploits with outside-pressure
+  formations. The same recipe that produced v14 (PSQ heuristic + Rapfi
+  distill) hits a real ceiling well before architecture matters.
+* `GOMOKU_NNUE_CONFIG.hidden_sizes` reverts to `[64]`, weights revert
+  to `gomoku_v14_broken_rapfi_wide.bin`. The `[128, 64]` weights file
+  (`gomoku_v23_h128_64_psq.bin`) is preserved on disk for follow-up
+  experiments with different label / loss strategies (game-result
+  label, Pela self-sparring, etc.).
+* No protocol or API change vs 0.6.5. Centre-distance-bonus removal,
+  LMP, IIR, TT 256 K + push-down, Aspiration, qsearch, threat-gated
+  LMR, and the 128-node deadline check all carry over from 0.6.5
+  unchanged.
+
 ## 0.6.6 (2026-04-27)
 * **NNUE architecture upgrade — hidden layer expanded from `[64]` to
   `[128, 64]`.** The accumulator stays at 512 features, the binary

@@ -96,12 +96,12 @@ pub const MAX_ACTIVE_FEATURES: usize = 4096;
 pub const GOMOKU_NNUE_CONFIG: NnueConfig = NnueConfig {
     feature_size: TOTAL_FEATURE_SIZE,
     accumulator_size: 512,
-    // v23 (2026-04-27): hidden_sizes [64] → [128, 64]. 0.6.5 분석에서 lose
-    // 4판 모두 d4-d8 사이 mate (4 ply 너머)를 NNUE가 미리 못 감지 — 단일
-    // 패턴은 보지만 위협 조합 + 미래 라인 평가 약함. 정확히 hidden layer가
-    // 처리하는 영역이라 [128, 64] 2층 funnel로 확장. v14 weights는 shape
-    // mismatch로 로드 불가 — v23은 scratch 학습.
-    hidden_sizes: std::borrow::Cow::Borrowed(&[128, 64]),
+    // 0.6.7 (2026-04-27): hidden [128,64]→[64] 회귀. v23 (hidden [128,64])
+    // Pela 0/5 패배 — heuristic-label PSQ-only 학습이 hidden capacity 늘어난
+    // 만큼 "라인 잇기" 선호 over-fit. v14 weights + 0.6.5 search 조합이
+    // Pela 1/5로 더 강함 → 안전한 baseline 복귀. 큰 모델 시도는 다른 학습
+    // 데이터/loss로 가야 — heuristic label만으론 hidden 키워도 잇기 트랩.
+    hidden_sizes: std::borrow::Cow::Borrowed(&[64]),
     activation: Activation::CReLU,
 };
 

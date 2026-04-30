@@ -17,7 +17,7 @@ keywords = ["game", "board", "gomoku"]
 categories = ["data-structures", "game-development"]
 
 [dependencies]
-noru = "2.0"
+noru = "2.1"
 
 [lib]
 name = "figrid_board"

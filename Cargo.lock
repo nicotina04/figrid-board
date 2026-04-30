@@ -11,6 +11,6 @@ dependencies = [
 
 [[package]]
 name = "noru"
-version = "2.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48dbd1ef13488dad74b8329e1c513b720de4e34f4db53e7940e721caa5546bd2"
+checksum = "181c05a69d419fb098b455089d165917638d65d98152f371028138add3952daf"

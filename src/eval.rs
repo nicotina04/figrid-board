@@ -2,11 +2,12 @@
 
 use crate::board::{Board, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::features::{
-    broken_index, compound_index, count_bucket, cross_line_hash, cross_line_index, density_index,
-    length_bucket, local_density_bucket, lp_rich_index, open_bucket, ps_index, zone_for,
-    BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE, DENSITY_CAT_LEGAL,
-    DENSITY_CAT_MY_COUNT, DENSITY_CAT_MY_LOCAL, DENSITY_CAT_OPP_COUNT, DENSITY_CAT_OPP_LOCAL,
-    MAX_ACTIVE_FEATURES,
+    broken_index, compound_index, conv_k3_bucket, conv_kernel_index, count_bucket, cross_line_hash,
+    cross_line_index, density_index, five_stone_index, five_stone_swap_perspective,
+    last_move_index, length_bucket, local_density_bucket, lp_rich_index, open_bucket, phase_bucket,
+    phase_index, ps_index, zone_for, BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR,
+    BROKEN_SHAPE_THREE, DENSITY_CAT_LEGAL, DENSITY_CAT_MY_COUNT, DENSITY_CAT_MY_LOCAL,
+    DENSITY_CAT_OPP_COUNT, DENSITY_CAT_OPP_LOCAL, MAX_ACTIVE_FEATURES,
 };
 use crate::heuristic::{scan_line, DIR};
 use noru::network::{forward, Accumulator, FeatureDelta, NnueWeights};
@@ -149,10 +150,35 @@ pub(crate) fn features_from_cell(
         );
     }
 
-    // G section (Pattern4 mini NNUE feature) emit는 v17~v20 실험에서 효과
-    // 입증 안 됨 (v18 = v13 동등 53.3%, v19 회귀 26.7%)이라 제거.
-    // pattern_table 인프라 + Board::line_pattern_ids 는 보존됨 — 미래 다른
-    // 활용 (예: TT key augmentation, move ordering hint)을 위해.
+    // I: 5-stone window (env-gated NORU_FIVE_STONE=1). 이 cell anchor로 4방향
+    // 5-cell 윈도우 emit. 보드 벗어나면 skip. own↔opp swap을 pattern id에서
+    // 적용해 stm/nstm 양 perspective 표현. 활성 시 v52 weights 호환.
+    if five_stone_enabled() {
+        for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
+            let er = row + dr * 4;
+            let ec = col + dc * 4;
+            if er < 0 || er >= BOARD_SIZE as i32 || ec < 0 || ec >= BOARD_SIZE as i32 {
+                continue;
+            }
+            let mut pat: usize = 0;
+            for k in 0..5i32 {
+                let r = (row + dr * k) as usize;
+                let c = (col + dc * k) as usize;
+                let cell = r * BOARD_SIZE + c;
+                let digit = if my_bb.get(cell) {
+                    1
+                } else if opp_bb.get(cell) {
+                    2
+                } else {
+                    0
+                };
+                pat = pat * 3 + digit;
+            }
+            stm.push(five_stone_index(persp_mine, dir_idx, pat));
+            let pat_swapped = five_stone_swap_perspective(pat);
+            nstm.push(five_stone_index(persp_opp, dir_idx, pat_swapped));
+        }
+    }
 }
 
 /// D 섹션 — 전역 카운트 + last_move 주변 3×3 local density.
@@ -174,6 +200,101 @@ fn push_density_features(
 
     let legal = (NUM_CELLS as u32).saturating_sub(my_count + opp_count);
     push_density(stm, nstm, DENSITY_CAT_LEGAL, count_bucket(legal));
+
+    // G: Last-move position. 같은 인덱스를 stm/nstm 양쪽에 push (positional).
+    if let Some(mv) = board.last_move {
+        let idx = last_move_index(mv);
+        stm.push(idx);
+        nstm.push(idx);
+    }
+
+    // H: Phase bucket. one-hot via single active feature index.
+    let bucket = phase_bucket(board.move_count);
+    let phase_idx = phase_index(bucket);
+    stm.push(phase_idx);
+    nstm.push(phase_idx);
+
+    // J: Conv kernels (env-gated NORU_CONV_KERNELS=1). v52 weights 호환.
+    if conv_kernels_enabled() {
+        push_conv_kernel_features(my_bb, opp_bb, stm, nstm);
+    }
+}
+
+/// Whether to emit `I` (5-stone window) features. **ON by default for figrid
+/// 0.6.8+** since the bundled v52 weights are trained with these features.
+/// Allow disabling via `NORU_FIVE_STONE=0` for ablation testing only.
+fn five_stone_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("NORU_FIVE_STONE").map(|v| v != "0").unwrap_or(true))
+}
+
+/// Whether to emit `J` (conv kernel) features. **ON by default for figrid
+/// 0.6.8+** for the same reason as 5-stone above.
+fn conv_kernels_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("NORU_CONV_KERNELS").map(|v| v != "0").unwrap_or(true))
+}
+
+/// J: Conv kernel emit. K1 (3×3 own), K2 (3×3 opp), K3 (5×5 diamond own).
+fn push_conv_kernel_features(
+    my_bb: &crate::board::BitBoard,
+    opp_bb: &crate::board::BitBoard,
+    stm: &mut Vec<usize>,
+    nstm: &mut Vec<usize>,
+) {
+    const CROSS_4: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    const DIAMOND_12: [(i32, i32); 12] = [
+        (-2, 0), (-1, -1), (-1, 0), (-1, 1),
+        (0, -2), (0, -1), (0, 1), (0, 2),
+        (1, -1), (1, 0), (1, 1), (2, 0),
+    ];
+
+    for r in 0..BOARD_SIZE as i32 {
+        for c in 0..BOARD_SIZE as i32 {
+            let cell = (r * BOARD_SIZE as i32 + c) as usize;
+
+            let count_at = |bb: &crate::board::BitBoard, offsets: &[(i32, i32)]| -> u32 {
+                let mut n = 0u32;
+                for &(dr, dc) in offsets {
+                    let nr = r + dr;
+                    let nc = c + dc;
+                    if nr < 0 || nr >= BOARD_SIZE as i32 || nc < 0 || nc >= BOARD_SIZE as i32 {
+                        continue;
+                    }
+                    if bb.get((nr * BOARD_SIZE as i32 + nc) as usize) {
+                        n += 1;
+                    }
+                }
+                n
+            };
+
+            let k1_own_stm = count_at(my_bb, &CROSS_4) as usize;
+            if k1_own_stm > 0 {
+                stm.push(conv_kernel_index(0, 0, cell, k1_own_stm));
+            }
+            let k1_opp_stm = count_at(opp_bb, &CROSS_4) as usize;
+            if k1_opp_stm > 0 {
+                nstm.push(conv_kernel_index(0, 0, cell, k1_opp_stm));
+            }
+            if k1_opp_stm > 0 {
+                stm.push(conv_kernel_index(0, 1, cell, k1_opp_stm));
+            }
+            if k1_own_stm > 0 {
+                nstm.push(conv_kernel_index(0, 1, cell, k1_own_stm));
+            }
+
+            let k3_own = count_at(my_bb, &DIAMOND_12);
+            let bk_own = conv_k3_bucket(k3_own);
+            if bk_own > 0 {
+                stm.push(conv_kernel_index(0, 2, cell, bk_own));
+            }
+            let k3_opp = count_at(opp_bb, &DIAMOND_12);
+            let bk_opp = conv_k3_bucket(k3_opp);
+            if bk_opp > 0 {
+                nstm.push(conv_kernel_index(0, 2, cell, bk_opp));
+            }
+        }
+    }
 }
 
 /// `(row, col)`이 `(dr, dc)` 방향 라인의 **왼쪽 앵커 돌**일 때 broken 패턴을

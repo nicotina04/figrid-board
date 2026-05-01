@@ -27,8 +27,27 @@ pub const COMPOUND_BASE: usize = 2754;
 pub const DENSITY_BASE: usize = 2854;
 pub const CROSS_LINE_BASE: usize = 2904;
 pub const BROKEN_BASE: usize = 3416;
-pub const RESERVED_BASE: usize = 3848;
-pub const TOTAL_FEATURE_SIZE: usize = 4096;
+// G/H/I/J: noru-tactic 0.6.8+ feature stack. 4096 → 14336로 확장.
+// v52 weights (cp+WDL hybrid distillation, 1000g 59.5%) 호환.
+pub const LAST_MOVE_BASE: usize = 3848;
+pub const LAST_MOVE_NUM_CELLS: usize = NUM_SQUARES; // 225
+pub const PHASE_BASE: usize = 4073;
+pub const PHASE_NUM_BUCKETS: usize = 5;
+pub const FIVE_STONE_NUM_PATTERNS: usize = 243; // 3^5
+pub const FIVE_STONE_NUM_DIRS: usize = 4;
+pub const FIVE_STONE_PER_PERSP: usize = FIVE_STONE_NUM_DIRS * FIVE_STONE_NUM_PATTERNS;
+pub const FIVE_STONE_BASE: usize = 4078;
+pub const CONV_KERNEL_BASE: usize = 6022; // = FIVE_STONE_BASE + FIVE_STONE_PER_PERSP * 2
+pub const CONV_K1_NUM_BUCKETS: usize = 5;
+pub const CONV_K2_NUM_BUCKETS: usize = 5;
+pub const CONV_K3_NUM_BUCKETS: usize = 6;
+pub const CONV_BUCKETS_PER_KERNEL: [usize; 3] =
+    [CONV_K1_NUM_BUCKETS, CONV_K2_NUM_BUCKETS, CONV_K3_NUM_BUCKETS];
+pub const CONV_TOTAL_BUCKETS: usize =
+    CONV_K1_NUM_BUCKETS + CONV_K2_NUM_BUCKETS + CONV_K3_NUM_BUCKETS; // 16
+pub const CONV_PER_PERSP: usize = NUM_SQUARES * CONV_TOTAL_BUCKETS; // 225 × 16 = 3600
+pub const RESERVED_BASE: usize = CONV_KERNEL_BASE + CONV_PER_PERSP * 2; // 13222
+pub const TOTAL_FEATURE_SIZE: usize = 14336;
 
 // ===== A. PS =====
 pub const PS_PER_PERSP: usize = NUM_SQUARES; // 225
@@ -96,12 +115,11 @@ pub const MAX_ACTIVE_FEATURES: usize = 4096;
 pub const GOMOKU_NNUE_CONFIG: NnueConfig = NnueConfig {
     feature_size: TOTAL_FEATURE_SIZE,
     accumulator_size: 512,
-    // 0.6.7 (2026-04-27): hidden [128,64]→[64] 회귀. v23 (hidden [128,64])
-    // Pela 0/5 패배 — heuristic-label PSQ-only 학습이 hidden capacity 늘어난
-    // 만큼 "라인 잇기" 선호 over-fit. v14 weights + 0.6.5 search 조합이
-    // Pela 1/5로 더 강함 → 안전한 baseline 복귀. 큰 모델 시도는 다른 학습
-    // 데이터/loss로 가야 — heuristic label만으론 hidden 키워도 잇기 트랩.
-    hidden_sizes: std::borrow::Cow::Borrowed(&[64]),
+    // 0.6.8 (2026-04-30): v52 채택. cp+WDL hybrid + 5-stone window + conv
+    // kernels + 93k Rapfi 데이터 학습. 1000g vs heuristic 59.5% (v14 50%
+    // 대비 +9.5pp). v23 폐기 사유 (PSQ heuristic 라벨 over-fit) 회피 — 다른
+    // objective + 다른 데이터로 [128,64] 부활.
+    hidden_sizes: std::borrow::Cow::Borrowed(&[128, 64]),
     activation: Activation::CReLU,
 };
 
@@ -111,7 +129,11 @@ const _: () = assert!(COMPOUND_BASE == LP_BASE + LP_PER_PERSP * 2);
 const _: () = assert!(DENSITY_BASE == COMPOUND_BASE + COMPOUND_PER_PERSP * 2);
 const _: () = assert!(CROSS_LINE_BASE == DENSITY_BASE + DENSITY_NUM_CATEGORIES * DENSITY_NUM_BUCKETS);
 const _: () = assert!(BROKEN_BASE == CROSS_LINE_BASE + CROSS_LINE_PER_PERSP * 2);
-const _: () = assert!(RESERVED_BASE == BROKEN_BASE + BROKEN_PER_PERSP * 2);
+const _: () = assert!(LAST_MOVE_BASE == BROKEN_BASE + BROKEN_PER_PERSP * 2);
+const _: () = assert!(PHASE_BASE == LAST_MOVE_BASE + LAST_MOVE_NUM_CELLS);
+const _: () = assert!(FIVE_STONE_BASE == PHASE_BASE + PHASE_NUM_BUCKETS);
+const _: () = assert!(CONV_KERNEL_BASE == FIVE_STONE_BASE + FIVE_STONE_PER_PERSP * 2);
+const _: () = assert!(RESERVED_BASE == CONV_KERNEL_BASE + CONV_PER_PERSP * 2);
 const _: () = assert!(RESERVED_BASE <= TOTAL_FEATURE_SIZE);
 
 // ===================================================================
@@ -124,6 +146,95 @@ pub fn ps_index(perspective: usize, square: usize) -> usize {
     debug_assert!(perspective < 2);
     debug_assert!(square < NUM_SQUARES);
     PS_BASE + perspective * PS_PER_PERSP + square
+}
+
+/// Last-move 인덱스 — 마지막 수가 놓인 cell. perspective 없음 (positional).
+#[inline]
+pub fn last_move_index(square: usize) -> usize {
+    debug_assert!(square < NUM_SQUARES);
+    LAST_MOVE_BASE + square
+}
+
+/// move_count → phase bucket id (0..=4).
+#[inline]
+pub fn phase_bucket(move_count: usize) -> usize {
+    match move_count {
+        0..=4 => 0,
+        5..=9 => 1,
+        10..=19 => 2,
+        20..=29 => 3,
+        _ => 4,
+    }
+}
+
+/// Phase one-hot 인덱스. perspective 없음.
+#[inline]
+pub fn phase_index(bucket: usize) -> usize {
+    debug_assert!(bucket < PHASE_NUM_BUCKETS);
+    PHASE_BASE + bucket
+}
+
+/// 5-stone window pattern 인덱스.
+#[inline]
+pub fn five_stone_index(perspective: usize, dir: usize, pattern_id: usize) -> usize {
+    debug_assert!(perspective < 2);
+    debug_assert!(dir < FIVE_STONE_NUM_DIRS);
+    debug_assert!(pattern_id < FIVE_STONE_NUM_PATTERNS);
+    FIVE_STONE_BASE
+        + perspective * FIVE_STONE_PER_PERSP
+        + dir * FIVE_STONE_NUM_PATTERNS
+        + pattern_id
+}
+
+/// 5-trit pattern에서 own↔opp swap. own=1, opp=2 디지트만 교환.
+#[inline]
+pub fn five_stone_swap_perspective(mut pat: usize) -> usize {
+    let mut out = 0usize;
+    let mut mult = 1usize;
+    for _ in 0..5 {
+        let digit = pat % 3;
+        let swapped = match digit {
+            1 => 2,
+            2 => 1,
+            _ => 0,
+        };
+        out += swapped * mult;
+        mult *= 3;
+        pat /= 3;
+    }
+    out
+}
+
+/// Conv kernel index.
+#[inline]
+pub fn conv_kernel_index(perspective: usize, kernel_id: usize, cell: usize, bucket: usize) -> usize {
+    debug_assert!(perspective < 2);
+    debug_assert!(kernel_id < 3);
+    debug_assert!(cell < NUM_SQUARES);
+    debug_assert!(bucket < CONV_BUCKETS_PER_KERNEL[kernel_id]);
+    let bucket_offset_per_kernel: [usize; 3] = [
+        0,
+        CONV_K1_NUM_BUCKETS,
+        CONV_K1_NUM_BUCKETS + CONV_K2_NUM_BUCKETS,
+    ];
+    CONV_KERNEL_BASE
+        + perspective * CONV_PER_PERSP
+        + cell * CONV_TOTAL_BUCKETS
+        + bucket_offset_per_kernel[kernel_id]
+        + bucket
+}
+
+/// K3 (5×5 diamond ring own count 0..=12) → 6 buckets.
+#[inline]
+pub fn conv_k3_bucket(count: u32) -> usize {
+    match count {
+        0 => 0,
+        1..=2 => 1,
+        3..=4 => 2,
+        5..=6 => 3,
+        7..=9 => 4,
+        _ => 5,
+    }
 }
 
 // pattern_index 함수는 G section 통합 폐기로 더 이상 사용 안 함.

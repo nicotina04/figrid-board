@@ -80,7 +80,10 @@ impl ProtocolInfo {
     }
 
     fn rule_supported(&self) -> bool {
-        !(self.rule_continuous || self.rule_renju || self.rule_caro || self.rule_exact5)
+        // Freestyle (all bits 0) and Standard (exact5 only) are supported.
+        // Renju, Caro, and the obscure "continuous" overline-allowed rule
+        // require dedicated training / search logic — left for future work.
+        !(self.rule_continuous || self.rule_renju || self.rule_caro)
     }
 
     fn turn_budget(&self, move_count: usize) -> Duration {
@@ -239,6 +242,9 @@ fn main() {
                     continue;
                 }
                 engine.reset_board();
+                // Standard rule (rule=1): exactly-5 wins. Tell the board so
+                // its check_win drops overlines from the win-set.
+                engine.board.exact5 = engine.info.rule_exact5;
                 engine.started = true;
                 writeln!(stdout, "OK").ok();
             }
@@ -374,7 +380,7 @@ fn main() {
             "ABOUT" => {
                 writeln!(
                     stdout,
-                    "name=\"figrid\", version=\"0.6.8\", author=\"nicotina04 (successor to wuwbobo2021)\", country=\"KR\""
+                    "name=\"figrid\", version=\"0.6.9\", author=\"nicotina04 (successor to wuwbobo2021)\", country=\"KR\""
                 )
                 .ok();
             }

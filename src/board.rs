@@ -208,6 +208,11 @@ pub struct Board {
     /// (empty_pattern_id). make/undo가 영향받는 cell의 ID만 lookup으로
     /// 재계산해 region recompute를 피함. NNUE feature 매핑은 Phase 3에서.
     pub line_pattern_ids: LinePatternState,
+    /// Standard rule (Gomocup `rule=1`): exactly 5-in-a-row wins. Overlines
+    /// (6+ stones in a line) do NOT win. Default `false` = Freestyle.
+    /// Set after `Board::new()` via direct field mutation when the engine
+    /// receives `INFO rule 1`.
+    pub exact5: bool,
 }
 
 impl Board {
@@ -224,6 +229,7 @@ impl Board {
             // 정확한 초기값은 fill_initial_pattern_ids 에서 채움 (가장자리는
             // boundary 포함이라 ID ≠ 0).
             line_pattern_ids: Box::new([[0u16; 4]; NUM_CELLS]),
+            exact5: false,
         };
         b.fill_initial_pattern_ids();
         b
@@ -450,7 +456,14 @@ impl Board {
                 }
             }
 
-            if count >= 5 {
+            if self.exact5 {
+                // Standard rule (Gomocup rule=1): only exactly 5 wins.
+                // Overlines (count > 5) do NOT count as a win.
+                if count == 5 {
+                    return true;
+                }
+            } else if count >= 5 {
+                // Freestyle (default): 5 or more in a row wins.
                 return true;
             }
         }

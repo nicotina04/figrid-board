@@ -16,8 +16,25 @@ A library for the Five-in-a-Row (Gomoku) game, powered by noru (Rust NNUE librar
 keywords = ["game", "board", "gomoku"]
 categories = ["data-structures", "game-development"]
 
+# crates.io 10MB upload limit — NNUE weights (~15MB raw, ~9MB gzip) are
+# distributed via GitHub Releases, not embedded by default. Enable the
+# `embed-weights` feature when building a self-contained tournament binary.
+exclude = [
+    "models/*.bin",
+    "models/*.bin.gz",
+    "experiments/**",
+]
+
+[features]
+default = []
+# Embed compressed v52 NNUE weights into the binary at build time. Used for
+# the `pbrain-figrid` Gomocup submission build where Piskvork expects a
+# single self-contained executable. crates.io publishes do NOT enable this.
+embed-weights = ["dep:flate2"]
+
 [dependencies]
 noru = "2.1"
+flate2 = { version = "1", optional = true }
 
 [lib]
 name = "figrid_board"

@@ -10,7 +10,43 @@ use std::time::Duration;
 use figrid_board::{to_idx, Board, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
 use noru::network::NnueWeights;
 
-const WEIGHTS_BYTES: &[u8] = include_bytes!("../models/gomoku_v52_5stone_conv_93k.bin");
+/// Source the v52 NNUE weights. Two modes:
+///
+/// 1. `embed-weights` cargo feature (Gomocup submission build) — gzip-compressed
+///    weights are baked into the binary at compile time and decompressed once
+///    on startup. Yields a single self-contained executable.
+///
+/// 2. Default (crates.io publish, dev builds) — weights are read from disk at
+///    startup. Path resolution order:
+///       a. `$FIGRID_WEIGHTS` env var if set
+///       b. `./models/gomoku_v52_5stone_conv_93k.bin` relative to cwd
+///       c. error out with a hint
+#[cfg(feature = "embed-weights")]
+fn load_weights_bytes() -> Result<Vec<u8>, String> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    const COMPRESSED: &[u8] =
+        include_bytes!("../models/gomoku_v52_5stone_conv_93k.bin.gz");
+    let mut decoder = GzDecoder::new(COMPRESSED);
+    let mut out = Vec::with_capacity(15_000_000);
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| format!("failed to decompress embedded weights: {e}"))?;
+    Ok(out)
+}
+
+#[cfg(not(feature = "embed-weights"))]
+fn load_weights_bytes() -> Result<Vec<u8>, String> {
+    let path = std::env::var("FIGRID_WEIGHTS")
+        .unwrap_or_else(|_| "models/gomoku_v52_5stone_conv_93k.bin".into());
+    std::fs::read(&path).map_err(|e| {
+        format!(
+            "failed to read weights from `{path}`: {e}\n\
+             hint: set $FIGRID_WEIGHTS or place the file at ./models/, \
+             or rebuild with `--features embed-weights` for a self-contained binary"
+        )
+    })
+}
 
 const MAX_DEPTH: u32 = 20;
 const DEFAULT_TIMEOUT_MS: i64 = 30_000;
@@ -101,8 +137,9 @@ struct Engine {
 
 impl Engine {
     fn new() -> Result<Self, String> {
-        let weights = NnueWeights::load_from_bytes(WEIGHTS_BYTES, Some(GOMOKU_NNUE_CONFIG))
-            .map_err(|e| format!("failed to load embedded weights: {e}"))?;
+        let bytes = load_weights_bytes()?;
+        let weights = NnueWeights::load_from_bytes(&bytes, Some(GOMOKU_NNUE_CONFIG))
+            .map_err(|e| format!("failed to parse weights: {e}"))?;
         Ok(Self {
             board: Board::new(),
             weights,

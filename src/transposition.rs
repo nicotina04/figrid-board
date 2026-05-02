@@ -203,6 +203,28 @@ impl TranspositionTable {
     pub fn capacity(&self) -> usize {
         self.buckets.len() * 2
     }
+
+    /// Prefetch the bucket for `key` into L1 cache. Hides ~50-100 ns of
+    /// memory-load latency before the actual `probe()` lands. Call this
+    /// in the search loop as soon as you know the *next* zobrist key
+    /// (e.g. via `current_zob ^ stone_key ^ ZOBRIST_SIDE`) but before
+    /// committing the move + recursing.
+    ///
+    /// `_MM_HINT_T0` = "load into all cache levels" (most aggressive).
+    /// Spurious prefetches are harmless on x86_64; on non-x86 the call
+    /// is a no-op.
+    #[inline]
+    pub fn prefetch(&self, key: u64) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            let idx = (key as usize) & self.mask;
+            let bucket_ptr = self.buckets.as_ptr().add(idx);
+            _mm_prefetch(bucket_ptr as *const i8, _MM_HINT_T0);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = key;
+    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use crate::board::{Board, GameResult, Move, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::eval::IncrementalEval;
 use crate::heuristic::{scan_line, DIR};
 use crate::transposition::{Bound, TranspositionTable, TtStats};
-use crate::vct::{classify_move, search_vct, ThreatKind, VctConfig};
+use crate::vct::{classify_move, search_vct, ThreatKind, VctConfig, THREAT_KIND_COUNT};
 use noru::network::NnueWeights;
 use std::time::{Duration, Instant};
 
@@ -606,13 +606,18 @@ impl Searcher {
             Stone::White => (&board.white, &board.black),
         };
 
-        // 상대가 어디든 Five 만들 수 있으면 must-block 모드 — 그 차단수만 본다.
-        let opp_has_five = candidates
+        // 0.6.9: opp_kind를 candidates 한 번만 스캔해서 캐시. 기존 코드는
+        // (1) opp_has_five 검사로 N회 + (2) 루프 내 OpenFour 차단 검사로 N회
+        // → 같은 classify_move(opp,my,mv)를 최대 2N회 호출. 캐싱으로 N회로.
+        let opp_kinds: Vec<ThreatKind> = candidates
             .iter()
-            .any(|&m| matches!(classify_move(opp, my, m), ThreatKind::Five));
+            .map(|&m| classify_move(opp, my, m))
+            .collect();
+        let opp_has_five = opp_kinds.iter().any(|&k| matches!(k, ThreatKind::Five));
 
         let mut forcing: Vec<(Move, i32)> = Vec::new();
-        for &mv in &candidates {
+        for (i, &mv) in candidates.iter().enumerate() {
+            let opp_kind = opp_kinds[i];
             let my_kind = classify_move(my, opp, mv);
 
             // 즉시 승리는 must-block 여부와 무관하게 항상 우선.
@@ -623,26 +628,20 @@ impl Searcher {
 
             if opp_has_five {
                 // Must-block 모드: 상대 Five 차단수만.
-                let opp_kind = classify_move(opp, my, mv);
                 if matches!(opp_kind, ThreatKind::Five) {
                     forcing.push((mv, 900_000));
                 }
                 continue;
             }
 
-            // 공격 강제수.
-            let attack_score = match my_kind {
-                ThreatKind::OpenFour => Some(800_000),
-                ThreatKind::DoubleFour | ThreatKind::FourThree => Some(600_000),
-                _ => None,
-            };
-            if let Some(s) = attack_score {
-                forcing.push((mv, s));
+            // 공격 강제수 — 분기 대신 packed table.
+            let attack = QS_ATTACK_TABLE[my_kind as usize];
+            if attack > 0 {
+                forcing.push((mv, attack));
                 continue;
             }
 
-            // 상대 OpenFour 차단도 강제수.
-            let opp_kind = classify_move(opp, my, mv);
+            // 상대 OpenFour 차단도 강제수 (캐시된 opp_kind 재사용).
             if matches!(opp_kind, ThreatKind::OpenFour) {
                 forcing.push((mv, 700_000));
             }
@@ -746,54 +745,23 @@ impl Searcher {
         let my_kind = classify_move(my, opp, mv);
         let opp_kind = classify_move(opp, my, mv);
 
-        let is_forcing = matches!(
-            my_kind,
-            ThreatKind::Five
-                | ThreatKind::OpenFour
-                | ThreatKind::DoubleFour
-                | ThreatKind::FourThree
-                | ThreatKind::ClosedFour
-                | ThreatKind::OpenThree
-        ) || matches!(
-            opp_kind,
-            ThreatKind::Five
-                | ThreatKind::OpenFour
-                | ThreatKind::DoubleFour
-                | ThreatKind::FourThree
-                | ThreatKind::ClosedFour
-                | ThreatKind::OpenThree
-        );
+        // 0.6.9: 분기 없는 packed-table tier scoring. TIER 상수 간 buffer가
+        // ≥ 100 000으로 잡혀있어 max() 결과가 if-else 체인과 동일함을 보장.
+        // (예: my OpenFour=8M > opp OpenFour=7M > my DoubleFour=6M ...)
+        let attack_tier = MOVE_ATTACK_TABLE[my_kind as usize];
+        let block_tier = MOVE_BLOCK_TABLE[opp_kind as usize];
+        let tier_score = attack_tier.max(block_tier);
 
+        let is_forcing = is_forcing_kind(my_kind) || is_forcing_kind(opp_kind);
+
+        // Five 케이스 early-return: 나머지 score 합산을 절약 (TIER_WIN/BLOCK_WIN
+        // 자체로 다른 tier와 충돌 안 함, killer/history 더해도 의미 없음).
         if matches!(my_kind, ThreatKind::Five) {
             return (TIER_WIN, true);
         }
         if matches!(opp_kind, ThreatKind::Five) {
             return (TIER_BLOCK_WIN, true);
         }
-
-        let tier_score = if matches!(my_kind, ThreatKind::OpenFour) {
-            TIER_OPEN_FOUR
-        } else if matches!(opp_kind, ThreatKind::OpenFour) {
-            TIER_BLOCK_OPEN_FOUR
-        } else if matches!(my_kind, ThreatKind::DoubleFour | ThreatKind::FourThree) {
-            TIER_DOUBLE_FOUR
-        } else if matches!(opp_kind, ThreatKind::DoubleFour | ThreatKind::FourThree) {
-            TIER_BLOCK_DOUBLE_FOUR
-        } else if matches!(my_kind, ThreatKind::DoubleThree) {
-            TIER_DOUBLE_THREE
-        } else if matches!(opp_kind, ThreatKind::DoubleThree) {
-            TIER_BLOCK_DOUBLE_THREE
-        } else if matches!(my_kind, ThreatKind::ClosedFour) {
-            TIER_CLOSED_FOUR
-        } else if matches!(opp_kind, ThreatKind::ClosedFour) {
-            TIER_BLOCK_CLOSED_FOUR
-        } else if matches!(my_kind, ThreatKind::OpenThree) {
-            TIER_OPEN_THREE
-        } else if matches!(opp_kind, ThreatKind::OpenThree) {
-            TIER_BLOCK_OPEN_THREE
-        } else {
-            0
-        };
 
         let mut score = tier_score;
 
@@ -843,6 +811,58 @@ const TIER_CLOSED_FOUR: i32 = 1_500_000;
 const TIER_BLOCK_CLOSED_FOUR: i32 = 1_400_000;
 const TIER_OPEN_THREE: i32 = 1_000_000;
 const TIER_BLOCK_OPEN_THREE: i32 = 900_000;
+
+// === Branchless threat-score tables (0.6.9) ===
+// `ThreatKind as usize` 인덱스. 순서는 vct.rs의 #[repr(u8)] discriminant와 일치:
+//   0=None  1=ClosedFour  2=OpenThree  3=Five
+//   4=OpenFour  5=DoubleFour  6=FourThree  7=DoubleThree
+// 변경 시 vct.rs의 ThreatKind discriminant도 함께 수정해야 함.
+
+/// Move ordering: 내 위협이 만드는 attack tier 점수.
+const MOVE_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
+    0,                  // None
+    TIER_CLOSED_FOUR,   // ClosedFour
+    TIER_OPEN_THREE,    // OpenThree
+    TIER_WIN,           // Five
+    TIER_OPEN_FOUR,     // OpenFour
+    TIER_DOUBLE_FOUR,   // DoubleFour
+    TIER_DOUBLE_FOUR,   // FourThree
+    TIER_DOUBLE_THREE,  // DoubleThree
+];
+
+/// Move ordering: 상대 위협 차단 tier 점수.
+const MOVE_BLOCK_TABLE: [i32; THREAT_KIND_COUNT] = [
+    0,                          // None
+    TIER_BLOCK_CLOSED_FOUR,     // ClosedFour
+    TIER_BLOCK_OPEN_THREE,      // OpenThree
+    TIER_BLOCK_WIN,             // Five
+    TIER_BLOCK_OPEN_FOUR,       // OpenFour
+    TIER_BLOCK_DOUBLE_FOUR,     // DoubleFour
+    TIER_BLOCK_DOUBLE_FOUR,     // FourThree
+    TIER_BLOCK_DOUBLE_THREE,    // DoubleThree
+];
+
+/// `is_forcing` 비트마스크. bit i set ↔ ThreatKind discriminant i가 forcing.
+/// 현행 forcing 정의: ClosedFour, OpenThree, Five, OpenFour, DoubleFour, FourThree.
+/// (DoubleThree는 제외 — 기존 동작 유지.)
+const FORCING_MASK: u8 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6);
+
+/// qsearch attack-tier 점수 (내 위협). Five는 별도 처리(반환 즉시 cutoff).
+const QS_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
+    0,        // None
+    0,        // ClosedFour — qsearch attack 아님
+    0,        // OpenThree
+    0,        // Five — caller 별도 처리
+    800_000,  // OpenFour
+    600_000,  // DoubleFour
+    600_000,  // FourThree
+    0,        // DoubleThree — qsearch attack 아님
+];
+
+#[inline]
+fn is_forcing_kind(kind: ThreatKind) -> bool {
+    (FORCING_MASK >> (kind as u8)) & 1 != 0
+}
 
 /// Threat-gated LMR reduction 계산.
 /// 강제수 / killer / 첫 LMR_MIN_MOVE_IDX 무브 / 얕은 depth는 0 (안 줄임).

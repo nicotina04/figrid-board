@@ -104,20 +104,25 @@ fn classify_line(count: u32, open_ends: u32) -> LineThreat {
 }
 
 /// 한 수가 종합적으로 만드는 위협 종합 평가.
+///
+/// `#[repr(u8)]` + 명시 discriminant: search.rs에서 packed score table 인덱스
+/// (`kind as usize`)로 쓰기 위해. 값이 바뀌면 search.rs의 `THREAT_*_TABLE`도
+/// 같이 수정해야 함 (THREAT_KIND_COUNT도).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ThreatKind {
-    /// 위협 없음 — VCT 후보에서 제외.
-    None,
-    /// 강제수 (안 막으면 다음 수에 5목 또는 열린4). 재귀 탐색 대상.
-    ClosedFour,
-    OpenThree,
-    /// 즉시 승리 확정 위협. 반환 즉시 VCT 성공.
-    Five,
-    OpenFour,
-    DoubleFour,   // 두 방향 이상 4목
-    FourThree,    // 4목 + 열린3
-    DoubleThree,  // 두 방향 이상 열린3
+    None        = 0,
+    ClosedFour  = 1,
+    OpenThree   = 2,
+    Five        = 3,
+    OpenFour    = 4,
+    DoubleFour  = 5,
+    FourThree   = 6,
+    DoubleThree = 7,
 }
+
+/// `ThreatKind` discriminant의 수 — 테이블 크기 상수.
+pub const THREAT_KIND_COUNT: usize = 8;
 
 impl ThreatKind {
     /// 이 Threat이 형성되면 상대가 1수로 막을 수 없는지.

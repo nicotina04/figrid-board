@@ -33,7 +33,11 @@ default = []
 embed-weights = ["dep:flate2"]
 
 [dependencies]
-noru = "2.1"
+# Pulls noru's AVX-512F+BW SIMD path. Runtime-detected — auto-falls back
+# to AVX2 on CPUs without AVX-512, so this is strictly an opportunistic
+# 1.5-2× speedup on Skylake-X+, Ice Lake server, Sapphire Rapids, and
+# AVX-512-VNNI consumer parts. Build host needs Rust ≥ 1.89.
+noru = { version = "2.1", features = ["avx512"] }
 flate2 = { version = "1", optional = true }
 
 [lib]

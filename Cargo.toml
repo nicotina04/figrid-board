@@ -1,6 +1,6 @@
 [package]
 name = "figrid-board"
-version = "0.6.9"
+version = "0.6.10"
 authors = [
     "nicotina04 <devherdson@gmail.com>",
     "wuwbobo2021 <wuwbobo@outlook.com>",
@@ -31,13 +31,17 @@ default = []
 # the `pbrain-figrid` Gomocup submission build where Piskvork expects a
 # single self-contained executable. crates.io publishes do NOT enable this.
 embed-weights = ["dep:flate2"]
+# Pull noru's AVX-512F+BW SIMD path. Opt-in so that crates.io publishes and
+# downstream users on Rust < 1.89 are not forced through unstable target_feature
+# gates. Runtime-dispatched — auto-falls back to AVX-2 on CPUs without
+# AVX-512, so enabling this is strictly an opportunistic 1.5-2× speedup on
+# Skylake-X+, Ice Lake server, Sapphire Rapids, and AVX-512-VNNI consumer
+# parts. The Gomocup submission build should turn this on; library users on
+# stable Rust should leave it off.
+avx512 = ["noru/avx512"]
 
 [dependencies]
-# Pulls noru's AVX-512F+BW SIMD path. Runtime-detected — auto-falls back
-# to AVX2 on CPUs without AVX-512, so this is strictly an opportunistic
-# 1.5-2× speedup on Skylake-X+, Ice Lake server, Sapphire Rapids, and
-# AVX-512-VNNI consumer parts. Build host needs Rust ≥ 1.89.
-noru = { version = "2.1", features = ["avx512"] }
+noru = { version = "2.1" }
 flate2 = { version = "1", optional = true }
 
 [lib]

@@ -30,7 +30,7 @@
 - α-β search with transposition table, threat-aware move ordering, killer/history heuristics, late-move pruning, and a quiescence layer for forcing sequences.
 - Optional VCF / VCT tactical search at the search root.
 - Rule support: Freestyle and Standard (exact-five). Renju and Caro currently rejected at the protocol layer.
-- Optional `avx512` feature on the noru dependency: opportunistic ~2× evaluation speedup on AVX-512 hardware, with automatic AVX-2 fallback.
+- Optional `avx512` cargo feature: opportunistic ~2× evaluation speedup on AVX-512 hardware, with automatic AVX-2 runtime fallback. Requires Rust ≥ 1.89; off by default so library users on older toolchains and crates.io itself can build.
 - Optional `embed-weights` feature: bake the NNUE weights into the binary at build time, producing a single self-contained executable suitable for tournament submission.
 
 ## Quick start
@@ -81,7 +81,13 @@ RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v3" \
     --bin pbrain-figrid --features embed-weights
 ```
 
-An additional build with `-C target-cpu=x86-64-v4` for AVX-512 hardware may be submitted as a second zip entry; GomocupJudge picks the fastest compatible binary.
+For an AVX-512-capable second submission entry, additionally enable the `avx512` cargo feature (requires Rust ≥ 1.89 on the build host); GomocupJudge picks the fastest compatible binary on each match machine:
+
+```
+RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v4" \
+    cargo build --release --target x86_64-pc-windows-gnu \
+    --bin pbrain-figrid --features embed-weights,avx512
+```
 
 ## Roadmap
 

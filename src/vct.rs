@@ -20,6 +20,9 @@
 
 use crate::board::{Board, BitBoard, Move, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::heuristic::{scan_line, DIR};
+use crate::pattern_table::{
+    pattern_threat_after_my_play, read_window, swap_mapped_id, WindowThreat, PATTERN_RARE_ID,
+};
 use noru::trainer::SimpleRng;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -180,6 +183,136 @@ pub fn classify_move(my_bb: &BitBoard, opp_bb: &BitBoard, mv: Move) -> ThreatKin
             LineThreat::OpenThree => open_threes += 1,
             _ => {}
         }
+    }
+
+    if fives >= 1 {
+        return ThreatKind::Five;
+    }
+    if open_fours >= 1 {
+        return ThreatKind::OpenFour;
+    }
+    if fours >= 2 {
+        return ThreatKind::DoubleFour;
+    }
+    if closed_fours >= 1 && open_threes >= 1 {
+        return ThreatKind::FourThree;
+    }
+    if open_threes >= 2 {
+        return ThreatKind::DoubleThree;
+    }
+    if closed_fours >= 1 {
+        return ThreatKind::ClosedFour;
+    }
+    if open_threes >= 1 {
+        return ThreatKind::OpenThree;
+    }
+    ThreatKind::None
+}
+
+/// Pattern4 fast path. Uses `board.line_pattern_ids` (incrementally
+/// maintained on every `make_move` / `undo_move`) to look up each
+/// direction's line threat in O(1) and aggregate into a `ThreatKind`.
+///
+/// Semantically equivalent to `classify_move(my_bb, opp_bb, mv)` — assumes
+/// `mv` is an empty cell that `side` is about to play on. Top-K patterns
+/// (~97.5% of positions) hit the precomputed lookup; the RARE bucket falls
+/// back to a direct window read + scan so correctness is preserved.
+///
+/// In the search hot path this replaces `~64` `BitBoard::get` calls per
+/// candidate move (four directions × `scan_line` of eight cells × two
+/// bitboards) with four array lookups, so the classification cost drops
+/// roughly an order of magnitude. NNUE forward evaluation still dominates
+/// per-node cost, so the actual nodes-per-second uplift is measured rather
+/// than assumed.
+pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
+    let row = (mv / BOARD_SIZE) as i32;
+    let col = (mv % BOARD_SIZE) as i32;
+    let side_is_black = matches!(side, Stone::Black);
+    let (mine, opp) = if side_is_black {
+        (&board.black, &board.white)
+    } else {
+        (&board.white, &board.black)
+    };
+
+    let mut fours = 0u32;
+    let mut open_fours = 0u32;
+    let mut closed_fours = 0u32;
+    let mut open_threes = 0u32;
+    let mut fives = 0u32;
+
+    for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
+        // line_pattern_ids stores patterns from the black-relative frame.
+        // For the white-to-move query we look up the swapped pattern ID.
+        let pid_black = board.line_pattern_ids[mv][dir_idx];
+        let pid_my = if side_is_black {
+            pid_black
+        } else {
+            swap_mapped_id(pid_black)
+        };
+
+        let threat = if pid_my == PATTERN_RARE_ID {
+            // Slow path: read the actual window and classify directly.
+            let mut w = read_window(mine, opp, row, col, dr, dc);
+            // Anchor (index 5) must be empty for the use case. Set anchor=mine.
+            debug_assert_eq!(w[5], 0, "candidate move cell must be empty");
+            w[5] = 1;
+            // We only consume `pattern_table::WindowThreat` so we can inline
+            // a classify here (no `scan_line` / `LineThreat` round trip): walk
+            // outward from the anchor counting consecutive mines and check
+            // both endpoints for openness.
+            let mut count = 1u32;
+            let mut open_front = false;
+            for off in 1usize..=5 {
+                match w[5 + off] {
+                    1 => count += 1,
+                    0 => {
+                        open_front = true;
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            let mut open_back = false;
+            for off in 1usize..=5 {
+                match w[5 - off] {
+                    1 => count += 1,
+                    0 => {
+                        open_back = true;
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            let open_ends = open_front as u32 + open_back as u32;
+            match (count, open_ends) {
+                (5..=u32::MAX, _) => WindowThreat::Five,
+                (4, 2) => WindowThreat::OpenFour,
+                (4, 1) => WindowThreat::ClosedFour,
+                (3, 2) => WindowThreat::OpenThree,
+                (3, 1) => WindowThreat::ClosedThree,
+                (2, 2) => WindowThreat::OpenTwo,
+                _ => WindowThreat::None,
+            }
+        } else {
+            pattern_threat_after_my_play(pid_my)
+        };
+
+        match threat {
+            WindowThreat::Five => fives += 1,
+            WindowThreat::OpenFour => {
+                open_fours += 1;
+                fours += 1;
+            }
+            WindowThreat::ClosedFour => {
+                closed_fours += 1;
+                fours += 1;
+            }
+            WindowThreat::OpenThree => open_threes += 1,
+            _ => {}
+        }
+        // dr / dc are only consumed inside the RARE fallback's `read_window`;
+        // silence the unused-binding lint on the fast lookup branch.
+        let _ = (dr, dc);
     }
 
     if fives >= 1 {
@@ -512,6 +645,55 @@ fn timed_out(deadline: Option<Instant>) -> bool {
 mod tests {
     use super::*;
     use crate::board::to_idx;
+    use noru::trainer::SimpleRng;
+
+    /// `classify_move_fast` (Pattern4-backed) and `classify_move` (scan_line
+    /// based) must return the identical `ThreatKind` for every empty cell of
+    /// every random position. 1.5K positions × ~200 candidates ≈ 300K
+    /// comparisons; a single disagreement fails the test.
+    #[test]
+    fn pattern4_fast_classify_matches_baseline() {
+        let mut rng = SimpleRng::new(0xCAFE_BABE);
+        // generate 1500 positions spanning a range of game lengths
+        for trial in 0..1500 {
+            let mut board = Board::new();
+            // play 6 to 50 random plies (random legal cell each side; stop on
+            // any terminal result so we never query a finished game)
+            let ply_target = 6 + rng.next_usize(45);
+            for _ in 0..ply_target {
+                if !matches!(board.game_result(), crate::board::GameResult::Ongoing) {
+                    break;
+                }
+                let candidates = board.candidate_moves();
+                if candidates.is_empty() {
+                    break;
+                }
+                let idx = rng.next_usize(candidates.len());
+                board.make_move(candidates[idx]);
+            }
+            if !matches!(board.game_result(), crate::board::GameResult::Ongoing) {
+                continue;
+            }
+
+            let side = board.side_to_move;
+            let (my, opp) = match side {
+                Stone::Black => (&board.black, &board.white),
+                Stone::White => (&board.white, &board.black),
+            };
+            for cell in 0..NUM_CELLS {
+                if board.black.get(cell) || board.white.get(cell) {
+                    continue;
+                }
+                let baseline = classify_move(my, opp, cell);
+                let fast = classify_move_fast(&board, cell, side);
+                assert_eq!(
+                    baseline, fast,
+                    "mismatch at trial {trial} cell {cell} side {:?}",
+                    side
+                );
+            }
+        }
+    }
 
     /// mv 위치에 돌을 놓으면 Five가 완성되는가 — 열린4 상태에서 검증.
     #[test]

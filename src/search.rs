@@ -10,7 +10,7 @@ use crate::board::{Board, GameResult, Move, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::eval::IncrementalEval;
 use crate::heuristic::{scan_line, DIR};
 use crate::transposition::{Bound, TranspositionTable, TtStats};
-use crate::vct::{classify_move, search_vct, ThreatKind, VctConfig, THREAT_KIND_COUNT};
+use crate::vct::{classify_move_fast, search_vct, ThreatKind, VctConfig, THREAT_KIND_COUNT};
 use noru::network::NnueWeights;
 use std::time::{Duration, Instant};
 
@@ -81,6 +81,38 @@ pub struct SearchResult {
 }
 
 /// 탐색기
+/// Bound on the magnitude of any continuation-history entry. The gravity
+/// update keeps stored values asymptotically inside `[-HISTORY_MAX,
+/// HISTORY_MAX]` and the move-ordering reads scale by `HISTORY_SCORE_SHIFT`
+/// to stay within the existing tier budget. The clamp pair caps the per-read
+/// contribution so accumulated history can never crash through the killer
+/// or tier separators above. The shipped values were validated by a
+/// SPSA-style sweep over the shift exponent (Phase C.3-lite, 2026-05-07):
+/// the configuration below was the local optimum among `{0, 1, 2, 3}`.
+const HISTORY_MAX: i32 = 16_384;
+const HISTORY_SCORE_SHIFT: u32 = 2;
+const HISTORY_CLAMP_1: i32 = 20_000;
+const HISTORY_CLAMP_2: i32 = 15_000;
+
+/// `(prev_move, curr_move) -> i32` continuation-history table. Allocated
+/// once per `Searcher`, zeroed per `search()`.
+type ContHist = Box<[[i32; NUM_CELLS]]>;
+
+#[inline]
+fn new_cont_hist() -> ContHist {
+    vec![[0i32; NUM_CELLS]; NUM_CELLS].into_boxed_slice()
+}
+
+/// Stockfish-style gravity update. The pull toward zero is proportional to
+/// the current value times `|bonus|`, so the table self-bounds at HISTORY_MAX
+/// without an explicit clamp and is responsive to recent updates.
+#[inline]
+fn history_gravity_update(slot: &mut i32, bonus: i32) {
+    let abs_bonus = bonus.unsigned_abs() as i64;
+    let cur = *slot as i64;
+    *slot = (cur + bonus as i64 - cur * abs_bonus / HISTORY_MAX as i64) as i32;
+}
+
 pub struct Searcher {
     pub nodes: u64,
     /// TT cutoff 횟수 — probe()로 가져온 entry가 depth/bound 충족해서
@@ -88,6 +120,14 @@ pub struct Searcher {
     pub tt_cutoffs: u64,
     killers: [[Option<Move>; 2]; 64],
     history: [[i32; NUM_CELLS]; 2],
+    /// 1-ply continuation (countermove) history: `[prev_move][curr_move]`.
+    /// Bonus accrues when `curr_move` causes a beta-cutoff in a node whose
+    /// parent move was `prev_move`; siblings tried earlier in the same node
+    /// receive symmetric penalties.
+    cont_hist_1: ContHist,
+    /// 2-ply follow-up history: `[prev_prev_move][curr_move]`. Same update
+    /// scheme, different context — captures plans that span two of our moves.
+    cont_hist_2: ContHist,
     deadline: Option<Instant>,
     aborted: bool,
     /// α-β 노드 결과 캐시. 같은 포지션을 여러 번 탐색 안 하도록.
@@ -103,6 +143,8 @@ impl Searcher {
             tt_cutoffs: 0,
             killers: [[None; 2]; 64],
             history: [[0; NUM_CELLS]; 2],
+            cont_hist_1: new_cont_hist(),
+            cont_hist_2: new_cont_hist(),
             deadline: None,
             aborted: false,
             tt: TranspositionTable::new(TT_BUCKET_BITS),
@@ -132,6 +174,12 @@ impl Searcher {
         self.aborted = false;
         self.killers = [[None; 2]; 64];
         self.history = [[0; NUM_CELLS]; 2];
+        for row in self.cont_hist_1.iter_mut() {
+            row.fill(0);
+        }
+        for row in self.cont_hist_2.iter_mut() {
+            row.fill(0);
+        }
         self.deadline = time_limit.map(|d| Instant::now() + d);
         // TT 진단 카운터도 리셋 — 한 search() 호출이 한 측정 단위.
         self.tt.reset_stats();
@@ -447,6 +495,23 @@ impl Searcher {
         let mut best_move_at_node: Option<Move> = None;
         let side = board.side_to_move as usize;
 
+        // Continuation-history context: read the moves played to reach this
+        // node BEFORE the loop starts making/undoing moves. `prev1` is the
+        // immediate parent move; `prev2` is the move played two plies ago.
+        // When the table indices are absent (root and ply 1) the updates and
+        // reads simply skip the corresponding table.
+        let prev1: Option<Move> = board.history.last().copied();
+        let prev2: Option<Move> = if board.history.len() >= 2 {
+            Some(board.history[board.history.len() - 2])
+        } else {
+            None
+        };
+
+        // Quiet (non-forcing) moves tried before a beta-cutoff in this node;
+        // they receive negative bonuses on cutoff to discourage futures from
+        // ordering them above the actual cutter.
+        let mut quiets_tried: Vec<Move> = Vec::new();
+
         // PVS + Threat-gated LMR:
         // order_moves[0] = PV 예측 → full window 탐색.
         // 이후 모든 무브는 null-window로 빠르게 본 뒤 fail-high만 full re-search.
@@ -480,6 +545,13 @@ impl Searcher {
                 ^ crate::board::zobrist_stone_key(board.side_to_move, mv)
                 ^ crate::board::ZOBRIST_SIDE;
             self.tt.prefetch(next_zob);
+
+            // Track quiet move ordering for continuation-history penalties on
+            // a later cutoff (skipped for forcing moves — those carry their
+            // own tier signal and shouldn't get history bonuses).
+            if !is_forcing {
+                quiets_tried.push(mv);
+            }
 
             board.make_move(mv);
             inc.push_move(board, mv, weights);
@@ -523,6 +595,29 @@ impl Searcher {
                 if ply < 64 {
                     self.killers[ply][1] = self.killers[ply][0];
                     self.killers[ply][0] = Some(mv);
+                }
+                // Continuation-history bonus on beta-cutoff. Only quiet
+                // (non-forcing) cutters earn history; forcing cutters are
+                // already prioritized by their tier score in the move
+                // ordering and don't need the table to remember them. Quiet
+                // moves tried earlier in this node receive a symmetric
+                // penalty so the next ordering pass demotes them.
+                if !is_forcing {
+                    let bonus = ((depth * depth) as i32).min(HISTORY_MAX);
+                    if let Some(p1) = prev1 {
+                        history_gravity_update(&mut self.cont_hist_1[p1][mv], bonus);
+                    }
+                    if let Some(p2) = prev2 {
+                        history_gravity_update(&mut self.cont_hist_2[p2][mv], bonus);
+                    }
+                    for &qm in &quiets_tried[..quiets_tried.len().saturating_sub(1)] {
+                        if let Some(p1) = prev1 {
+                            history_gravity_update(&mut self.cont_hist_1[p1][qm], -bonus);
+                        }
+                        if let Some(p2) = prev2 {
+                            history_gravity_update(&mut self.cont_hist_2[p2][qm], -bonus);
+                        }
+                    }
                 }
                 break;
             }
@@ -606,19 +701,27 @@ impl Searcher {
             Stone::White => (&board.white, &board.black),
         };
 
-        // 0.6.9: opp_kind를 candidates 한 번만 스캔해서 캐시. 기존 코드는
-        // (1) opp_has_five 검사로 N회 + (2) 루프 내 OpenFour 차단 검사로 N회
-        // → 같은 classify_move(opp,my,mv)를 최대 2N회 호출. 캐싱으로 N회로.
+        // 0.6.9: cache opp_kind by scanning candidates once instead of letting
+        // (a) the must-block precheck and (b) the per-move OpenFour-block
+        // check each call `classify_move(opp, my, mv)` again — together they
+        // had been costing up to 2N calls. 0.7.0 swaps the per-call body for
+        // the Pattern4 fast path (~10x cheaper per call), so we keep the
+        // cache to lock the call count at N as well.
+        let opp_side = match board.side_to_move {
+            Stone::Black => Stone::White,
+            Stone::White => Stone::Black,
+        };
+        let _ = (my, opp); // moved into classify_move_fast(board, mv, side) form
         let opp_kinds: Vec<ThreatKind> = candidates
             .iter()
-            .map(|&m| classify_move(opp, my, m))
+            .map(|&m| classify_move_fast(board, m, opp_side))
             .collect();
         let opp_has_five = opp_kinds.iter().any(|&k| matches!(k, ThreatKind::Five));
 
         let mut forcing: Vec<(Move, i32)> = Vec::new();
         for (i, &mv) in candidates.iter().enumerate() {
             let opp_kind = opp_kinds[i];
-            let my_kind = classify_move(my, opp, mv);
+            let my_kind = classify_move_fast(board, mv, board.side_to_move);
 
             // 즉시 승리는 must-block 여부와 무관하게 항상 우선.
             if matches!(my_kind, ThreatKind::Five) {
@@ -708,7 +811,7 @@ impl Searcher {
         let mut packed: Vec<u64> = candidates
             .into_iter()
             .map(|m| {
-                let (s, f) = self.move_score_and_forcing(m, ply, side, my, opp);
+                let (s, f) = self.move_score_and_forcing(m, ply, side, my, opp, board);
                 let score_u = (s as i64 + SCORE_BIAS) as u64;
                 (score_u << 16) | (if f { FORCING_BIT } else { 0 }) | (m as u64)
             })
@@ -738,12 +841,17 @@ impl Searcher {
         side: usize,
         my: &crate::board::BitBoard,
         opp: &crate::board::BitBoard,
+        board: &Board,
     ) -> (i32, bool) {
         let row = (mv / BOARD_SIZE) as i32;
         let col = (mv % BOARD_SIZE) as i32;
 
-        let my_kind = classify_move(my, opp, mv);
-        let opp_kind = classify_move(opp, my, mv);
+        let opp_side = match board.side_to_move {
+            Stone::Black => Stone::White,
+            Stone::White => Stone::Black,
+        };
+        let my_kind = classify_move_fast(board, mv, board.side_to_move);
+        let opp_kind = classify_move_fast(board, mv, opp_side);
 
         // 0.6.9: 분기 없는 packed-table tier scoring. TIER 상수 간 buffer가
         // ≥ 100 000으로 잡혀있어 max() 결과가 if-else 체인과 동일함을 보장.
@@ -773,6 +881,21 @@ impl Searcher {
             }
         }
         score += self.history[side][mv].min(50_000);
+
+        // Continuation-history bonuses. The reads share the same source of
+        // `prev1` / `prev2` as the alpha_beta cutoff updates: each is the
+        // last (or second-last) move actually played to reach this node.
+        // The right-shift trims the table's range to a budget that doesn't
+        // crash through the tier separators above.
+        if let Some(p1) = board.history.last() {
+            score += (self.cont_hist_1[*p1][mv] >> HISTORY_SCORE_SHIFT)
+                .clamp(-HISTORY_CLAMP_1, HISTORY_CLAMP_1);
+        }
+        if board.history.len() >= 2 {
+            let p2 = board.history[board.history.len() - 2];
+            score += (self.cont_hist_2[p2][mv] >> HISTORY_SCORE_SHIFT)
+                .clamp(-HISTORY_CLAMP_2, HISTORY_CLAMP_2);
+        }
 
         for &(dr, dc) in &DIR {
             let my_info = scan_line(my, opp, row, col, dr, dc);

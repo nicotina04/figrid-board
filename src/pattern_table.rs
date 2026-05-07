@@ -267,6 +267,113 @@ pub fn swap_mapped_id(id: u16) -> u16 {
     swap_table()[id as usize]
 }
 
+/// Threat tier produced when `mine` (hypothetically) plays at the anchor cell
+/// of a single direction's window. Mirrors `vct.rs::LineThreat` but is kept
+/// separate here to avoid a cross-module type dependency; callers translate
+/// between the two enums.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum WindowThreat {
+    None = 0,
+    OpenTwo = 1,
+    ClosedThree = 2,
+    OpenThree = 3,
+    ClosedFour = 4,
+    OpenFour = 5,
+    Five = 6,
+}
+
+/// Classify the line threat for an 11-cell window where the anchor (index 5)
+/// is `mine` (=1). Walks consecutive mines outward from the anchor on both
+/// sides and inspects both terminals for openness. The 11-cell width covers
+/// up to a full five-in-a-row anchored at the center.
+fn classify_window_anchor_mine(w: &LineWindow) -> WindowThreat {
+    debug_assert_eq!(w[5], 1);
+    let mut count = 1u32;
+    // forward
+    let mut open_front = false;
+    for off in 1usize..=5 {
+        match w[5 + off] {
+            1 => count += 1,
+            0 => {
+                open_front = true;
+                break;
+            }
+            _ => break, // 2 (opp) or 3 (boundary)
+        }
+    }
+    // backward
+    let mut open_back = false;
+    for off in 1usize..=5 {
+        match w[5 - off] {
+            1 => count += 1,
+            0 => {
+                open_back = true;
+                break;
+            }
+            _ => break,
+        }
+    }
+    let open_ends = open_front as u32 + open_back as u32;
+    match (count, open_ends) {
+        (5..=u32::MAX, _) => WindowThreat::Five,
+        (4, 2) => WindowThreat::OpenFour,
+        (4, 1) => WindowThreat::ClosedFour,
+        (3, 2) => WindowThreat::OpenThree,
+        (3, 1) => WindowThreat::ClosedThree,
+        (2, 2) => WindowThreat::OpenTwo,
+        _ => WindowThreat::None,
+    }
+}
+
+/// O(1) lookup of the `LineThreat` produced when `mine` plays at an empty
+/// anchor cell, given the current `mapped pattern ID` for the surrounding
+/// 11-cell window. Top-K canonical IDs are precomputed; the `RARE` bucket
+/// returns `WindowThreat::None` and callers must fall back to
+/// `read_window` + `classify_window_anchor_mine` for those.
+///
+/// Intended use: in search hot paths where `classify_move(my_bb, opp_bb, mv)`
+/// would otherwise scan all four directions, feed
+/// `board.line_pattern_ids[mv][dir]` (optionally `swap_mapped_id`-ed for
+/// the white-to-move perspective) to this function and the four-direction
+/// scan cost collapses to four array accesses.
+pub fn pattern_threat_after_my_play(pid: u16) -> WindowThreat {
+    debug_assert!((pid as usize) < PATTERN_NUM_IDS);
+    threat_after_my_play_table()[pid as usize]
+}
+
+fn threat_after_my_play_table() -> &'static [WindowThreat; PATTERN_NUM_IDS] {
+    static TABLE: OnceLock<Box<[WindowThreat; PATTERN_NUM_IDS]>> = OnceLock::new();
+    TABLE.get_or_init(|| Box::new(build_threat_after_my_play_table()))
+}
+
+fn build_threat_after_my_play_table() -> [WindowThreat; PATTERN_NUM_IDS] {
+    let mut t = [WindowThreat::None; PATTERN_NUM_IDS];
+
+    // Canonical patterns may have anchor=0/1/2. Our use case only queries
+    // empty anchor cells (candidate move squares), so the entries that
+    // matter are those with anchor==0 — for them we simulate "mine plays
+    // at anchor" and classify. Patterns with anchor already mine are
+    // classified directly (debug/extra use cases); patterns with
+    // anchor==opp are left as `None` because they cannot occur for our
+    // hot path.
+    for (i, chunk) in TOPK_BYTES.chunks(4).enumerate() {
+        let canonical_packed = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let mut w = unpack_window(canonical_packed);
+        if w[5] != 0 {
+            if w[5] == 1 {
+                t[i] = classify_window_anchor_mine(&w);
+            }
+            continue;
+        }
+        w[5] = 1; // mine plays at anchor
+        t[i] = classify_window_anchor_mine(&w);
+    }
+    // PATTERN_RARE_ID slot stays `None`; the caller is expected to fall
+    // back to a direct `read_window` + classify when it sees that ID.
+    t
+}
+
 /// 보드 상태(stones bitboard 두 개)에서 (row, col, dir) 의 11-cell window를
 /// 읽어내는 helper. mine/opp 관점에 따라 cell 값 결정.
 #[inline]

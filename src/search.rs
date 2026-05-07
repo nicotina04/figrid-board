@@ -680,7 +680,7 @@ impl Searcher {
             GameResult::Ongoing => {}
         }
 
-        let stand_pat = inc.eval(weights);
+        let stand_pat = inc.eval(weights, board);
         if qply >= QSEARCH_MAX_PLY {
             return stand_pat;
         }

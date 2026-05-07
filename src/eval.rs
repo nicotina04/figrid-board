@@ -641,7 +641,26 @@ pub fn evaluate(board: &Board, weights: &NnueWeights) -> i32 {
     let (stm_feats, nstm_feats) = compute_active_features(board);
     let mut acc = Accumulator::new(&weights.feature_bias);
     acc.refresh(weights, &stm_feats, &nstm_feats);
+    apply_pattern4_dense(&mut acc, weights, board);
     forward(&acc, weights)
+}
+
+/// Compute the Pattern4 dense input vector and apply it to the accumulator
+/// when the loaded weights opted into the dense projection branch
+/// (`weights.dense_to_acc` non-empty). For v52 / v0.7.0 weights the dense
+/// branch is disabled and `apply_dense_input` short-circuits, so this call
+/// is a near-zero-cost no-op pre-Phase-A.1 weights.
+#[inline]
+fn apply_pattern4_dense(
+    acc: &mut Accumulator,
+    weights: &NnueWeights,
+    board: &Board,
+) {
+    if weights.dense_to_acc.is_empty() {
+        return;
+    }
+    let dense = crate::pattern_dense::pool_dense_input(&board.line_pattern_ids[..]);
+    acc.apply_dense_input(weights, &dense);
 }
 
 /// 진짜 incremental NNUE 평가 상태.
@@ -830,8 +849,19 @@ impl IncrementalEval {
         }
     }
 
-    pub fn eval(&self, weights: &NnueWeights) -> i32 {
-        forward(&self.accumulator, weights)
+    pub fn eval(&self, weights: &NnueWeights, board: &Board) -> i32 {
+        if weights.dense_to_acc.is_empty() {
+            // Sparse-only weights (v52 / v0.7.0): the stored accumulator
+            // is already complete; skip the dense overhead entirely.
+            return forward(&self.accumulator, weights);
+        }
+        // Phase A.1+: clone the accumulator so the incremental state stays
+        // pristine for subsequent push/pop frames, then layer the
+        // Pattern4 dense projection on top before the forward pass.
+        let mut acc = self.accumulator.clone();
+        let dense = crate::pattern_dense::pool_dense_input(&board.line_pattern_ids[..]);
+        acc.apply_dense_input(weights, &dense);
+        forward(&acc, weights)
     }
 }
 
@@ -999,12 +1029,12 @@ mod tests {
         let mut board = Board::new();
         let mut inc = IncrementalEval::new(&weights);
         inc.refresh(&board, &weights);
-        let before = inc.eval(&weights);
+        let before = inc.eval(&weights, &board);
         board.make_move(112);
         inc.push_move(&board, 112, &weights);
         board.undo_move();
         inc.pop_move();
-        assert_eq!(before, inc.eval(&weights));
+        assert_eq!(before, inc.eval(&weights, &board));
 
         // PS_BASE silence
         let _ = PS_BASE;
@@ -1038,7 +1068,7 @@ mod tests {
         let mut inc = IncrementalEval::new(&weights);
         inc.refresh(&board, &weights);
 
-        let initial = inc.eval(&weights);
+        let initial = inc.eval(&weights, &board);
         assert_eq!(initial, evaluate(&board, &weights), "refresh mismatch at empty");
 
         for (i, &mv) in moves.iter().enumerate() {
@@ -1048,7 +1078,7 @@ mod tests {
             board.make_move(mv);
             inc.push_move(&board, mv, &weights);
 
-            let inc_val = inc.eval(&weights);
+            let inc_val = inc.eval(&weights, &board);
             let full_val = evaluate(&board, &weights);
             assert_eq!(
                 inc_val, full_val,
@@ -1061,7 +1091,7 @@ mod tests {
         for _ in 0..moves.len() {
             board.undo_move();
             inc.pop_move();
-            let inc_val = inc.eval(&weights);
+            let inc_val = inc.eval(&weights, &board);
             let full_val = evaluate(&board, &weights);
             assert_eq!(inc_val, full_val, "mismatch during undo");
         }
@@ -1096,7 +1126,7 @@ mod tests {
         let mut inc = IncrementalEval::new(&weights);
         inc.refresh(&board, &weights);
 
-        assert_eq!(inc.eval(&weights), evaluate(&board, &weights));
+        assert_eq!(inc.eval(&weights, &board), evaluate(&board, &weights));
 
         for (i, &mv) in moves.iter().enumerate() {
             if !board.is_empty(mv) {
@@ -1105,7 +1135,7 @@ mod tests {
             board.make_move(mv);
             inc.push_move(&board, mv, &weights);
 
-            let inc_val = inc.eval(&weights);
+            let inc_val = inc.eval(&weights, &board);
             let full_val = evaluate(&board, &weights);
             assert_eq!(
                 inc_val, full_val,
@@ -1118,7 +1148,7 @@ mod tests {
         for _ in 0..moves.len() {
             board.undo_move();
             inc.pop_move();
-            assert_eq!(inc.eval(&weights), evaluate(&board, &weights), "undo mismatch");
+            assert_eq!(inc.eval(&weights, &board), evaluate(&board, &weights), "undo mismatch");
         }
     }
 
@@ -1166,7 +1196,7 @@ mod tests {
                 board.make_move(mv);
                 inc.push_move(&board, mv, &weights);
 
-                let inc_val = inc.eval(&weights);
+                let inc_val = inc.eval(&weights, &board);
                 let full_val = evaluate(&board, &weights);
                 assert_eq!(
                     inc_val, full_val,

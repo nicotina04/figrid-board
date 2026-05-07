@@ -53,9 +53,9 @@ dependencies = [
 
 [[package]]
 name = "noru"
-version = "2.1.1"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6932bcd6114e85ee97f459a522ddf3459b306748327819d1e0147c9b39762e2e"
+checksum = "83654c4f008197f515f315b6760a4781c6f734a6f0205e522b90119a8e1d29f2"
 
 [[package]]
 name = "simd-adler32"

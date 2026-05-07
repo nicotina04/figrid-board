@@ -41,7 +41,7 @@ embed-weights = ["dep:flate2"]
 avx512 = ["noru/avx512"]
 
 [dependencies]
-noru = { version = "2.1" }
+noru = { version = "2.2" }
 flate2 = { version = "1", optional = true }
 
 [lib]

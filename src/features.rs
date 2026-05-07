@@ -121,6 +121,12 @@ pub const GOMOKU_NNUE_CONFIG: NnueConfig = NnueConfig {
     // objective + 다른 데이터로 [128,64] 부활.
     hidden_sizes: std::borrow::Cow::Borrowed(&[128, 64]),
     activation: Activation::CReLU,
+    // Phase A.1 (2026-05-07): dense-input projection branch off by default.
+    // figrid loads v52 (saved before noru 2.2) which has no dense weights —
+    // the runtime config must mirror that to keep load_from_bytes happy.
+    // Bumping this field switches into the Pattern4-dense-embedding NNUE
+    // and requires retrained weights with `dense_input_size` matching here.
+    dense_input_size: 0,
 };
 
 // === Compile-time layout sanity ===

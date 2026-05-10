@@ -1,4 +1,5 @@
 /target/
+/dist/
 
 # Experimental NNUE weights — only the ship-tracked v52 (and earlier
 # regression baselines v13/v14/v18/v23) live in models/. Anything else

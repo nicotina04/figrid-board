@@ -1,5 +1,73 @@
 # Changes
 
+## 0.7.1 (2026-05-08)
+* **Phase-based time budget for tournament play.** The previous per-turn
+  allocation burned 30 s on every move regardless of the match budget,
+  which under Gomocup Freestyle-15-2 (180 s match cap + 30 s/move cap)
+  left figrid with effectively no time once the random opening was over
+  — the engine actually lost on time before reaching the midgame in 24
+  out of 24 calibration games. The new code mirrors standard
+  chess-engine time management:
+    ```
+    expected_per_side  = 35
+    remaining_this_side = max(35 - played_this_side, 5)
+    equal_share        = time_left / remaining_this_side
+
+    phase multiplier (move_count, ×100):
+      0..=5    -> 30   (random opening — minimal investment)
+      6..=11   -> 80   (early midgame ramp-up)
+      12..=24  -> 150  (tactical peak boost)
+      25..=34  -> 100  (late midgame)
+      35..     -> 60   (endgame, often forced)
+
+    budget = clamp(equal_share * mul / 100,
+                   lo = 100 ms,
+                   hi = min(timeout_turn, time_left / 3))
+    ```
+  Arena environments that don't announce a match budget keep the
+  original per-move-cap behaviour via a `timeout_match >= DEFAULT/2`
+  short-circuit.
+* Measured impact:
+    - vs. Pela 100 g, random 4-ply opening, 2 s/move + 180 s match:
+      0.7.0 = 19 % (figrid 18 black, 1 white) → 0.7.1 = 29 % (27 black,
+      2 white). +10 pp overall, +18 pp on the black side.
+    - vs. Pela 24 g (Gomocup 2025 freestyle openings, 180 s/30 s):
+      0.7.0 = 0/24 → 0.7.1 = 4/24, back inside the random-opening
+      baseline band.
+    - Self-play sibling vs. 0.7.0, random 4-ply 2 s/move: 20/30
+      (+16.7 pp).
+* The previously-rejected leaf VCF gate was re-tested under the new
+  budget and produced an exact 50 % sibling — its earlier −7 pp
+  regression was the buggy budget cancelling the cost of the extra
+  search, not a real engine signal. That code stays out of tree (no
+  functional change on its own).
+
+## 0.7.0 (2026-05-07)
+* **Pattern4 fast `classify_move` (`pattern_table.rs` + `vct.rs`).**
+  Reuses the per-cell `line_pattern_ids` cache that the board already
+  maintains incrementally on every `make_move` / `undo_move` to replace
+  `classify_move`'s four-direction `scan_line` pass with four O(1)
+  array lookups. A precomputed `pattern_threat_after_my_play` table
+  covers ~97.5 % of patterns; the RARE bucket falls back to a direct
+  window read so the classification stays exact. A 1 500-position
+  randomized test (~300 K comparisons) confirms identical output to
+  the baseline. Hot paths in `search.rs` updated: qsearch's `opp_kind`
+  cache + per-move `my_kind` probe, and `move_score_and_forcing`'s
+  `my_kind` / `opp_kind` reads. Self-play sibling (30 g, swap-sides):
+  19-11 (+13 pp vs. v0.6.10).
+* **Continuation history (`search.rs`).** Stockfish-style 1-ply
+  countermove and 2-ply follow-up tables, both 225 × 225 i32 (~200 KB
+  each, allocated once and zeroed per `search()`). Gravity update on
+  beta-cutoff: the cutting quiet move earns a positive bonus, all
+  earlier quiet siblings receive a symmetric penalty. Shift / clamp
+  constants reflect a SPSA-style sweep over the shift exponent — the
+  shipped value was the local optimum among `{0, 1, 2, 3}`. Self-play
+  sibling vs. the Pattern4 baseline (30 g, swap-sides): 18-12 (+10 pp).
+  White-side sibling wins climb from 3/15 to 6/15; vs. Pela the result
+  lands inside noise (within ±9 pp at this sample size).
+* No NNUE / weight changes — v0.7 is a search-only ship on top of
+  v0.6.10's v52 weights.
+
 ## 0.6.7 (2026-04-27)
 * **Revert: 0.6.6's hidden-layer expansion is rolled back.** v23
   (hidden=[128, 64], PSQ-only) lost 5 of 5 against Pela in live play —

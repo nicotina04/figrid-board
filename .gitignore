@@ -1,1 +1,8 @@
 /target/
+
+# Experimental NNUE weights — only the ship-tracked v52 (and earlier
+# regression baselines v13/v14/v18/v23) live in models/. Anything else
+# generated during training cycles stays out of the repo.
+models/gomoku_v[5-9]*.bin
+models/gomoku_v[5-9]*.bin.gz
+models/*.v52_backup

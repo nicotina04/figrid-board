@@ -7,7 +7,7 @@
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
-use figrid_board::{to_idx, Board, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
+use figrid_board::{book, to_idx, Board, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
 use noru::network::NnueWeights;
 
 /// Source the v52 NNUE weights. Two modes:
@@ -218,6 +218,20 @@ impl Engine {
         // `standard_specific` rule probe. Re-applying it here, right before
         // search, covers every command path regardless of ordering.
         self.board.exact5 = self.info.rule_exact5;
+
+        // Opening book: zero-search shortcut for the 24 Gomocup-published
+        // freestyle-15 / standard openings. Hits only when figrid is the side
+        // to move at the exact post-opening position; otherwise lookup misses
+        // and the search runs normally.
+        if let Some((x, y)) = book::lookup(self.board.zobrist) {
+            if let Ok(idx) = xy_to_idx(x, y) {
+                if self.board.is_empty(idx) {
+                    self.board.make_move(idx);
+                    return Some((x, y));
+                }
+            }
+        }
+
         let budget = self.info.turn_budget(self.board.move_count);
         let result = self
             .searcher

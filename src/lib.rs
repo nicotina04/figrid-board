@@ -9,6 +9,7 @@
 //! not a promise of ABI stability.
 
 pub mod board;
+pub mod book;
 pub mod coord;
 pub mod eval;
 pub mod features;

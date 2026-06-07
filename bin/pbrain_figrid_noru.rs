@@ -210,6 +210,14 @@ impl Engine {
     }
 
     fn choose_move(&mut self) -> Option<(u8, u8)> {
+        // Sync the win rule into the board on every move. Gomocup sends
+        // `START` *before* `INFO rule 1`, and `BOARD` calls `reset_board()`
+        // (which clears `exact5` back to false), so setting this only in the
+        // START handler leaves Standard games running in Freestyle mode —
+        // the engine would score an overline as a win and fail the
+        // `standard_specific` rule probe. Re-applying it here, right before
+        // search, covers every command path regardless of ordering.
+        self.board.exact5 = self.info.rule_exact5;
         let budget = self.info.turn_budget(self.board.move_count);
         let result = self
             .searcher

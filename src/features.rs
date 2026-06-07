@@ -444,6 +444,7 @@ mod tests {
 
     #[test]
     fn layout_sizes() {
+        // A–F: the original 4096-slot sections.
         assert_eq!(PS_PER_PERSP * 2, LP_BASE);
         assert_eq!(LP_PER_PERSP, 1152);
         assert_eq!(LP_PER_PERSP * 2 + LP_BASE, COMPOUND_BASE);
@@ -451,10 +452,20 @@ mod tests {
         assert_eq!(CROSS_LINE_PER_PERSP * 2 + CROSS_LINE_BASE, BROKEN_BASE);
         assert_eq!(BROKEN_BASE, 3416);
         assert_eq!(BROKEN_PER_PERSP, 216);
-        assert_eq!(BROKEN_PER_PERSP * 2 + BROKEN_BASE, RESERVED_BASE);
-        assert_eq!(RESERVED_BASE, 3848);
+        // G–J: the v52 / noru-tactic 0.6.8 expansion to 14336 slots
+        // (last-move, phase, 5-stone window, conv kernels). Broken is now
+        // followed by last-move, not reserved.
+        assert_eq!(BROKEN_PER_PERSP * 2 + BROKEN_BASE, LAST_MOVE_BASE);
+        assert_eq!(LAST_MOVE_BASE, 3848);
+        assert_eq!(LAST_MOVE_BASE + LAST_MOVE_NUM_CELLS, PHASE_BASE);
+        assert_eq!(PHASE_BASE + PHASE_NUM_BUCKETS, FIVE_STONE_BASE);
+        assert_eq!(FIVE_STONE_PER_PERSP, 972);
+        assert_eq!(FIVE_STONE_BASE + FIVE_STONE_PER_PERSP * 2, CONV_KERNEL_BASE);
+        assert_eq!(CONV_PER_PERSP, 3600);
+        assert_eq!(CONV_KERNEL_BASE + CONV_PER_PERSP * 2, RESERVED_BASE);
+        assert_eq!(RESERVED_BASE, 13222);
         assert!(RESERVED_BASE < TOTAL_FEATURE_SIZE);
-        assert_eq!(TOTAL_FEATURE_SIZE, 4096);
+        assert_eq!(TOTAL_FEATURE_SIZE, 14336);
     }
 
     #[test]

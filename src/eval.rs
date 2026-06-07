@@ -961,12 +961,14 @@ mod tests {
     };
 
     #[test]
-    fn empty_board_has_only_density_features() {
+    fn empty_board_has_only_global_features() {
         let board = Board::new();
         let (stm, nstm) = compute_active_features(&board);
-        // 빈 보드: PS 0개, LP 0개, Density 5개.
-        assert_eq!(stm.len(), 5);
-        assert_eq!(nstm.len(), 5);
+        // 빈 보드: per-cell 섹션(A/B/C/E/F/G/I)과 conv(J)는 돌이 없어 0개.
+        // 항상 emit되는 전역 피처만 남음: Density 5개 + Phase 1개 = 6.
+        // (last-move는 board.last_move가 None이라 미emit.)
+        assert_eq!(stm.len(), 6);
+        assert_eq!(nstm.len(), 6);
     }
 
     #[test]

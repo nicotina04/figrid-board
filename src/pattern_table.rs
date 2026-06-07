@@ -287,7 +287,7 @@ pub enum WindowThreat {
 /// is `mine` (=1). Walks consecutive mines outward from the anchor on both
 /// sides and inspects both terminals for openness. The 11-cell width covers
 /// up to a full five-in-a-row anchored at the center.
-fn classify_window_anchor_mine(w: &LineWindow) -> WindowThreat {
+fn classify_window_anchor_mine(w: &LineWindow, exact5: bool) -> WindowThreat {
     debug_assert_eq!(w[5], 1);
     let mut count = 1u32;
     // forward
@@ -316,6 +316,10 @@ fn classify_window_anchor_mine(w: &LineWindow) -> WindowThreat {
     }
     let open_ends = open_front as u32 + open_back as u32;
     match (count, open_ends) {
+        // Standard rule (Gomocup rule=1): a move that forms six-or-more in a
+        // row is an overline, which is NOT a win. It is also not a four/three,
+        // so it carries no winning threat at all.
+        (6..=u32::MAX, _) if exact5 => WindowThreat::None,
         (5..=u32::MAX, _) => WindowThreat::Five,
         (4, 2) => WindowThreat::OpenFour,
         (4, 1) => WindowThreat::ClosedFour,
@@ -342,12 +346,25 @@ pub fn pattern_threat_after_my_play(pid: u16) -> WindowThreat {
     threat_after_my_play_table()[pid as usize]
 }
 
-fn threat_after_my_play_table() -> &'static [WindowThreat; PATTERN_NUM_IDS] {
-    static TABLE: OnceLock<Box<[WindowThreat; PATTERN_NUM_IDS]>> = OnceLock::new();
-    TABLE.get_or_init(|| Box::new(build_threat_after_my_play_table()))
+/// Standard-rule (`rule=1`) variant of [`pattern_threat_after_my_play`]: an
+/// overline (six-or-more in a row) is classified as `None` instead of `Five`,
+/// since it does not win. Selected by callers when `board.exact5` is set.
+pub fn pattern_threat_after_my_play_exact5(pid: u16) -> WindowThreat {
+    debug_assert!((pid as usize) < PATTERN_NUM_IDS);
+    threat_after_my_play_table_exact5()[pid as usize]
 }
 
-fn build_threat_after_my_play_table() -> [WindowThreat; PATTERN_NUM_IDS] {
+fn threat_after_my_play_table() -> &'static [WindowThreat; PATTERN_NUM_IDS] {
+    static TABLE: OnceLock<Box<[WindowThreat; PATTERN_NUM_IDS]>> = OnceLock::new();
+    TABLE.get_or_init(|| Box::new(build_threat_after_my_play_table(false)))
+}
+
+fn threat_after_my_play_table_exact5() -> &'static [WindowThreat; PATTERN_NUM_IDS] {
+    static TABLE: OnceLock<Box<[WindowThreat; PATTERN_NUM_IDS]>> = OnceLock::new();
+    TABLE.get_or_init(|| Box::new(build_threat_after_my_play_table(true)))
+}
+
+fn build_threat_after_my_play_table(exact5: bool) -> [WindowThreat; PATTERN_NUM_IDS] {
     let mut t = [WindowThreat::None; PATTERN_NUM_IDS];
 
     // Canonical patterns may have anchor=0/1/2. Our use case only queries
@@ -362,12 +379,12 @@ fn build_threat_after_my_play_table() -> [WindowThreat; PATTERN_NUM_IDS] {
         let mut w = unpack_window(canonical_packed);
         if w[5] != 0 {
             if w[5] == 1 {
-                t[i] = classify_window_anchor_mine(&w);
+                t[i] = classify_window_anchor_mine(&w, exact5);
             }
             continue;
         }
         w[5] = 1; // mine plays at anchor
-        t[i] = classify_window_anchor_mine(&w);
+        t[i] = classify_window_anchor_mine(&w, exact5);
     }
     // PATTERN_RARE_ID slot stays `None`; the caller is expected to fall
     // back to a direct `read_window` + classify when it sees that ID.

@@ -1,0 +1,11 @@
+# Normalize line endings: store text as LF in the repo and check it out as
+# LF on every platform. Resolves the CRLF-in-worktree vs LF-in-repo mismatch
+# that made every file show up as "modified" under WSL/Windows.
+* text=auto eol=lf
+
+# Binary assets — never apply EOL conversion.
+*.bin binary
+*.gz binary
+*.png binary
+*.jpg binary
+*.ico binary

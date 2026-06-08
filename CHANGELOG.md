@@ -1,5 +1,13 @@
 # Changes
 
+## 0.7.2 (2026-06-09)
+* **Honor the Standard rule (exact-five) in NNUE threat detection.** Threat
+  scanning previously treated any line of five-or-more as a win, which is
+  correct for Freestyle/Renju but wrong under the Standard rule where an
+  overline (six or more in a row) does not count. The NNUE threat detector
+  now respects the exact-five requirement so evaluations no longer credit
+  illegal overline "wins" in Standard games.
+
 ## 0.7.1 (2026-05-08)
 * **Phase-based time budget for tournament play.** The previous per-turn
   allocation burned 30 s on every move regardless of the match budget,

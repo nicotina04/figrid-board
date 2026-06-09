@@ -10,12 +10,14 @@
 
 pub mod board;
 pub mod book;
+pub(crate) mod candidate_ranker;
 pub mod coord;
 pub mod eval;
 pub mod features;
 pub mod heuristic;
 pub mod pattern_dense;
 pub mod pattern_table;
+pub(crate) mod relation_lite;
 pub mod search;
 pub mod transposition;
 pub mod vct;

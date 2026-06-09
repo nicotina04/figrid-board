@@ -5,17 +5,22 @@
 /// - 위협 탐지 기반 수 정렬 (4목/열린3 감지)
 /// - 킬러 무브 + 히스토리 휴리스틱
 /// - 시간 제한
-
 use crate::board::{Board, GameResult, Move, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::eval::IncrementalEval;
 use crate::heuristic::{scan_line, DIR};
 use crate::transposition::{Bound, TranspositionTable, TtStats};
 use crate::vct::{classify_move_fast, search_vct, ThreatKind, VctConfig, THREAT_KIND_COUNT};
 use noru::network::NnueWeights;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const INF: i32 = 1_000_000;
 const WIN_SCORE: i32 = 999_000;
+
+#[inline]
+fn is_win_score(score: i32) -> bool {
+    score.abs() >= WIN_SCORE - 1_000
+}
 
 /// Root VCT 기본 시간 예산 (time_limit이 없을 때 사용). 아레나 등 고정 depth 탐색용.
 const ROOT_VCT_BUDGET_MS: u64 = 150;
@@ -73,11 +78,27 @@ const LMP_BASE: usize = 8;
 const LMP_PER_DEPTH: usize = 4;
 
 /// 탐색 결과
+#[derive(Debug, Clone)]
 pub struct SearchResult {
     pub best_move: Option<Move>,
     pub score: i32,
     pub depth: u32,
     pub nodes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RootCandidateAudit {
+    pub mv: Move,
+    pub search_score: i32,
+    pub relation_score: Option<i32>,
+    pub candidate_rank_score: Option<i32>,
+    pub is_forcing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RootSearchAudit {
+    pub result: SearchResult,
+    pub candidates: Vec<RootCandidateAudit>,
 }
 
 /// 탐색기
@@ -111,6 +132,48 @@ fn history_gravity_update(slot: &mut i32, bonus: i32) {
     let abs_bonus = bonus.unsigned_abs() as i64;
     let cur = *slot as i64;
     *slot = (cur + bonus as i64 - cur * abs_bonus / HISTORY_MAX as i64) as i32;
+}
+
+#[inline]
+fn relation_score_prefers(candidate: Option<i32>, incumbent: Option<i32>) -> bool {
+    match (candidate, incumbent) {
+        (Some(candidate), Some(incumbent)) => candidate > incumbent,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct RootRelationGate {
+    attack: ThreatKind,
+    block: ThreatKind,
+}
+
+#[inline]
+fn root_relation_gate_key(board: &Board, mv: Move) -> Option<RootRelationGate> {
+    let attack = classify_move_fast(board, mv, board.side_to_move);
+    let block = classify_move_fast(board, mv, board.side_to_move.opponent());
+    if attack == ThreatKind::None && block == ThreatKind::None {
+        None
+    } else {
+        Some(RootRelationGate { attack, block })
+    }
+}
+
+#[inline]
+fn root_relation_strict_gate() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("NORU_RELATION_LITE_ROOT_GATE")
+            .map(|raw| {
+                let trimmed = raw.trim();
+                trimmed.eq_ignore_ascii_case("strict")
+                    || trimmed.eq_ignore_ascii_case("tactical")
+                    || trimmed.eq_ignore_ascii_case("same-threat")
+                    || trimmed.eq_ignore_ascii_case("same_threat")
+            })
+            .unwrap_or(false)
+    })
 }
 
 pub struct Searcher {
@@ -235,34 +298,28 @@ impl Searcher {
             // 좁은 [s-delta, s+delta] 로 시작. fail-low/high 시 재탐색.
             // 정확한 score는 보통 좁은 window 안 → 첫 시도에서 cutoff 효과
             // 극대화. window 빗나갈 때만 widening.
-            let mut alpha_init: i32;
-            let mut beta_init: i32;
             let aspirate = depth >= ASPIRATION_MIN_DEPTH && prev_score.is_some();
-            if aspirate {
+            let (alpha_init, beta_init) = if aspirate {
                 let s = prev_score.unwrap();
-                alpha_init = s - ASPIRATION_INITIAL_DELTA;
-                beta_init = s + ASPIRATION_INITIAL_DELTA;
+                (s - ASPIRATION_INITIAL_DELTA, s + ASPIRATION_INITIAL_DELTA)
             } else {
-                alpha_init = -INF;
-                beta_init = INF;
-            }
+                (-INF, INF)
+            };
 
             let mut alpha = alpha_init;
             let mut beta = beta_init;
             let mut delta = ASPIRATION_INITIAL_DELTA;
-            let mut iter_result: (Option<Move>, i32) = (None, 0);
 
             // Aspiration re-search loop. fail-high/low 마다 window widen.
-            loop {
-                iter_result = self.root_pvs_iteration(
-                    board, weights, &mut inc, depth, alpha, beta, prev_best,
-                );
+            let iter_result = loop {
+                let current = self
+                    .root_pvs_iteration(board, weights, &mut inc, depth, alpha, beta, prev_best);
                 if self.aborted {
-                    break;
+                    break current;
                 }
-                let score = iter_result.1;
+                let score = current.1;
                 if !aspirate {
-                    break;
+                    break current;
                 }
                 if score <= alpha {
                     // fail-low: alpha 더 낮춤
@@ -272,30 +329,24 @@ impl Searcher {
                         // 한 번 더 시도하면 full window라 break해도 됨,
                         // 그 결과는 다음 iteration에서 사용. 여기선 break 후
                         // 다시 -INF/INF로.
-                        beta = INF;
                         // re-search with full window once
-                        iter_result = self.root_pvs_iteration(
-                            board, weights, &mut inc, depth,
-                            -INF, INF, prev_best,
+                        break self.root_pvs_iteration(
+                            board, weights, &mut inc, depth, -INF, INF, prev_best,
                         );
-                        break;
                     }
                 } else if score >= beta {
                     delta = (delta * 2).min(INF / 4);
                     beta = (beta + delta).min(INF);
                     if beta == INF {
-                        alpha = -INF;
-                        iter_result = self.root_pvs_iteration(
-                            board, weights, &mut inc, depth,
-                            -INF, INF, prev_best,
+                        break self.root_pvs_iteration(
+                            board, weights, &mut inc, depth, -INF, INF, prev_best,
                         );
-                        break;
                     }
                 } else {
                     // window 안 → OK
-                    break;
+                    break current;
                 }
-            }
+            };
 
             if self.aborted {
                 break;
@@ -320,6 +371,158 @@ impl Searcher {
         best_result
     }
 
+    /// Search normally, but keep the root candidate table from the last
+    /// completed iterative-deepening iteration. This is for offline engine
+    /// diagnostics; the normal pbrain path uses `search()`.
+    pub fn audit_root_candidates(
+        &mut self,
+        board: &mut Board,
+        weights: &NnueWeights,
+        max_depth: u32,
+        time_limit: Option<Duration>,
+    ) -> RootSearchAudit {
+        self.nodes = 0;
+        self.tt_cutoffs = 0;
+        self.aborted = false;
+        self.deadline = time_limit.map(|d| Instant::now() + d);
+        self.killers = [[None; 2]; 64];
+        self.history = [[0; NUM_CELLS]; 2];
+        self.cont_hist_1.fill([0; NUM_CELLS]);
+        self.cont_hist_2.fill([0; NUM_CELLS]);
+        self.tt.reset_stats();
+        self.tt.clear();
+
+        let mut inc = IncrementalEval::new(weights);
+        inc.refresh(board, weights);
+
+        let vct_budget = match time_limit {
+            Some(total) => (total / ROOT_VCT_BUDGET_FRACTION)
+                .max(Duration::from_millis(ROOT_VCT_BUDGET_FLOOR_MS))
+                .min(Duration::from_millis(ROOT_VCT_BUDGET_CAP_MS)),
+            None => Duration::from_millis(ROOT_VCT_BUDGET_MS),
+        };
+        let vct_cfg = VctConfig {
+            max_depth: ROOT_VCT_DEPTH,
+            time_budget: Some(vct_budget),
+        };
+        if let Some(seq) = search_vct(board, &vct_cfg) {
+            if let Some(&first) = seq.first() {
+                return RootSearchAudit {
+                    result: SearchResult {
+                        best_move: Some(first),
+                        score: WIN_SCORE,
+                        depth: seq.len() as u32,
+                        nodes: self.nodes,
+                    },
+                    candidates: Vec::new(),
+                };
+            }
+        }
+
+        let mut best_result = SearchResult {
+            best_move: None,
+            score: 0,
+            depth: 0,
+            nodes: 0,
+        };
+        let mut best_candidates = Vec::new();
+        let mut prev_best: Option<Move> = None;
+        let mut prev_score: Option<i32> = None;
+
+        for depth in 1..=max_depth {
+            let (mut alpha, mut beta) = if let Some(s) = prev_score {
+                if depth >= ASPIRATION_MIN_DEPTH {
+                    (s - ASPIRATION_INITIAL_DELTA, s + ASPIRATION_INITIAL_DELTA)
+                } else {
+                    (-INF, INF)
+                }
+            } else {
+                (-INF, INF)
+            };
+
+            let mut delta = ASPIRATION_INITIAL_DELTA;
+            let mut iter_candidates = Vec::new();
+
+            let iter_result = loop {
+                iter_candidates.clear();
+                let current = self.root_pvs_iteration_with_audit(
+                    board,
+                    weights,
+                    &mut inc,
+                    depth,
+                    alpha,
+                    beta,
+                    prev_best,
+                    Some(&mut iter_candidates),
+                );
+                if self.aborted {
+                    break current;
+                }
+                let score = current.1;
+                if score <= alpha {
+                    delta = (delta * 2).min(INF / 4);
+                    alpha = (alpha - delta).max(-INF);
+                    if alpha == -INF {
+                        iter_candidates.clear();
+                        break self.root_pvs_iteration_with_audit(
+                            board,
+                            weights,
+                            &mut inc,
+                            depth,
+                            -INF,
+                            INF,
+                            prev_best,
+                            Some(&mut iter_candidates),
+                        );
+                    }
+                } else if score >= beta {
+                    delta = (delta * 2).min(INF / 4);
+                    beta = (beta + delta).min(INF);
+                    if beta == INF {
+                        iter_candidates.clear();
+                        break self.root_pvs_iteration_with_audit(
+                            board,
+                            weights,
+                            &mut inc,
+                            depth,
+                            -INF,
+                            INF,
+                            prev_best,
+                            Some(&mut iter_candidates),
+                        );
+                    }
+                } else {
+                    break current;
+                }
+            };
+
+            if self.aborted {
+                break;
+            }
+
+            let (best_move, score) = iter_result;
+            best_result = SearchResult {
+                best_move,
+                score,
+                depth,
+                nodes: self.nodes,
+            };
+            best_candidates = iter_candidates;
+
+            if score.abs() > WIN_SCORE - 100 {
+                break;
+            }
+
+            prev_best = best_move;
+            prev_score = Some(score);
+        }
+
+        RootSearchAudit {
+            result: best_result,
+            candidates: best_candidates,
+        }
+    }
+
     /// 한 iteration의 root-level PVS 탐색.
     /// `[alpha_init, beta_init]` window 안에서 모든 root move를 탐색하고
     /// best move + alpha 반환. Aspiration loop의 inner step.
@@ -333,9 +536,44 @@ impl Searcher {
         beta_init: i32,
         prev_best: Option<Move>,
     ) -> (Option<Move>, i32) {
+        self.root_pvs_iteration_with_audit(
+            board, weights, inc, depth, alpha_init, beta_init, prev_best, None,
+        )
+    }
+
+    fn root_pvs_iteration_with_audit(
+        &mut self,
+        board: &mut Board,
+        weights: &NnueWeights,
+        inc: &mut IncrementalEval,
+        depth: u32,
+        alpha_init: i32,
+        beta_init: i32,
+        prev_best: Option<Move>,
+        mut audit: Option<&mut Vec<RootCandidateAudit>>,
+    ) -> (Option<Move>, i32) {
         let mut alpha = alpha_init;
         let beta = beta_init;
         let mut best_move: Option<Move> = None;
+        let mut leader_score = -INF;
+        let mut best_relation_score: Option<i32> = None;
+        let mut best_relation_gate: Option<RootRelationGate> = None;
+        let mut best_candidate_rank_score: Option<i32> = None;
+        let mut best_candidate_rank_gate: Option<crate::candidate_ranker::RootGateKey> = None;
+        let use_root_relation = crate::relation_lite::root_enabled();
+        let strict_root_relation = use_root_relation && root_relation_strict_gate();
+        let root_relation_margin = if use_root_relation {
+            crate::relation_lite::root_margin()
+        } else {
+            0
+        };
+        let use_candidate_ranker = crate::candidate_ranker::root_enabled();
+        let candidate_rank_margin = if use_candidate_ranker {
+            crate::candidate_ranker::root_margin()
+        } else {
+            0
+        };
+        let candidate_rank_gate_mode = crate::candidate_ranker::root_gate_mode();
 
         let mut moves = self.order_moves(board, 0);
         if let Some(pv) = prev_best {
@@ -347,6 +585,12 @@ impl Searcher {
         }
 
         for (move_idx, &(mv, is_forcing)) in moves.iter().enumerate() {
+            let root_relation_gate = if strict_root_relation {
+                root_relation_gate_key(board, mv)
+            } else {
+                None
+            };
+
             // TT prefetch — same trick as in alpha_beta: warm the child's
             // TT bucket while make_move + accumulator delta runs.
             let next_zob = board.zobrist
@@ -364,15 +608,12 @@ impl Searcher {
             } else {
                 let reduction = lmr_reduction(depth, move_idx, is_forcing, is_killer);
                 let reduced_depth = (depth - 1).saturating_sub(reduction);
-                let mut null = -self.alpha_beta(
-                    board, weights, inc, reduced_depth, 1, -alpha - 1, -alpha,
-                );
+                let mut null =
+                    -self.alpha_beta(board, weights, inc, reduced_depth, 1, -alpha - 1, -alpha);
                 // LMR re-search (same null window): reduced 결과가 alpha 넘으면
                 // full depth로 다시 본다 — 진짜 fail-high인지 검증.
                 if !self.aborted && reduction > 0 && null > alpha {
-                    null = -self.alpha_beta(
-                        board, weights, inc, depth - 1, 1, -alpha - 1, -alpha,
-                    );
+                    null = -self.alpha_beta(board, weights, inc, depth - 1, 1, -alpha - 1, -alpha);
                 }
                 if !self.aborted && null > alpha && null < beta {
                     -self.alpha_beta(board, weights, inc, depth - 1, 1, -beta, -alpha)
@@ -381,16 +622,96 @@ impl Searcher {
                 }
             };
 
+            let root_relation_score = if use_root_relation && !self.aborted && !is_win_score(score)
+            {
+                let child_base = inc.eval_base(weights, board);
+                crate::relation_lite::root_candidate_eval(board, child_base).map(|child| -child)
+            } else {
+                None
+            };
+
             inc.pop_move();
             board.undo_move();
+
+            let candidate_rank_gate = if use_candidate_ranker {
+                crate::candidate_ranker::root_gate_key(board, mv)
+            } else {
+                None
+            };
+            let candidate_rank_score =
+                if use_candidate_ranker && !self.aborted && !is_win_score(score) {
+                    crate::candidate_ranker::root_candidate_score(board, mv, weights)
+                } else {
+                    None
+                };
 
             if self.aborted {
                 break;
             }
 
+            if let Some(audit) = audit.as_mut() {
+                audit.push(RootCandidateAudit {
+                    mv,
+                    search_score: score,
+                    relation_score: root_relation_score,
+                    candidate_rank_score,
+                    is_forcing,
+                });
+            }
+
+            if score > leader_score {
+                leader_score = score;
+                best_move = Some(mv);
+                best_relation_score = root_relation_score;
+                best_relation_gate = root_relation_gate;
+                best_candidate_rank_score = candidate_rank_score;
+                best_candidate_rank_gate = candidate_rank_gate;
+            } else if use_candidate_ranker
+                && !is_win_score(score)
+                && !is_win_score(leader_score)
+                && (if candidate_rank_margin == 0 {
+                    score == leader_score
+                } else {
+                    leader_score.saturating_sub(score) <= candidate_rank_margin
+                })
+                && crate::candidate_ranker::gate_allows(
+                    candidate_rank_gate_mode,
+                    candidate_rank_gate,
+                    best_candidate_rank_gate,
+                )
+                && crate::candidate_ranker::score_prefers(
+                    candidate_rank_score,
+                    best_candidate_rank_score,
+                )
+            {
+                best_move = Some(mv);
+                best_relation_score = root_relation_score;
+                best_relation_gate = root_relation_gate;
+                best_candidate_rank_score = candidate_rank_score;
+                best_candidate_rank_gate = candidate_rank_gate;
+            } else if use_root_relation
+                && !is_win_score(score)
+                && !is_win_score(leader_score)
+                && (if strict_root_relation {
+                    score == leader_score
+                        && root_relation_gate.is_some()
+                        && root_relation_gate == best_relation_gate
+                } else if root_relation_margin == 0 {
+                    score == leader_score
+                } else {
+                    leader_score.saturating_sub(score) <= root_relation_margin
+                })
+                && relation_score_prefers(root_relation_score, best_relation_score)
+            {
+                best_move = Some(mv);
+                best_relation_score = root_relation_score;
+                best_relation_gate = root_relation_gate;
+                best_candidate_rank_score = candidate_rank_score;
+                best_candidate_rank_gate = candidate_rank_gate;
+            }
+
             if score > alpha {
                 alpha = score;
-                best_move = Some(mv);
             }
         }
 
@@ -519,16 +840,19 @@ impl Searcher {
         // 본다. 줄여서도 alpha 넘으면 full depth로 재탐색. tier 기반 gating으로
         // 강제수는 절대 reduce하지 않아 horizon effect 유지.
         for (move_idx, &(mv, is_forcing)) in moves.iter().enumerate() {
-            let is_killer = ply < 64
-                && (self.killers[ply][0] == Some(mv) || self.killers[ply][1] == Some(mv));
+            let is_killer =
+                ply < 64 && (self.killers[ply][0] == Some(mv) || self.killers[ply][1] == Some(mv));
 
             // === LMP (Late Move Pruning) ===
             // 비-PV / 비-forcing / 비-killer / 얕은 depth에서 move_idx가
             // 임계값 이상이면 quiet move skip. count-based라 eval 분포
             // 무관, 항상 trigger 보장. tier 정렬 끝의 quiet move는 좋은
             // 후보 가능성 매우 낮음.
-            if !is_pv && !is_forcing && !is_killer
-                && depth >= LMP_MIN_DEPTH && depth <= LMP_MAX_DEPTH
+            if !is_pv
+                && !is_forcing
+                && !is_killer
+                && depth >= LMP_MIN_DEPTH
+                && depth <= LMP_MAX_DEPTH
             {
                 let lmp_threshold = LMP_BASE + LMP_PER_DEPTH * depth as usize;
                 if move_idx >= lmp_threshold {
@@ -562,11 +886,23 @@ impl Searcher {
                 let reduction = lmr_reduction(depth, move_idx, is_forcing, is_killer);
                 let reduced_depth = (depth - 1).saturating_sub(reduction);
                 let mut null_score = -self.alpha_beta(
-                    board, weights, inc, reduced_depth, ply + 1, -alpha - 1, -alpha,
+                    board,
+                    weights,
+                    inc,
+                    reduced_depth,
+                    ply + 1,
+                    -alpha - 1,
+                    -alpha,
                 );
                 if !self.aborted && reduction > 0 && null_score > alpha {
                     null_score = -self.alpha_beta(
-                        board, weights, inc, depth - 1, ply + 1, -alpha - 1, -alpha,
+                        board,
+                        weights,
+                        inc,
+                        depth - 1,
+                        ply + 1,
+                        -alpha - 1,
+                        -alpha,
                     );
                 }
                 if !self.aborted && null_score > alpha && null_score < beta {
@@ -871,7 +1207,8 @@ impl Searcher {
             return (TIER_BLOCK_WIN, true);
         }
 
-        let mut score = tier_score;
+        let mut score =
+            apply_weak_attack_cap(tier_score, attack_tier, block_tier, my_kind, opp_kind, ply);
 
         if ply < 64 {
             if self.killers[ply][0] == Some(mv) {
@@ -916,7 +1253,6 @@ impl Searcher {
 
         (score, is_forcing)
     }
-
 }
 
 // === Move ordering tier 점수 ===
@@ -943,26 +1279,26 @@ const TIER_BLOCK_OPEN_THREE: i32 = 900_000;
 
 /// Move ordering: 내 위협이 만드는 attack tier 점수.
 const MOVE_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
-    0,                  // None
-    TIER_CLOSED_FOUR,   // ClosedFour
-    TIER_OPEN_THREE,    // OpenThree
-    TIER_WIN,           // Five
-    TIER_OPEN_FOUR,     // OpenFour
-    TIER_DOUBLE_FOUR,   // DoubleFour
-    TIER_DOUBLE_FOUR,   // FourThree
-    TIER_DOUBLE_THREE,  // DoubleThree
+    0,                 // None
+    TIER_CLOSED_FOUR,  // ClosedFour
+    TIER_OPEN_THREE,   // OpenThree
+    TIER_WIN,          // Five
+    TIER_OPEN_FOUR,    // OpenFour
+    TIER_DOUBLE_FOUR,  // DoubleFour
+    TIER_DOUBLE_FOUR,  // FourThree
+    TIER_DOUBLE_THREE, // DoubleThree
 ];
 
 /// Move ordering: 상대 위협 차단 tier 점수.
 const MOVE_BLOCK_TABLE: [i32; THREAT_KIND_COUNT] = [
-    0,                          // None
-    TIER_BLOCK_CLOSED_FOUR,     // ClosedFour
-    TIER_BLOCK_OPEN_THREE,      // OpenThree
-    TIER_BLOCK_WIN,             // Five
-    TIER_BLOCK_OPEN_FOUR,       // OpenFour
-    TIER_BLOCK_DOUBLE_FOUR,     // DoubleFour
-    TIER_BLOCK_DOUBLE_FOUR,     // FourThree
-    TIER_BLOCK_DOUBLE_THREE,    // DoubleThree
+    0,                       // None
+    TIER_BLOCK_CLOSED_FOUR,  // ClosedFour
+    TIER_BLOCK_OPEN_THREE,   // OpenThree
+    TIER_BLOCK_WIN,          // Five
+    TIER_BLOCK_OPEN_FOUR,    // OpenFour
+    TIER_BLOCK_DOUBLE_FOUR,  // DoubleFour
+    TIER_BLOCK_DOUBLE_FOUR,  // FourThree
+    TIER_BLOCK_DOUBLE_THREE, // DoubleThree
 ];
 
 /// `is_forcing` 비트마스크. bit i set ↔ ThreatKind discriminant i가 forcing.
@@ -972,19 +1308,83 @@ const FORCING_MASK: u8 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | 
 
 /// qsearch attack-tier 점수 (내 위협). Five는 별도 처리(반환 즉시 cutoff).
 const QS_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
-    0,        // None
-    0,        // ClosedFour — qsearch attack 아님
-    0,        // OpenThree
-    0,        // Five — caller 별도 처리
-    800_000,  // OpenFour
-    600_000,  // DoubleFour
-    600_000,  // FourThree
-    0,        // DoubleThree — qsearch attack 아님
+    0,       // None
+    0,       // ClosedFour — qsearch attack 아님
+    0,       // OpenThree
+    0,       // Five — caller 별도 처리
+    800_000, // OpenFour
+    600_000, // DoubleFour
+    600_000, // FourThree
+    0,       // DoubleThree — qsearch attack 아님
 ];
 
 #[inline]
 fn is_forcing_kind(kind: ThreatKind) -> bool {
     (FORCING_MASK >> (kind as u8)) & 1 != 0
+}
+
+#[inline]
+fn apply_weak_attack_cap(
+    score: i32,
+    attack_tier: i32,
+    block_tier: i32,
+    my_kind: ThreatKind,
+    opp_kind: ThreatKind,
+    ply: usize,
+) -> i32 {
+    let Some(cap) = weak_attack_cap() else {
+        return score;
+    };
+    if weak_attack_root_only() && ply != 0 {
+        return score;
+    }
+    let weak_attack = block_tier == 0
+        && attack_tier == score
+        && opp_kind == ThreatKind::None
+        && matches!(my_kind, ThreatKind::ClosedFour | ThreatKind::OpenThree);
+    if weak_attack {
+        score.min(cap)
+    } else {
+        score
+    }
+}
+
+#[inline]
+fn weak_attack_cap() -> Option<i32> {
+    static CAP: OnceLock<Option<i32>> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        let Ok(raw) = std::env::var("NORU_WEAK_ATTACK_CAP") else {
+            return None;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed == "0"
+            || trimmed.eq_ignore_ascii_case("off")
+            || trimmed.eq_ignore_ascii_case("false")
+        {
+            return None;
+        }
+        if trimmed.eq_ignore_ascii_case("demote") {
+            return Some(0);
+        }
+        trimmed.parse::<i32>().ok().filter(|v| *v >= 0)
+    })
+}
+
+#[inline]
+fn weak_attack_root_only() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("NORU_WEAK_ATTACK_CAP_ROOT_ONLY")
+            .map(|v| {
+                let trimmed = v.trim();
+                !(trimmed.is_empty()
+                    || trimmed == "0"
+                    || trimmed.eq_ignore_ascii_case("off")
+                    || trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Threat-gated LMR reduction 계산.

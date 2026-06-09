@@ -43,6 +43,7 @@ avx512 = ["noru/avx512"]
 [dependencies]
 noru = { version = "2.2" }
 flate2 = { version = "1", optional = true }
+serde_json = "1"
 
 [dev-dependencies]
 # Speed/regression micro-benchmarks (see benches/engine.rs). Light profile:
@@ -65,6 +66,14 @@ path = "main.rs"
 [[bin]]
 name = "pbrain-figrid"
 path = "bin/pbrain_figrid_noru.rs"
+
+[[bin]]
+name = "relation-lite-val"
+path = "bin/relation_lite_val.rs"
+
+[[bin]]
+name = "relation-root-audit"
+path = "bin/relation_root_audit.rs"
 
 [profile.release]
 opt-level = 3

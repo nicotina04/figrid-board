@@ -25,8 +25,7 @@ use noru::network::NnueWeights;
 fn load_weights_bytes() -> Result<Vec<u8>, String> {
     use flate2::read::GzDecoder;
     use std::io::Read;
-    const COMPRESSED: &[u8] =
-        include_bytes!("../models/gomoku_v52_5stone_conv_93k.bin.gz");
+    const COMPRESSED: &[u8] = include_bytes!("../models/gomoku_v52_5stone_conv_93k.bin.gz");
     let mut decoder = GzDecoder::new(COMPRESSED);
     let mut out = Vec::with_capacity(15_000_000);
     decoder
@@ -92,9 +91,7 @@ impl ProtocolInfo {
         // the per-move cap. Anything below half of the sentinel default
         // means the controller actually told us a real budget.
         if self.timeout_match >= DEFAULT_MATCH_MS / 2 {
-            return Duration::from_millis(
-                (self.timeout_turn - SAFETY_MARGIN_MS).max(50) as u64,
-            );
+            return Duration::from_millis((self.timeout_turn - SAFETY_MARGIN_MS).max(50) as u64);
         }
 
         let time_left = self.time_left.max(0);
@@ -135,10 +132,7 @@ impl ProtocolInfo {
         //     third of remaining time.
         //   * 100 ms floor so abort logic still has a chance to fire.
         let safe_max = time_left / 3;
-        let budget = phase_budget
-            .min(self.timeout_turn)
-            .min(safe_max)
-            .max(100);
+        let budget = phase_budget.min(self.timeout_turn).min(safe_max).max(100);
 
         Duration::from_millis((budget - SAFETY_MARGIN_MS).max(50) as u64)
     }
@@ -219,26 +213,22 @@ impl Engine {
         // search, covers every command path regardless of ordering.
         self.board.exact5 = self.info.rule_exact5;
 
-        // Opening book: zero-search shortcut for the 24 Gomocup-published
-        // freestyle-15 / standard openings. Hits only when figrid is the side
-        // to move at the exact post-opening position; otherwise lookup misses
-        // and the search runs normally.
-        if let Some((x, y)) = book::lookup(self.board.zobrist) {
-            if let Ok(idx) = xy_to_idx(x, y) {
-                if self.board.is_empty(idx) {
-                    self.board.make_move(idx);
-                    return Some((x, y));
-                }
-            }
-        }
+        // Opening book hook is intentionally disabled — the Rapfi-distilled
+        // book regressed 24 g vs Pela at Gomocup TC (3/24 with book vs 4/24
+        // without; book-hit side fell to 1/12 = 8.3 % alone). The numbers
+        // are within 24 g noise (σ ≈ 10 pp) but the per-side breakdown is
+        // consistent with the well-known capacity-gap problem: the teacher's
+        // best move leads to lines our search can't follow up. The book
+        // tables stay in `crate::book` for a future self-play book attempt.
+        let _ = book::lookup; // keep the symbol live for the next try.
 
         let budget = self.info.turn_budget(self.board.move_count);
         let result = self
             .searcher
             .search(&mut self.board, &self.weights, MAX_DEPTH, Some(budget));
-        let mv = result.best_move.or_else(|| {
-            self.board.candidate_moves().first().copied()
-        })?;
+        let mv = result
+            .best_move
+            .or_else(|| self.board.candidate_moves().first().copied())?;
         if !self.board.is_empty(mv) {
             return None;
         }

@@ -637,12 +637,18 @@ fn local_density(board: &Board) -> (u32, u32) {
 }
 
 /// 보드를 평가 (전체 재계산)
-pub fn evaluate(board: &Board, weights: &NnueWeights) -> i32 {
+pub fn evaluate_base(board: &Board, weights: &NnueWeights) -> i32 {
     let (stm_feats, nstm_feats) = compute_active_features(board);
     let mut acc = Accumulator::new(&weights.feature_bias);
     acc.refresh(weights, &stm_feats, &nstm_feats);
     apply_pattern4_dense(&mut acc, weights, board);
     forward(&acc, weights)
+}
+
+/// 보드를 평가 (전체 재계산)
+pub fn evaluate(board: &Board, weights: &NnueWeights) -> i32 {
+    let base = evaluate_base(board, weights);
+    crate::relation_lite::apply_sidecar(board, base)
 }
 
 /// Compute the Pattern4 dense input vector and apply it to the accumulator
@@ -849,7 +855,7 @@ impl IncrementalEval {
         }
     }
 
-    pub fn eval(&self, weights: &NnueWeights, board: &Board) -> i32 {
+    pub fn eval_base(&self, weights: &NnueWeights, board: &Board) -> i32 {
         if weights.dense_to_acc.is_empty() {
             // Sparse-only weights (v52 / v0.7.0): the stored accumulator
             // is already complete; skip the dense overhead entirely.
@@ -862,6 +868,11 @@ impl IncrementalEval {
         let dense = crate::pattern_dense::pool_dense_input(&board.line_pattern_ids[..]);
         acc.apply_dense_input(weights, &dense);
         forward(&acc, weights)
+    }
+
+    pub fn eval(&self, weights: &NnueWeights, board: &Board) -> i32 {
+        let base = self.eval_base(weights, board);
+        crate::relation_lite::apply_sidecar(board, base)
     }
 }
 

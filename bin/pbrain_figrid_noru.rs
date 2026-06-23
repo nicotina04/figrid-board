@@ -7,7 +7,7 @@
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
-use figrid_board::{book, to_idx, Board, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
+use figrid_board::{book, to_idx, Board, RuleSet, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
 use noru::network::NnueWeights;
 
 /// Source the v52 NNUE weights. Two modes:
@@ -78,11 +78,26 @@ impl ProtocolInfo {
         }
     }
 
+    fn rule_set(&self) -> Option<RuleSet> {
+        // Supported now: Freestyle, Standard exact-5, and Caro.
+        // Renju needs forbidden-move legality; continuous is not modeled.
+        if self.rule_continuous || self.rule_renju {
+            return None;
+        }
+        if self.rule_caro && self.rule_exact5 {
+            return None;
+        }
+        if self.rule_caro {
+            Some(RuleSet::Caro)
+        } else if self.rule_exact5 {
+            Some(RuleSet::Standard)
+        } else {
+            Some(RuleSet::Freestyle)
+        }
+    }
+
     fn rule_supported(&self) -> bool {
-        // Freestyle (all bits 0) and Standard (exact5 only) are supported.
-        // Renju, Caro, and the obscure "continuous" overline-allowed rule
-        // require dedicated training / search logic — left for future work.
-        !(self.rule_continuous || self.rule_renju || self.rule_caro)
+        self.rule_set().is_some()
     }
 
     fn turn_budget(&self, move_count: usize) -> Duration {
@@ -211,7 +226,8 @@ impl Engine {
         // the engine would score an overline as a win and fail the
         // `standard_specific` rule probe. Re-applying it here, right before
         // search, covers every command path regardless of ordering.
-        self.board.exact5 = self.info.rule_exact5;
+        self.board
+            .set_rule_set(self.info.rule_set().unwrap_or(RuleSet::Freestyle));
 
         // Opening book hook is intentionally disabled — the Rapfi-distilled
         // book regressed 24 g vs Pela at Gomocup TC (3/24 with book vs 4/24
@@ -298,9 +314,10 @@ fn main() {
                     continue;
                 }
                 engine.reset_board();
-                // Standard rule (rule=1): exactly-5 wins. Tell the board so
-                // its check_win drops overlines from the win-set.
-                engine.board.exact5 = engine.info.rule_exact5;
+                // Tell the board which terminal-line semantics to use.
+                engine
+                    .board
+                    .set_rule_set(engine.info.rule_set().unwrap_or(RuleSet::Freestyle));
                 engine.started = true;
                 writeln!(stdout, "OK").ok();
             }

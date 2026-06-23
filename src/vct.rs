@@ -18,11 +18,12 @@
 //! 승리 Threat(Five/OpenFour/DoubleFour/FourThree/DoubleThree)을 만들면 해당
 //! 수를 반환하고 즉시 성공. 그 외 Forcing Threat(ClosedFour/OpenThree)은 재귀.
 
-use crate::board::{Board, BitBoard, Move, Stone, BOARD_SIZE, NUM_CELLS};
+use crate::board::{Board, BitBoard, Move, RuleSet, Stone, BOARD_SIZE, NUM_CELLS};
 use crate::heuristic::{scan_line, DIR};
 use crate::pattern_table::{
-    pattern_threat_after_my_play, pattern_threat_after_my_play_exact5, read_window, swap_mapped_id,
-    WindowThreat, PATTERN_RARE_ID,
+    pattern_threat_after_my_play, pattern_threat_after_my_play_caro,
+    pattern_threat_after_my_play_exact5, read_window, swap_mapped_id, WindowThreat,
+    PATTERN_RARE_ID,
 };
 use noru::trainer::SimpleRng;
 use std::collections::HashMap;
@@ -95,11 +96,11 @@ enum LineThreat {
     Five,         // (>=5)
 }
 
-fn classify_line(count: u32, open_ends: u32, exact5: bool) -> LineThreat {
+fn classify_line(count: u32, open_ends: u32, rule_set: RuleSet, side: Stone) -> LineThreat {
+    if rule_set.line_wins(side, count, open_ends) {
+        return LineThreat::Five;
+    }
     match (count, open_ends) {
-        // Standard rule: an overline (>=6) does not win and is not a threat.
-        (6.., _) if exact5 => LineThreat::None,
-        (5.., _) => LineThreat::Five,
         (4, 2) => LineThreat::OpenFour,
         (4, 1) => LineThreat::ClosedFour,
         (3, 2) => LineThreat::OpenThree,
@@ -155,13 +156,28 @@ impl ThreatKind {
 /// my_bb는 side의 돌 bitboard, opp_bb는 상대 bitboard. **mv 위치에는 아직 돌이
 /// 없는 상태**로 가정. 내부적으로 mv가 놓였을 때의 4방향 라인을 시뮬레이션.
 pub fn classify_move(my_bb: &BitBoard, opp_bb: &BitBoard, mv: Move, exact5: bool) -> ThreatKind {
+    let rule_set = if exact5 {
+        RuleSet::Standard
+    } else {
+        RuleSet::Freestyle
+    };
+    classify_move_rules(my_bb, opp_bb, mv, Stone::Black, rule_set)
+}
+
+pub fn classify_move_rules(
+    my_bb: &BitBoard,
+    opp_bb: &BitBoard,
+    mv: Move,
+    side: Stone,
+    rule_set: RuleSet,
+) -> ThreatKind {
     let row = (mv / BOARD_SIZE) as i32;
     let col = (mv % BOARD_SIZE) as i32;
 
     // mv 위치에 돌이 있다고 가정하고 각 방향 라인 측정.
     // scan_line은 시작 셀이 돌을 가졌다고 가정하고 count=1부터 시작하므로
     // 임시로 my_bb에 mv를 set한 복사본을 만든다.
-    let mut my_tmp = my_bb.clone();
+    let mut my_tmp = *my_bb;
     my_tmp.set(mv);
 
     let mut fours = 0u32; // OpenFour 또는 ClosedFour 방향 수
@@ -173,7 +189,7 @@ pub fn classify_move(my_bb: &BitBoard, opp_bb: &BitBoard, mv: Move, exact5: bool
     for &(dr, dc) in &DIR {
         let info = scan_line(&my_tmp, opp_bb, row, col, dr, dc);
         let open_ends = info.open_front as u32 + info.open_back as u32;
-        match classify_line(info.count, open_ends, exact5) {
+        match classify_line(info.count, open_ends, rule_set, side) {
             LineThreat::Five => fives += 1,
             LineThreat::OpenFour => {
                 open_fours += 1;
@@ -236,7 +252,7 @@ pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
     } else {
         (&board.white, &board.black)
     };
-    let exact5 = board.exact5;
+    let rule_set = board.effective_rule_set();
 
     let mut fours = 0u32;
     let mut open_fours = 0u32;
@@ -288,21 +304,27 @@ pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
                 }
             }
             let open_ends = open_front as u32 + open_back as u32;
-            match (count, open_ends) {
-                // Standard rule: overline (>=6) is not a winning threat.
-                (6..=u32::MAX, _) if exact5 => WindowThreat::None,
-                (5..=u32::MAX, _) => WindowThreat::Five,
-                (4, 2) => WindowThreat::OpenFour,
-                (4, 1) => WindowThreat::ClosedFour,
-                (3, 2) => WindowThreat::OpenThree,
-                (3, 1) => WindowThreat::ClosedThree,
-                (2, 2) => WindowThreat::OpenTwo,
-                _ => WindowThreat::None,
+            if rule_set.line_wins(side, count, open_ends) {
+                WindowThreat::Five
+            } else {
+                match (count, open_ends) {
+                    (4, 2) => WindowThreat::OpenFour,
+                    (4, 1) => WindowThreat::ClosedFour,
+                    (3, 2) => WindowThreat::OpenThree,
+                    (3, 1) => WindowThreat::ClosedThree,
+                    (2, 2) => WindowThreat::OpenTwo,
+                    _ => WindowThreat::None,
+                }
             }
-        } else if exact5 {
-            pattern_threat_after_my_play_exact5(pid_my)
         } else {
-            pattern_threat_after_my_play(pid_my)
+            match rule_set {
+                RuleSet::Caro => pattern_threat_after_my_play_caro(pid_my),
+                RuleSet::Standard => pattern_threat_after_my_play_exact5(pid_my),
+                RuleSet::Renju if matches!(side, Stone::Black) => {
+                    pattern_threat_after_my_play_exact5(pid_my)
+                }
+                _ => pattern_threat_after_my_play(pid_my),
+            }
         };
 
         match threat {
@@ -409,10 +431,10 @@ fn vct_or(
     }
 
     let (my, opp) = bb_pair(board, attacker);
-    let exact5 = board.exact5;
-    let opp_has_immediate_five = has_immediate_five(opp, my, exact5);
+    let rule_set = board.effective_rule_set();
+    let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
 
-    let attack_moves = gather_attack_moves(my, opp, exact5);
+    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set);
     if attack_moves.is_empty() {
         tt.insert(hash, TtEntry { depth, result: TtResult::Fails });
         return false;
@@ -468,7 +490,8 @@ fn vct_and(
 
     // 수비 측이 자기 턴에 즉시 5목을 완성할 수 있으면 공격 VCT는 실패.
     let (def_my, def_opp) = bb_pair(board, board.side_to_move);
-    if has_immediate_five(def_my, def_opp, board.exact5) {
+    let rule_set = board.effective_rule_set();
+    if has_immediate_five(def_my, def_opp, board.side_to_move, rule_set) {
         return false;
     }
 
@@ -504,7 +527,12 @@ fn vct_and(
     true
 }
 
-fn gather_attack_moves(my: &BitBoard, opp: &BitBoard, exact5: bool) -> Vec<(Move, ThreatKind)> {
+fn gather_attack_moves(
+    my: &BitBoard,
+    opp: &BitBoard,
+    side: Stone,
+    rule_set: RuleSet,
+) -> Vec<(Move, ThreatKind)> {
     let mut out = Vec::new();
     let cells = my.count_ones() + opp.count_ones();
     // 첫 수면 패스 (vct 의미 없음).
@@ -515,7 +543,7 @@ fn gather_attack_moves(my: &BitBoard, opp: &BitBoard, exact5: bool) -> Vec<(Move
         if my.get(idx) || opp.get(idx) {
             continue;
         }
-        let kind = classify_move(my, opp, idx, exact5);
+        let kind = classify_move_rules(my, opp, idx, side, rule_set);
         if kind.is_forcing() {
             out.push((idx, kind));
         }
@@ -538,12 +566,12 @@ fn threat_priority(k: ThreatKind) -> i32 {
     }
 }
 
-fn has_immediate_five(my: &BitBoard, opp: &BitBoard, exact5: bool) -> bool {
+fn has_immediate_five(my: &BitBoard, opp: &BitBoard, side: Stone, rule_set: RuleSet) -> bool {
     for idx in 0..(BOARD_SIZE * BOARD_SIZE) {
         if my.get(idx) || opp.get(idx) {
             continue;
         }
-        if classify_move(my, opp, idx, exact5) == ThreatKind::Five {
+        if classify_move_rules(my, opp, idx, side, rule_set) == ThreatKind::Five {
             return true;
         }
     }
@@ -568,12 +596,12 @@ fn find_defenses_with_counters(board: &Board, attack_move: Move) -> Vec<Move> {
     }
     // 수비자(현재 side_to_move) 관점에서 자기 winning threat 만드는 수들.
     let (def_my, def_opp) = bb_pair(board, board.side_to_move);
-    let exact5 = board.exact5;
+    let rule_set = board.effective_rule_set();
     for idx in 0..NUM_CELLS {
         if def_my.get(idx) || def_opp.get(idx) || seen.get(idx) {
             continue;
         }
-        let kind = classify_move(def_my, def_opp, idx, exact5);
+        let kind = classify_move_rules(def_my, def_opp, idx, board.side_to_move, rule_set);
         // Winning 위협뿐 아니라 Forcing(ClosedFour/OpenThree) 반격도 포함해야
         // 원거리 카운터 공격을 AND가 놓치지 않음.
         if kind.is_forcing() {

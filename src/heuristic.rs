@@ -28,34 +28,30 @@ pub struct LineInfo {
 pub fn scan_line(stones: &BitBoard, opp: &BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> LineInfo {
     let mut count = 1u32;
 
-    // 정방향
     let mut open_front = false;
-    for step in 1..5 {
-        let nr = row + dr * step;
-        let nc = col + dc * step;
-        if nr < 0 || nr >= BOARD_SIZE as i32 || nc < 0 || nc >= BOARD_SIZE as i32 {
-            break;
-        }
+    let mut nr = row + dr;
+    let mut nc = col + dc;
+    while nr >= 0 && nr < BOARD_SIZE as i32 && nc >= 0 && nc < BOARD_SIZE as i32 {
         let idx = nr as usize * BOARD_SIZE + nc as usize;
         if stones.get(idx) {
             count += 1;
+            nr += dr;
+            nc += dc;
         } else {
-            open_front = !opp.get(idx); // 빈칸이면 열림
+            open_front = !opp.get(idx);
             break;
         }
     }
 
-    // 역방향
     let mut open_back = false;
-    for step in 1..5 {
-        let nr = row - dr * step;
-        let nc = col - dc * step;
-        if nr < 0 || nr >= BOARD_SIZE as i32 || nc < 0 || nc >= BOARD_SIZE as i32 {
-            break;
-        }
+    let mut nr = row - dr;
+    let mut nc = col - dc;
+    while nr >= 0 && nr < BOARD_SIZE as i32 && nc >= 0 && nc < BOARD_SIZE as i32 {
         let idx = nr as usize * BOARD_SIZE + nc as usize;
         if stones.get(idx) {
             count += 1;
+            nr -= dr;
+            nc -= dc;
         } else {
             open_back = !opp.get(idx);
             break;
@@ -69,7 +65,7 @@ pub fn scan_line(stones: &BitBoard, opp: &BitBoard, row: i32, col: i32, dr: i32,
     }
 }
 
-/// 패턴별 점수 변환
+/// ??? ?? ??
 fn pattern_score(info: &LineInfo) -> i32 {
     let open_ends = info.open_front as u32 + info.open_back as u32;
 

@@ -25,7 +25,7 @@ pub mod vct;
 pub mod legacy;
 
 pub use board::{
-    to_idx, to_rc, BitBoard, Board, GameResult, Move, Stone, BOARD_SIZE, NUM_CELLS,
+    to_idx, to_rc, BitBoard, Board, GameResult, Move, RuleSet, Stone, BOARD_SIZE, NUM_CELLS,
 };
 pub use coord::{Coord, Coord15, Coord20, CoordState, Rotation};
 pub use eval::{evaluate, IncrementalEval};

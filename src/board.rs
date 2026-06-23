@@ -23,6 +23,36 @@ impl Stone {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleSet {
+    Freestyle,
+    Standard,
+    Caro,
+    /// Terminal-line semantics only. Renju forbidden-move legality is not
+    /// implemented yet, so pbrain keeps rejecting Renju games for now.
+    Renju,
+}
+
+impl RuleSet {
+    #[inline]
+    pub const fn uses_exact_five(self) -> bool {
+        matches!(self, RuleSet::Standard | RuleSet::Renju)
+    }
+
+    #[inline]
+    pub const fn line_wins(self, side: Stone, count: u32, open_ends: u32) -> bool {
+        match self {
+            RuleSet::Freestyle => count >= 5,
+            RuleSet::Standard => count == 5,
+            RuleSet::Caro => count >= 6 || (count == 5 && open_ends > 0),
+            RuleSet::Renju => match side {
+                Stone::Black => count == 5,
+                Stone::White => count >= 5,
+            },
+        }
+    }
+}
+
 /// 225비트를 u128 × 2로 표현
 /// lo: 비트 0~127, hi: 비트 128~224
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -131,6 +161,11 @@ pub fn to_idx(row: usize, col: usize) -> usize {
     row * BOARD_SIZE + col
 }
 
+#[inline]
+fn in_board(row: i32, col: i32) -> bool {
+    row >= 0 && row < BOARD_SIZE as i32 && col >= 0 && col < BOARD_SIZE as i32
+}
+
 /// Zobrist 키 — 보드 상태의 고유 해시.
 /// `(cell, color)` 별로 고정 random u64를 XOR 해서 만든다.
 /// `side_to_move` 도 별도 키로 toggle. make/undo 시 incremental XOR 갱신.
@@ -208,10 +243,10 @@ pub struct Board {
     /// (empty_pattern_id). make/undo가 영향받는 cell의 ID만 lookup으로
     /// 재계산해 region recompute를 피함. NNUE feature 매핑은 Phase 3에서.
     pub line_pattern_ids: LinePatternState,
-    /// Standard rule (Gomocup `rule=1`): exactly 5-in-a-row wins. Overlines
-    /// (6+ stones in a line) do NOT win. Default `false` = Freestyle.
-    /// Set after `Board::new()` via direct field mutation when the engine
-    /// receives `INFO rule 1`.
+    /// Active Gomoku rule set for terminal line checks.
+    pub rule_set: RuleSet,
+    /// Backward-compatible Standard-rule flag used by older tools.
+    /// Prefer `set_rule_set` for new code.
     pub exact5: bool,
 }
 
@@ -229,10 +264,28 @@ impl Board {
             // 정확한 초기값은 fill_initial_pattern_ids 에서 채움 (가장자리는
             // boundary 포함이라 ID ≠ 0).
             line_pattern_ids: Box::new([[0u16; 4]; NUM_CELLS]),
+            rule_set: RuleSet::Freestyle,
             exact5: false,
         };
         b.fill_initial_pattern_ids();
         b
+    }
+
+    #[inline]
+    pub fn set_rule_set(&mut self, rule_set: RuleSet) {
+        self.rule_set = rule_set;
+        self.exact5 = rule_set.uses_exact_five();
+    }
+
+    #[inline]
+    pub fn effective_rule_set(&self) -> RuleSet {
+        // Backward compatibility for older tools that still do
+        // `board.exact5 = true` after Board::new().
+        if self.exact5 && matches!(self.rule_set, RuleSet::Freestyle) {
+            RuleSet::Standard
+        } else {
+            self.rule_set
+        }
     }
 
     /// 빈 보드 기준 모든 (cell, dir) line pattern mapped ID를 lookup해 채움.
@@ -414,64 +467,61 @@ impl Board {
     /// 5목 승리 판정 (마지막 착수 기준)
     pub fn check_win(&self, mv: Move) -> bool {
         let (row, col) = to_rc(mv);
-        let stone = if self.black.get(mv) {
-            &self.black
+        let (side, stone) = if self.black.get(mv) {
+            (Stone::Black, &self.black)
         } else if self.white.get(mv) {
-            &self.white
+            (Stone::White, &self.white)
         } else {
             return false;
         };
+        let rules = self.effective_rule_set();
 
-        // 4방향: 가로, 세로, 대각선(\), 역대각선(/)
         let directions: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
-
         for &(dr, dc) in &directions {
-            let mut count = 1;
-
-            // 정방향
-            for step in 1..5 {
-                let nr = row as i32 + dr * step;
-                let nc = col as i32 + dc * step;
-                if nr < 0 || nr >= BOARD_SIZE as i32 || nc < 0 || nc >= BOARD_SIZE as i32 {
-                    break;
-                }
-                if stone.get(to_idx(nr as usize, nc as usize)) {
-                    count += 1;
-                } else {
-                    break;
-                }
-            }
-
-            // 역방향
-            for step in 1..5 {
-                let nr = row as i32 - dr * step;
-                let nc = col as i32 - dc * step;
-                if nr < 0 || nr >= BOARD_SIZE as i32 || nc < 0 || nc >= BOARD_SIZE as i32 {
-                    break;
-                }
-                if stone.get(to_idx(nr as usize, nc as usize)) {
-                    count += 1;
-                } else {
-                    break;
-                }
-            }
-
-            if self.exact5 {
-                // Standard rule (Gomocup rule=1): only exactly 5 wins.
-                // Overlines (count > 5) do NOT count as a win.
-                if count == 5 {
-                    return true;
-                }
-            } else if count >= 5 {
-                // Freestyle (default): 5 or more in a row wins.
+            let (count, open_ends) = self.line_run(stone, row as i32, col as i32, dr, dc);
+            if rules.line_wins(side, count, open_ends) {
                 return true;
             }
         }
-
         false
     }
 
-    /// 게임 결과 확인
+    #[inline]
+    fn line_run(&self, stone: &BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> (u32, u32) {
+        let mut count = 1u32;
+        let mut open_ends = 0u32;
+
+        let mut r = row + dr;
+        let mut c = col + dc;
+        while in_board(r, c) && stone.get(to_idx(r as usize, c as usize)) {
+            count += 1;
+            r += dr;
+            c += dc;
+        }
+        if in_board(r, c) && self.is_empty(to_idx(r as usize, c as usize)) {
+            open_ends += 1;
+        }
+
+        let mut r = row - dr;
+        let mut c = col - dc;
+        while in_board(r, c) && stone.get(to_idx(r as usize, c as usize)) {
+            count += 1;
+            r -= dr;
+            c -= dc;
+        }
+        if in_board(r, c) && self.is_empty(to_idx(r as usize, c as usize)) {
+            open_ends += 1;
+        }
+
+        (count, open_ends)
+    }
+
+    #[inline]
+    pub fn is_legal_move(&self, mv: Move) -> bool {
+        mv < NUM_CELLS && self.is_empty(mv)
+    }
+
+    /// ?? ?? ??
     pub fn game_result(&self) -> GameResult {
         if let Some(mv) = self.last_move {
             if self.check_win(mv) {
@@ -519,6 +569,17 @@ impl fmt::Display for Board {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn put_stone(board: &mut Board, side: Stone, row: usize, col: usize) -> Move {
+        let mv = to_idx(row, col);
+        assert!(board.is_empty(mv));
+        match side {
+            Stone::Black => board.black.set(mv),
+            Stone::White => board.white.set(mv),
+        }
+        board.move_count += 1;
+        mv
+    }
 
     #[test]
     fn test_make_undo_move() {
@@ -698,6 +759,76 @@ mod tests {
             board.make_move(to_idx(8, 3 + i)); // 백
         }
         assert_eq!(board.game_result(), GameResult::Ongoing);
+    }
+
+    #[test]
+    fn freestyle_overline_wins() {
+        let mut board = Board::new();
+        let mut last = 0;
+        for col in 3..=8 {
+            last = put_stone(&mut board, Stone::Black, 7, col);
+        }
+        assert!(board.check_win(last));
+    }
+
+    #[test]
+    fn standard_overline_does_not_win() {
+        let mut board = Board::new();
+        board.set_rule_set(RuleSet::Standard);
+        let mut last = 0;
+        for col in 3..=8 {
+            last = put_stone(&mut board, Stone::Black, 7, col);
+        }
+        assert!(!board.check_win(last));
+    }
+
+    #[test]
+    fn standard_exact_five_wins() {
+        let mut board = Board::new();
+        board.set_rule_set(RuleSet::Standard);
+        let mut last = 0;
+        for col in 3..=7 {
+            last = put_stone(&mut board, Stone::Black, 7, col);
+        }
+        assert!(board.check_win(last));
+    }
+
+    #[test]
+    fn caro_blocked_exact_five_does_not_win() {
+        let mut board = Board::new();
+        board.set_rule_set(RuleSet::Caro);
+        put_stone(&mut board, Stone::White, 7, 3);
+        put_stone(&mut board, Stone::White, 7, 9);
+        let mut last = 0;
+        for col in 4..=8 {
+            last = put_stone(&mut board, Stone::Black, 7, col);
+        }
+        assert!(!board.check_win(last));
+    }
+
+    #[test]
+    fn caro_one_open_exact_five_wins() {
+        let mut board = Board::new();
+        board.set_rule_set(RuleSet::Caro);
+        put_stone(&mut board, Stone::White, 7, 3);
+        let mut last = 0;
+        for col in 4..=8 {
+            last = put_stone(&mut board, Stone::Black, 7, col);
+        }
+        assert!(board.check_win(last));
+    }
+
+    #[test]
+    fn caro_overline_wins_even_when_blocked() {
+        let mut board = Board::new();
+        board.set_rule_set(RuleSet::Caro);
+        put_stone(&mut board, Stone::White, 7, 3);
+        put_stone(&mut board, Stone::White, 7, 10);
+        let mut last = 0;
+        for col in 4..=9 {
+            last = put_stone(&mut board, Stone::Black, 7, col);
+        }
+        assert!(board.check_win(last));
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! encoding, 그리고 모든 가능 패턴의 enumeration. NNUE 통합과 보드 상태
 //! 유지는 후속 단계에서 추가된다.
 
+use crate::board::{RuleSet, Stone};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -287,10 +288,13 @@ pub enum WindowThreat {
 /// is `mine` (=1). Walks consecutive mines outward from the anchor on both
 /// sides and inspects both terminals for openness. The 11-cell width covers
 /// up to a full five-in-a-row anchored at the center.
-fn classify_window_anchor_mine(w: &LineWindow, exact5: bool) -> WindowThreat {
+fn classify_window_anchor_mine_rule(
+    w: &LineWindow,
+    rule_set: RuleSet,
+    side: Stone,
+) -> WindowThreat {
     debug_assert_eq!(w[5], 1);
     let mut count = 1u32;
-    // forward
     let mut open_front = false;
     for off in 1usize..=5 {
         match w[5 + off] {
@@ -299,10 +303,9 @@ fn classify_window_anchor_mine(w: &LineWindow, exact5: bool) -> WindowThreat {
                 open_front = true;
                 break;
             }
-            _ => break, // 2 (opp) or 3 (boundary)
+            _ => break,
         }
     }
-    // backward
     let mut open_back = false;
     for off in 1usize..=5 {
         match w[5 - off] {
@@ -315,12 +318,10 @@ fn classify_window_anchor_mine(w: &LineWindow, exact5: bool) -> WindowThreat {
         }
     }
     let open_ends = open_front as u32 + open_back as u32;
+    if rule_set.line_wins(side, count, open_ends) {
+        return WindowThreat::Five;
+    }
     match (count, open_ends) {
-        // Standard rule (Gomocup rule=1): a move that forms six-or-more in a
-        // row is an overline, which is NOT a win. It is also not a four/three,
-        // so it carries no winning threat at all.
-        (6..=u32::MAX, _) if exact5 => WindowThreat::None,
-        (5..=u32::MAX, _) => WindowThreat::Five,
         (4, 2) => WindowThreat::OpenFour,
         (4, 1) => WindowThreat::ClosedFour,
         (3, 2) => WindowThreat::OpenThree,
@@ -329,6 +330,7 @@ fn classify_window_anchor_mine(w: &LineWindow, exact5: bool) -> WindowThreat {
         _ => WindowThreat::None,
     }
 }
+
 
 /// O(1) lookup of the `LineThreat` produced when `mine` plays at an empty
 /// anchor cell, given the current `mapped pattern ID` for the surrounding
@@ -354,17 +356,28 @@ pub fn pattern_threat_after_my_play_exact5(pid: u16) -> WindowThreat {
     threat_after_my_play_table_exact5()[pid as usize]
 }
 
+/// Caro-rule variant: overlines win, but a blocked exact-five does not.
+pub fn pattern_threat_after_my_play_caro(pid: u16) -> WindowThreat {
+    debug_assert!((pid as usize) < PATTERN_NUM_IDS);
+    threat_after_my_play_table_caro()[pid as usize]
+}
+
 fn threat_after_my_play_table() -> &'static [WindowThreat; PATTERN_NUM_IDS] {
     static TABLE: OnceLock<Box<[WindowThreat; PATTERN_NUM_IDS]>> = OnceLock::new();
-    TABLE.get_or_init(|| Box::new(build_threat_after_my_play_table(false)))
+    TABLE.get_or_init(|| Box::new(build_threat_after_my_play_table(RuleSet::Freestyle)))
 }
 
 fn threat_after_my_play_table_exact5() -> &'static [WindowThreat; PATTERN_NUM_IDS] {
     static TABLE: OnceLock<Box<[WindowThreat; PATTERN_NUM_IDS]>> = OnceLock::new();
-    TABLE.get_or_init(|| Box::new(build_threat_after_my_play_table(true)))
+    TABLE.get_or_init(|| Box::new(build_threat_after_my_play_table(RuleSet::Standard)))
 }
 
-fn build_threat_after_my_play_table(exact5: bool) -> [WindowThreat; PATTERN_NUM_IDS] {
+fn threat_after_my_play_table_caro() -> &'static [WindowThreat; PATTERN_NUM_IDS] {
+    static TABLE: OnceLock<Box<[WindowThreat; PATTERN_NUM_IDS]>> = OnceLock::new();
+    TABLE.get_or_init(|| Box::new(build_threat_after_my_play_table(RuleSet::Caro)))
+}
+
+fn build_threat_after_my_play_table(rule_set: RuleSet) -> [WindowThreat; PATTERN_NUM_IDS] {
     let mut t = [WindowThreat::None; PATTERN_NUM_IDS];
 
     // Canonical patterns may have anchor=0/1/2. Our use case only queries
@@ -379,12 +392,12 @@ fn build_threat_after_my_play_table(exact5: bool) -> [WindowThreat; PATTERN_NUM_
         let mut w = unpack_window(canonical_packed);
         if w[5] != 0 {
             if w[5] == 1 {
-                t[i] = classify_window_anchor_mine(&w, exact5);
+                t[i] = classify_window_anchor_mine_rule(&w, rule_set, Stone::Black);
             }
             continue;
         }
         w[5] = 1; // mine plays at anchor
-        t[i] = classify_window_anchor_mine(&w, exact5);
+        t[i] = classify_window_anchor_mine_rule(&w, rule_set, Stone::Black);
     }
     // PATTERN_RARE_ID slot stays `None`; the caller is expected to fall
     // back to a direct `read_window` + classify when it sees that ID.

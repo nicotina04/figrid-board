@@ -150,6 +150,16 @@ impl ThreatKind {
     }
 }
 
+fn is_vct_terminal_win(kind: ThreatKind) -> bool {
+    // RQ547b-1/RQ549: DoubleThree and FourThree are forcing threats, but
+    // accepting them as terminal proof shortcuts produced false VCT proofs in
+    // selected losses.
+    matches!(
+        kind,
+        ThreatKind::Five | ThreatKind::OpenFour | ThreatKind::DoubleFour
+    )
+}
+
 /// side 쪽이 mv 좌표에 돌을 두면 어떤 Threat이 생기는지 분석.
 ///
 /// my_bb는 side의 돌 bitboard, opp_bb는 상대 bitboard. **mv 위치에는 아직 돌이
@@ -480,10 +490,11 @@ fn vct_or(
     let hash = zobrist_hash(board);
     if let Some(entry) = tt.get(&hash) {
         if entry.depth >= depth {
-            // 수열 복원은 포기 (TT hit 시 수열 비어있음). 승리 확정 정보만
-            // 상위로 전달. Root 호출에서는 첫 승리 수열이 완전히 돌기 전까지
-            // 중간 TT hit이 없으므로 수열 손실은 드묾.
-            return matches!(entry.result, TtResult::AttackerWins);
+            // RQ550: positive proof reuse can hide an unverified defender
+            // branch. Keep only negative cutoffs and re-search wins.
+            if matches!(entry.result, TtResult::Fails) {
+                return false;
+            }
         }
     }
 
@@ -504,7 +515,7 @@ fn vct_or(
     }
 
     for (mv, kind) in attack_moves {
-        if kind.is_winning() {
+        if is_vct_terminal_win(kind) {
             if opp_has_immediate_five && kind != ThreatKind::Five {
                 continue;
             }
@@ -638,7 +649,9 @@ fn vct_or_audit(
                 "side_to_move": stone_json(board.side_to_move),
                 "history": history_json(board),
             }));
-            return matches!(entry.result, TtResult::AttackerWins);
+            if matches!(entry.result, TtResult::Fails) {
+                return false;
+            }
         }
     }
 
@@ -659,7 +672,7 @@ fn vct_or_audit(
     }
 
     for (mv, kind) in attack_moves {
-        if kind.is_winning() {
+        if is_vct_terminal_win(kind) {
             if opp_has_immediate_five && kind != ThreatKind::Five {
                 audit.record_terminal(
                     "winning_attack_skipped_opp_immediate_five",

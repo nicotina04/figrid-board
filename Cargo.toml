@@ -86,6 +86,10 @@ path = "bin/rq423_feature_dump.rs"
 name = "rq544-eval-scale"
 path = "bin/rq544_eval_scale.rs"
 
+[[bin]]
+name = "rq545-stratified-bce"
+path = "bin/rq545_stratified_bce.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

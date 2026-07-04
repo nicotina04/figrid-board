@@ -32,14 +32,14 @@ pub mod vct;
 pub mod legacy;
 
 pub use board::{
-    to_idx, to_rc, BitBoard, Board, GameResult, Move, RuleSet, Stone, BOARD_SIZE, NUM_CELLS,
+    BOARD_SIZE, BitBoard, Board, GameResult, Move, NUM_CELLS, RuleSet, Stone, to_idx, to_rc,
 };
 pub use coord::{Coord, Coord15, Coord20, CoordState, Rotation};
-pub use eval::{evaluate, IncrementalEval};
+pub use eval::{IncrementalEval, evaluate};
 pub use features::GOMOKU_NNUE_CONFIG;
-pub use heuristic::{scan_line, LineInfo, DIR};
+pub use heuristic::{DIR, LineInfo, scan_line};
 pub use search::{SearchResult, Searcher};
-pub use vct::{search_vct, VctConfig};
+pub use vct::{VctConfig, search_vct, search_vct_audit_json};
 
 /// Possible errors returned from this crate.
 #[derive(Clone, Debug, PartialEq)]

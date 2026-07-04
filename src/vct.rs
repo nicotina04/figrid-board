@@ -18,15 +18,15 @@
 //! 승리 Threat(Five/OpenFour/DoubleFour/FourThree/DoubleThree)을 만들면 해당
 //! 수를 반환하고 즉시 성공. 그 외 Forcing Threat(ClosedFour/OpenThree)은 재귀.
 
-use crate::board::{Board, BitBoard, Move, RuleSet, Stone, BOARD_SIZE, NUM_CELLS};
-use crate::heuristic::{scan_line, DIR};
+use crate::board::{BOARD_SIZE, BitBoard, Board, Move, NUM_CELLS, RuleSet, Stone};
+use crate::heuristic::{DIR, scan_line};
 use crate::pattern_table::{
-    pattern_threat_after_my_play, pattern_threat_after_my_play_caro,
-    pattern_threat_after_my_play_exact5, read_window, swap_mapped_id, WindowThreat,
-    PATTERN_RARE_ID,
+    PATTERN_RARE_ID, WindowThreat, pattern_threat_after_my_play, pattern_threat_after_my_play_caro,
+    pattern_threat_after_my_play_exact5, read_window, swap_mapped_id,
 };
 use noru::trainer::SimpleRng;
-use std::collections::HashMap;
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -88,12 +88,12 @@ type TransTable = HashMap<u64, TtEntry>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LineThreat {
     None,
-    OpenTwo,      // (2, open 2)
-    ClosedThree,  // (3, open 1)
-    OpenThree,    // (3, open 2)
-    ClosedFour,   // (4, open 1)
-    OpenFour,     // (4, open 2)
-    Five,         // (>=5)
+    OpenTwo,     // (2, open 2)
+    ClosedThree, // (3, open 1)
+    OpenThree,   // (3, open 2)
+    ClosedFour,  // (4, open 1)
+    OpenFour,    // (4, open 2)
+    Five,        // (>=5)
 }
 
 fn classify_line(count: u32, open_ends: u32, rule_set: RuleSet, side: Stone) -> LineThreat {
@@ -118,13 +118,13 @@ fn classify_line(count: u32, open_ends: u32, rule_set: RuleSet, side: Stone) -> 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ThreatKind {
-    None        = 0,
-    ClosedFour  = 1,
-    OpenThree   = 2,
-    Five        = 3,
-    OpenFour    = 4,
-    DoubleFour  = 5,
-    FourThree   = 6,
+    None = 0,
+    ClosedFour = 1,
+    OpenThree = 2,
+    Five = 3,
+    OpenFour = 4,
+    DoubleFour = 5,
+    FourThree = 6,
     DoubleThree = 7,
 }
 
@@ -146,8 +146,7 @@ impl ThreatKind {
 
     /// 재귀 탐색해볼 가치가 있는 Forcing move인가 (방어 가능하지만 강제).
     pub fn is_forcing(self) -> bool {
-        matches!(self, ThreatKind::ClosedFour | ThreatKind::OpenThree)
-            || self.is_winning()
+        matches!(self, ThreatKind::ClosedFour | ThreatKind::OpenThree) || self.is_winning()
     }
 }
 
@@ -174,13 +173,10 @@ pub fn classify_move_rules(
     let row = (mv / BOARD_SIZE) as i32;
     let col = (mv % BOARD_SIZE) as i32;
 
-    // mv 위치에 돌이 있다고 가정하고 각 방향 라인 측정.
-    // scan_line은 시작 셀이 돌을 가졌다고 가정하고 count=1부터 시작하므로
-    // 임시로 my_bb에 mv를 set한 복사본을 만든다.
     let mut my_tmp = *my_bb;
     my_tmp.set(mv);
 
-    let mut fours = 0u32; // OpenFour 또는 ClosedFour 방향 수
+    let mut fours = 0u32;
     let mut open_fours = 0u32;
     let mut open_threes = 0u32;
     let mut closed_fours = 0u32;
@@ -395,10 +391,71 @@ pub fn search_vct(board: &mut Board, cfg: &VctConfig) -> Option<Vec<Move>> {
     let attacker = board.side_to_move;
     let mut sequence = Vec::with_capacity(cfg.max_depth as usize * 2);
     let mut tt: TransTable = HashMap::with_capacity(65536);
-    if vct_or(board, attacker, cfg.max_depth, deadline, &mut sequence, &mut tt) {
+    if vct_or(
+        board,
+        attacker,
+        cfg.max_depth,
+        deadline,
+        &mut sequence,
+        &mut tt,
+    ) {
         Some(sequence)
     } else {
         None
+    }
+}
+
+pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
+    let deadline = cfg.time_budget.map(|d| Instant::now() + d);
+    let attacker = board.side_to_move;
+    let mut sequence = Vec::with_capacity(cfg.max_depth as usize * 2);
+    let mut tt: TransTable = HashMap::with_capacity(65536);
+    let mut audit = VctAuditLog::default();
+    let hit = vct_or_audit(
+        board,
+        attacker,
+        cfg.max_depth,
+        deadline,
+        &mut sequence,
+        &mut tt,
+        &mut audit,
+    );
+    json!({
+        "format": "vct-proof-audit-v1",
+        "hit": hit,
+        "attacker": stone_json(attacker),
+        "max_depth": cfg.max_depth,
+        "time_budget_ms": cfg.time_budget.map(|d| d.as_millis() as u64),
+        "sequence": if hit { Some(sequence.iter().map(|&mv| move_json(mv)).collect::<Vec<_>>()) } else { None },
+        "and_nodes": audit.and_nodes,
+        "terminal_event_count": audit.terminal_event_count,
+        "terminal_event_counts": audit.terminal_event_counts,
+        "terminal_event_samples": audit.terminal_event_samples,
+        "tt_hit_count": audit.tt_hit_count,
+        "tt_hit_events": audit.tt_hit_events,
+    })
+}
+
+#[derive(Default)]
+struct VctAuditLog {
+    and_nodes: Vec<Value>,
+    terminal_event_count: usize,
+    terminal_event_counts: BTreeMap<String, usize>,
+    terminal_event_samples: Vec<Value>,
+    tt_hit_count: usize,
+    tt_hit_events: Vec<Value>,
+}
+
+impl VctAuditLog {
+    fn record_terminal(&mut self, kind: &str, event: Value) {
+        self.terminal_event_count += 1;
+        *self
+            .terminal_event_counts
+            .entry(kind.to_string())
+            .or_default() += 1;
+        if self.terminal_event_samples.len() < 64 {
+            self.terminal_event_samples.push(event);
+        }
     }
 }
 
@@ -436,7 +493,13 @@ fn vct_or(
 
     let attack_moves = gather_attack_moves(my, opp, attacker, rule_set);
     if attack_moves.is_empty() {
-        tt.insert(hash, TtEntry { depth, result: TtResult::Fails });
+        tt.insert(
+            hash,
+            TtEntry {
+                depth,
+                result: TtResult::Fails,
+            },
+        );
         return false;
     }
 
@@ -446,7 +509,13 @@ fn vct_or(
                 continue;
             }
             sequence.push(mv);
-            tt.insert(hash, TtEntry { depth, result: TtResult::AttackerWins });
+            tt.insert(
+                hash,
+                TtEntry {
+                    depth,
+                    result: TtResult::AttackerWins,
+                },
+            );
             return true;
         }
         if opp_has_immediate_five {
@@ -457,12 +526,24 @@ fn vct_or(
         let won = vct_and(board, attacker, depth - 1, deadline, sequence, tt);
         board.undo_move();
         if won {
-            tt.insert(hash, TtEntry { depth, result: TtResult::AttackerWins });
+            tt.insert(
+                hash,
+                TtEntry {
+                    depth,
+                    result: TtResult::AttackerWins,
+                },
+            );
             return true;
         }
         sequence.pop();
     }
-    tt.insert(hash, TtEntry { depth, result: TtResult::Fails });
+    tt.insert(
+        hash,
+        TtEntry {
+            depth,
+            result: TtResult::Fails,
+        },
+    );
     false
 }
 
@@ -524,6 +605,246 @@ fn vct_and(
         }
         // 성공 → 다음 분기로. 마지막 분기의 수열이 최종 sequence가 됨.
     }
+    true
+}
+
+fn vct_or_audit(
+    board: &mut Board,
+    attacker: Stone,
+    depth: u32,
+    deadline: Option<Instant>,
+    sequence: &mut Vec<Move>,
+    tt: &mut TransTable,
+    audit: &mut VctAuditLog,
+) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    if timed_out(deadline) {
+        return false;
+    }
+    debug_assert_eq!(board.side_to_move, attacker);
+
+    let hash = zobrist_hash(board);
+    if let Some(entry) = tt.get(&hash) {
+        if entry.depth >= depth {
+            audit.tt_hit_count += 1;
+            audit.tt_hit_events.push(json!({
+                "node": "or",
+                "hash": hash,
+                "requested_depth": depth,
+                "entry_depth": entry.depth,
+                "result": tt_result_json(entry.result),
+                "side_to_move": stone_json(board.side_to_move),
+                "history": history_json(board),
+            }));
+            return matches!(entry.result, TtResult::AttackerWins);
+        }
+    }
+
+    let (my, opp) = bb_pair(board, attacker);
+    let rule_set = board.effective_rule_set();
+    let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
+
+    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set);
+    if attack_moves.is_empty() {
+        tt.insert(
+            hash,
+            TtEntry {
+                depth,
+                result: TtResult::Fails,
+            },
+        );
+        return false;
+    }
+
+    for (mv, kind) in attack_moves {
+        if kind.is_winning() {
+            if opp_has_immediate_five && kind != ThreatKind::Five {
+                audit.record_terminal(
+                    "winning_attack_skipped_opp_immediate_five",
+                    json!({
+                        "kind": "winning_attack_skipped_opp_immediate_five",
+                        "depth": depth,
+                        "move": move_json(mv),
+                        "threat": threat_json(kind),
+                        "history": history_json(board),
+                    }),
+                );
+                continue;
+            }
+            sequence.push(mv);
+            audit.record_terminal(
+                "winning_attack_accepted",
+                json!({
+                    "kind": "winning_attack_accepted",
+                    "depth": depth,
+                    "move": move_json(mv),
+                    "threat": threat_json(kind),
+                    "history": history_json(board),
+                    "opp_has_immediate_five": opp_has_immediate_five,
+                }),
+            );
+            tt.insert(
+                hash,
+                TtEntry {
+                    depth,
+                    result: TtResult::AttackerWins,
+                },
+            );
+            return true;
+        }
+        if opp_has_immediate_five {
+            audit.record_terminal(
+                "forcing_attack_skipped_opp_immediate_five",
+                json!({
+                    "kind": "forcing_attack_skipped_opp_immediate_five",
+                    "depth": depth,
+                    "move": move_json(mv),
+                    "threat": threat_json(kind),
+                    "history": history_json(board),
+                }),
+            );
+            continue;
+        }
+        sequence.push(mv);
+        board.make_move(mv);
+        let won = vct_and_audit(board, attacker, depth - 1, deadline, sequence, tt, audit);
+        board.undo_move();
+        if won {
+            tt.insert(
+                hash,
+                TtEntry {
+                    depth,
+                    result: TtResult::AttackerWins,
+                },
+            );
+            return true;
+        }
+        sequence.pop();
+    }
+    tt.insert(
+        hash,
+        TtEntry {
+            depth,
+            result: TtResult::Fails,
+        },
+    );
+    false
+}
+
+fn vct_and_audit(
+    board: &mut Board,
+    attacker: Stone,
+    depth: u32,
+    deadline: Option<Instant>,
+    sequence: &mut Vec<Move>,
+    tt: &mut TransTable,
+    audit: &mut VctAuditLog,
+) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    if timed_out(deadline) {
+        return false;
+    }
+    debug_assert_ne!(board.side_to_move, attacker);
+
+    let node_history = history_json(board);
+    let last_attack = board.last_move.map(move_json);
+    let defender = board.side_to_move;
+    let (def_my, def_opp) = bb_pair(board, defender);
+    let rule_set = board.effective_rule_set();
+    let defender_has_immediate_five = has_immediate_five(def_my, def_opp, defender, rule_set);
+    if defender_has_immediate_five {
+        audit.and_nodes.push(json!({
+            "node": "and",
+            "depth": depth,
+            "attacker": stone_json(attacker),
+            "defender": stone_json(defender),
+            "history": node_history,
+            "last_attack": last_attack,
+            "defender_has_immediate_five": true,
+            "defenses": [],
+            "result": false,
+            "terminal_reason": "defender_immediate_five",
+        }));
+        return false;
+    }
+
+    let defenses = match board.last_move {
+        Some(attack_mv) => find_defenses_with_counters(board, attack_mv),
+        None => board.candidate_moves(),
+    };
+    if defenses.is_empty() {
+        audit.and_nodes.push(json!({
+            "node": "and",
+            "depth": depth,
+            "attacker": stone_json(attacker),
+            "defender": stone_json(defender),
+            "history": node_history,
+            "last_attack": last_attack,
+            "defender_has_immediate_five": false,
+            "defenses": [],
+            "result": false,
+            "terminal_reason": "no_defenses",
+        }));
+        return false;
+    }
+
+    let checkpoint = sequence.len();
+    let mut defense_results = Vec::with_capacity(defenses.len());
+    for mv in defenses {
+        sequence.truncate(checkpoint);
+        sequence.push(mv);
+
+        let tt_before = audit.tt_hit_count;
+        board.make_move(mv);
+        let attacker_still_wins =
+            vct_or_audit(board, attacker, depth - 1, deadline, sequence, tt, audit);
+        board.undo_move();
+        let tt_after = audit.tt_hit_count;
+        let continuation = sequence[checkpoint..]
+            .iter()
+            .map(|&mv| move_json(mv))
+            .collect::<Vec<_>>();
+
+        defense_results.push(json!({
+            "move": move_json(mv),
+            "attacker_still_wins": attacker_still_wins,
+            "tt_hits_delta": tt_after - tt_before,
+            "sequence_after_len": sequence.len(),
+            "continuation": continuation,
+        }));
+
+        if !attacker_still_wins {
+            sequence.truncate(checkpoint);
+            audit.and_nodes.push(json!({
+                "node": "and",
+                "depth": depth,
+                "attacker": stone_json(attacker),
+                "defender": stone_json(defender),
+                "history": node_history,
+                "last_attack": last_attack,
+                "defender_has_immediate_five": false,
+                "defenses": defense_results,
+                "result": false,
+                "terminal_reason": "defense_refutes",
+            }));
+            return false;
+        }
+    }
+    audit.and_nodes.push(json!({
+        "node": "and",
+        "depth": depth,
+        "attacker": stone_json(attacker),
+        "defender": stone_json(defender),
+        "history": node_history,
+        "last_attack": last_attack,
+        "defender_has_immediate_five": false,
+        "defenses": defense_results,
+        "result": true,
+    }));
     true
 }
 
@@ -677,6 +998,55 @@ fn timed_out(deadline: Option<Instant>) -> bool {
         }
     }
     false
+}
+
+fn move_json(mv: Move) -> Value {
+    json!({"x": mv % BOARD_SIZE, "y": mv / BOARD_SIZE})
+}
+
+fn history_json(board: &Board) -> Value {
+    let mut side = Stone::Black;
+    let moves = board
+        .history
+        .iter()
+        .map(|&mv| {
+            let out = json!({
+                "x": mv % BOARD_SIZE,
+                "y": mv / BOARD_SIZE,
+                "color": stone_json(side),
+            });
+            side = side.opponent();
+            out
+        })
+        .collect::<Vec<_>>();
+    json!(moves)
+}
+
+fn stone_json(side: Stone) -> &'static str {
+    match side {
+        Stone::Black => "B",
+        Stone::White => "W",
+    }
+}
+
+fn threat_json(kind: ThreatKind) -> &'static str {
+    match kind {
+        ThreatKind::None => "None",
+        ThreatKind::ClosedFour => "ClosedFour",
+        ThreatKind::OpenThree => "OpenThree",
+        ThreatKind::Five => "Five",
+        ThreatKind::OpenFour => "OpenFour",
+        ThreatKind::DoubleFour => "DoubleFour",
+        ThreatKind::FourThree => "FourThree",
+        ThreatKind::DoubleThree => "DoubleThree",
+    }
+}
+
+fn tt_result_json(result: TtResult) -> &'static str {
+    match result {
+        TtResult::AttackerWins => "attacker_wins",
+        TtResult::Fails => "fails",
+    }
 }
 
 #[cfg(test)]
@@ -870,7 +1240,12 @@ mod tests {
         board.make_move(to_idx(6, 6));
         // 지금 백 턴. 흑 bitboard 기준으로 (7,6)이 DoubleThree인지.
         let k = classify_move(&board.black, &board.white, to_idx(7, 6), false);
-        assert_eq!(k, ThreatKind::DoubleThree, "should be double three, got {:?}", k);
+        assert_eq!(
+            k,
+            ThreatKind::DoubleThree,
+            "should be double three, got {:?}",
+            k
+        );
     }
 
     #[test]

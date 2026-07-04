@@ -1,5 +1,7 @@
-use figrid_board::{search_vct, to_idx, to_rc, Board, Move, Stone, VctConfig, BOARD_SIZE};
-use serde_json::{json, Value};
+use figrid_board::{
+    BOARD_SIZE, Board, Move, Stone, VctConfig, search_vct, search_vct_audit_json, to_idx, to_rc,
+};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
@@ -19,6 +21,7 @@ struct Args {
     out_jsonl: PathBuf,
     configs: Vec<SolveConfig>,
     max_positions: usize,
+    include_proof: bool,
 }
 
 fn main() -> Result<(), String> {
@@ -55,7 +58,7 @@ fn main() -> Result<(), String> {
                 continue;
             }
         };
-        let solved = match solve_record(&rec, &args.configs) {
+        let solved = match solve_record(&rec, &args.configs, args.include_proof) {
             Ok(v) => v,
             Err(e) => {
                 skipped += 1;
@@ -101,7 +104,11 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-fn solve_record(rec: &Value, configs: &[SolveConfig]) -> Result<Value, String> {
+fn solve_record(
+    rec: &Value,
+    configs: &[SolveConfig],
+    include_proof: bool,
+) -> Result<Value, String> {
     let class = rec
         .get("class")
         .and_then(Value::as_str)
@@ -124,11 +131,11 @@ fn solve_record(rec: &Value, configs: &[SolveConfig]) -> Result<Value, String> {
         ));
     }
 
-    let pre_vct = run_sweep(&board, configs);
+    let pre_vct = run_sweep(&board, configs, include_proof);
     let actual_move = parse_move(rec.get("actual_move").ok_or("missing actual_move")?)?;
     let after_actual_opp_vct = if board.is_empty(actual_move) {
         board.make_move(actual_move);
-        let out = run_sweep(&board, configs);
+        let out = run_sweep(&board, configs, include_proof);
         board.undo_move();
         out
     } else {
@@ -168,23 +175,41 @@ fn solve_record(rec: &Value, configs: &[SolveConfig]) -> Result<Value, String> {
     }))
 }
 
-fn run_sweep(board: &Board, configs: &[SolveConfig]) -> Value {
+fn run_sweep(board: &Board, configs: &[SolveConfig], include_proof: bool) -> Value {
     let mut attempts = Vec::new();
     let mut first_hit: Option<Value> = None;
     for (idx, cfg) in configs.iter().enumerate() {
         let mut b = board.clone();
-        let seq = search_vct(
-            &mut b,
-            &VctConfig {
-                max_depth: cfg.depth,
-                time_budget: Some(Duration::from_millis(cfg.budget_ms)),
-            },
-        );
+        let cfg_obj = VctConfig {
+            max_depth: cfg.depth,
+            time_budget: Some(Duration::from_millis(cfg.budget_ms)),
+        };
+        let should_capture_proof = include_proof && first_hit.is_none();
+        let (seq, proof) = if should_capture_proof {
+            let proof = search_vct_audit_json(&mut b, &cfg_obj);
+            let seq = proof
+                .get("sequence")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|mv| parse_move(mv).ok())
+                        .collect::<Vec<_>>()
+                });
+            let proof = if proof.get("hit").and_then(Value::as_bool).unwrap_or(false) {
+                Some(proof)
+            } else {
+                None
+            };
+            (seq, proof)
+        } else {
+            (search_vct(&mut b, &cfg_obj), None)
+        };
         let hit = seq.is_some();
         let seq_json = seq
             .as_ref()
             .map(|s| s.iter().map(|&mv| move_json(mv)).collect::<Vec<_>>());
-        let attempt = json!({
+        let mut attempt = json!({
             "idx": idx,
             "depth": cfg.depth,
             "budget_ms": cfg.budget_ms,
@@ -192,6 +217,9 @@ fn run_sweep(board: &Board, configs: &[SolveConfig]) -> Value {
             "sequence_len": seq.as_ref().map(|s| s.len()).unwrap_or(0),
             "sequence": seq_json,
         });
+        if let Some(proof) = proof {
+            attempt["proof"] = proof;
+        }
         if hit && first_hit.is_none() {
             first_hit = Some(attempt.clone());
         }
@@ -317,6 +345,7 @@ fn parse_args() -> Result<Args, String> {
         },
     ];
     let mut max_positions = 0usize;
+    let mut include_proof = false;
 
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -330,6 +359,7 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("invalid --max-positions: {e}"))?
             }
+            "--include-proof" => include_proof = true,
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -343,6 +373,7 @@ fn parse_args() -> Result<Args, String> {
         out_jsonl: out_jsonl.ok_or("missing --out-jsonl")?,
         configs,
         max_positions,
+        include_proof,
     })
 }
 
@@ -370,6 +401,6 @@ fn next_arg(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String,
 
 fn print_help() {
     eprintln!(
-        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N]"
+        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof]"
     );
 }

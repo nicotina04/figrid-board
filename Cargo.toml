@@ -90,6 +90,10 @@ path = "bin/rq544_eval_scale.rs"
 name = "rq545-stratified-bce"
 path = "bin/rq545_stratified_bce.rs"
 
+[[bin]]
+name = "rq547-vct-solve"
+path = "bin/rq547_vct_solve.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

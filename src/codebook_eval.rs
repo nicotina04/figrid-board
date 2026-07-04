@@ -1,0 +1,733 @@
+//! Experimental no-message-passing codebook evaluator.
+//!
+//! This module mirrors the normal `IncrementalEval` shape for the RQ542
+//! correctness gate. It is deliberately feature-gated and is not wired into
+//! search by default.
+
+use serde_json::Value;
+
+use crate::board::{Board, Move, Stone, BOARD_SIZE, NUM_CELLS};
+use crate::pattern_table::{swap_mapped_id, PATTERN_NUM_IDS};
+
+const REGIONS: usize = 9;
+const WINDOW_LENS: [usize; 3] = [5, 6, 7];
+
+#[derive(Clone, Debug)]
+pub struct CodebookWeights {
+    pub dim: usize,
+    pub fm_rank: usize,
+    pub embeddings: Vec<f32>,
+    pub head: Vec<f32>,
+    pub factors: Vec<f32>,
+    pub bias: f32,
+}
+
+impl CodebookWeights {
+    pub fn deterministic(dim: usize, fm_rank: usize) -> Self {
+        let mut state = 0xC0DE_B00C_F00D_0542u64;
+        let embeddings = deterministic_vec(&mut state, PATTERN_NUM_IDS * dim, 0.02);
+        let head = deterministic_vec(&mut state, REGIONS * dim, 0.02);
+        let factors = deterministic_vec(&mut state, REGIONS * dim * fm_rank, 0.02);
+        Self {
+            dim,
+            fm_rank,
+            embeddings,
+            head,
+            factors,
+            bias: 0.01,
+        }
+    }
+
+    pub fn from_json_bytes(data: &[u8]) -> Result<Self, String> {
+        let root: Value = serde_json::from_slice(data)
+            .map_err(|e| format!("failed to parse codebook json: {e}"))?;
+        Self::from_json_value(&root)
+    }
+
+    pub fn from_json_value(root: &Value) -> Result<Self, String> {
+        let format = json_str(root, "format")?;
+        if format != "noru-relation-fusion-eval-v1" && format != "noru-pattern4-codebook-eval-v1" {
+            return Err(format!("unsupported codebook format: {format}"));
+        }
+
+        let model = json_str(root, "model")?;
+        if model != "codebook-region-fm" && model != "region-codebook-fm" {
+            return Err(format!(
+                "unsupported codebook model: {model}; expected codebook-region-fm"
+            ));
+        }
+
+        let metadata = root.get("metadata");
+        let dim = metadata
+            .and_then(|m| json_usize_opt(m, "embedding_dim"))
+            .or_else(|| json_usize_opt(root, "embedding_dim"))
+            .ok_or_else(|| "missing embedding_dim".to_string())?;
+        let fm_rank = metadata
+            .and_then(|m| json_usize_opt(m, "fm_rank"))
+            .or_else(|| json_usize_opt(root, "fm_rank"))
+            .ok_or_else(|| "missing fm_rank".to_string())?;
+        let regions = metadata
+            .and_then(|m| json_usize_opt(m, "regions"))
+            .or_else(|| json_usize_opt(root, "regions"))
+            .unwrap_or(REGIONS);
+        if regions != REGIONS {
+            return Err(format!("unsupported region count: {regions}"));
+        }
+
+        let weights = root
+            .get("weights")
+            .ok_or_else(|| "missing weights object".to_string())?;
+        let embeddings = json_f32_array(weights, "embeddings")?;
+        let head = json_f32_array(weights, "head")?;
+        let factors = json_f32_array(weights, "factors")?;
+        let bias = json_f32_opt(weights, "bias").ok_or_else(|| "missing bias".to_string())?;
+
+        let expected_embeddings = PATTERN_NUM_IDS * dim;
+        let expected_head = REGIONS * dim;
+        let expected_factors = expected_head * fm_rank;
+        if embeddings.len() != expected_embeddings {
+            return Err(format!(
+                "embedding length mismatch: got {}, expected {expected_embeddings}",
+                embeddings.len()
+            ));
+        }
+        if head.len() != expected_head {
+            return Err(format!(
+                "head length mismatch: got {}, expected {expected_head}",
+                head.len()
+            ));
+        }
+        if factors.len() != expected_factors {
+            return Err(format!(
+                "factor length mismatch: got {}, expected {expected_factors}",
+                factors.len()
+            ));
+        }
+
+        Ok(Self {
+            dim,
+            fm_rank,
+            embeddings,
+            head,
+            factors,
+            bias,
+        })
+    }
+
+    #[inline]
+    pub fn feature_len(&self) -> usize {
+        REGIONS * self.dim
+    }
+
+    fn validate(&self) {
+        debug_assert_eq!(self.embeddings.len(), PATTERN_NUM_IDS * self.dim);
+        debug_assert_eq!(self.head.len(), self.feature_len());
+        debug_assert_eq!(self.factors.len(), self.feature_len() * self.fm_rank);
+    }
+}
+
+pub struct IncrementalCodebookEval {
+    cell_black: Vec<f32>,
+    cell_white: Vec<f32>,
+    features_black: Vec<f32>,
+    features_white: Vec<f32>,
+    stack: Vec<UndoRecord>,
+    last_dirty_cells: usize,
+}
+
+struct UndoRecord {
+    changes: Vec<CellUndo>,
+}
+
+struct CellUndo {
+    cell: usize,
+    black: Vec<f32>,
+    white: Vec<f32>,
+}
+
+impl IncrementalCodebookEval {
+    pub fn new(weights: &CodebookWeights) -> Self {
+        weights.validate();
+        Self {
+            cell_black: vec![0.0; NUM_CELLS * weights.dim],
+            cell_white: vec![0.0; NUM_CELLS * weights.dim],
+            features_black: vec![0.0; weights.feature_len()],
+            features_white: vec![0.0; weights.feature_len()],
+            stack: Vec::with_capacity(NUM_CELLS),
+            last_dirty_cells: 0,
+        }
+    }
+
+    pub fn refresh(&mut self, board: &Board, weights: &CodebookWeights) {
+        weights.validate();
+        self.cell_black.fill(0.0);
+        self.cell_white.fill(0.0);
+        self.features_black.fill(0.0);
+        self.features_white.fill(0.0);
+
+        for cell in 0..NUM_CELLS {
+            compute_cell(
+                board,
+                weights,
+                cell,
+                Stone::Black,
+                cell_slice_mut(&mut self.cell_black, cell, weights.dim),
+            );
+            add_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                cell,
+                weights.dim,
+                1.0,
+            );
+
+            compute_cell(
+                board,
+                weights,
+                cell,
+                Stone::White,
+                cell_slice_mut(&mut self.cell_white, cell, weights.dim),
+            );
+            add_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                cell,
+                weights.dim,
+                1.0,
+            );
+        }
+
+        self.stack.clear();
+        self.last_dirty_cells = 0;
+    }
+
+    pub fn push_move(&mut self, board: &Board, mv: Move, weights: &CodebookWeights) {
+        weights.validate();
+        let dirty = dirty_cells_for_move(mv);
+        let mut undo = UndoRecord {
+            changes: Vec::with_capacity(dirty.len()),
+        };
+
+        for cell in dirty.iter().copied() {
+            let old_black = cell_slice(&self.cell_black, cell, weights.dim).to_vec();
+            let old_white = cell_slice(&self.cell_white, cell, weights.dim).to_vec();
+
+            add_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                cell,
+                weights.dim,
+                -1.0,
+            );
+            add_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                cell,
+                weights.dim,
+                -1.0,
+            );
+
+            compute_cell(
+                board,
+                weights,
+                cell,
+                Stone::Black,
+                cell_slice_mut(&mut self.cell_black, cell, weights.dim),
+            );
+            compute_cell(
+                board,
+                weights,
+                cell,
+                Stone::White,
+                cell_slice_mut(&mut self.cell_white, cell, weights.dim),
+            );
+
+            add_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                cell,
+                weights.dim,
+                1.0,
+            );
+            add_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                cell,
+                weights.dim,
+                1.0,
+            );
+
+            undo.changes.push(CellUndo {
+                cell,
+                black: old_black,
+                white: old_white,
+            });
+        }
+
+        self.last_dirty_cells = dirty.len();
+        self.stack.push(undo);
+    }
+
+    pub fn pop_move(&mut self, weights: &CodebookWeights) {
+        let Some(undo) = self.stack.pop() else {
+            return;
+        };
+        for change in undo.changes.into_iter().rev() {
+            add_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                change.cell,
+                weights.dim,
+                -1.0,
+            );
+            add_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                change.cell,
+                weights.dim,
+                -1.0,
+            );
+
+            cell_slice_mut(&mut self.cell_black, change.cell, weights.dim)
+                .copy_from_slice(&change.black);
+            cell_slice_mut(&mut self.cell_white, change.cell, weights.dim)
+                .copy_from_slice(&change.white);
+
+            add_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                change.cell,
+                weights.dim,
+                1.0,
+            );
+            add_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                change.cell,
+                weights.dim,
+                1.0,
+            );
+        }
+        self.last_dirty_cells = 0;
+    }
+
+    pub fn value(&self, board: &Board, weights: &CodebookWeights) -> f32 {
+        let features = match board.side_to_move {
+            Stone::Black => &self.features_black,
+            Stone::White => &self.features_white,
+        };
+        value_from_features(features, weights)
+    }
+
+    pub fn last_dirty_cells(&self) -> usize {
+        self.last_dirty_cells
+    }
+
+    pub fn last_dirty_ratio(&self) -> f32 {
+        self.last_dirty_cells as f32 / NUM_CELLS as f32
+    }
+}
+
+pub fn evaluate_full(board: &Board, weights: &CodebookWeights) -> f32 {
+    let mut inc = IncrementalCodebookEval::new(weights);
+    inc.refresh(board, weights);
+    inc.value(board, weights)
+}
+
+pub fn dirty_cells_for_move(mv: Move) -> Vec<usize> {
+    const DIRS: [(i32, i32); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
+    let row = (mv / BOARD_SIZE) as i32;
+    let col = (mv % BOARD_SIZE) as i32;
+    let mut seen = [false; NUM_CELLS];
+    let mut cells = Vec::with_capacity(56);
+    for &(dr, dc) in &DIRS {
+        for len in WINDOW_LENS {
+            for shift in 0..len {
+                let start_r = row - dr * shift as i32;
+                let start_c = col - dc * shift as i32;
+                let end_r = start_r + dr * (len as i32 - 1);
+                let end_c = start_c + dc * (len as i32 - 1);
+                if !in_bounds(start_r, start_c) || !in_bounds(end_r, end_c) {
+                    continue;
+                }
+                for k in 0..len {
+                    let r = start_r + dr * k as i32;
+                    let c = start_c + dc * k as i32;
+                    let cell = r as usize * BOARD_SIZE + c as usize;
+                    if !seen[cell] {
+                        seen[cell] = true;
+                        cells.push(cell);
+                    }
+                }
+            }
+        }
+    }
+    cells
+}
+
+#[inline]
+fn in_bounds(row: i32, col: i32) -> bool {
+    row >= 0 && row < BOARD_SIZE as i32 && col >= 0 && col < BOARD_SIZE as i32
+}
+
+fn compute_cell(
+    board: &Board,
+    weights: &CodebookWeights,
+    cell: usize,
+    perspective: Stone,
+    out: &mut [f32],
+) {
+    out.fill(0.0);
+    let swap = perspective == Stone::White;
+    for &pid in &board.line_pattern_ids[cell] {
+        let pid = if swap { swap_mapped_id(pid) } else { pid };
+        let emb_base = pid as usize * weights.dim;
+        for d in 0..weights.dim {
+            out[d] += weights.embeddings[emb_base + d];
+        }
+    }
+    for x in out {
+        *x = x.max(0.0);
+    }
+}
+
+fn add_cell_to_features(cells: &[f32], features: &mut [f32], cell: usize, dim: usize, scale: f32) {
+    let region = region_of_cell(cell);
+    let denom = region_cell_count(region) as f32;
+    let cell_base = cell * dim;
+    let feature_base = region * dim;
+    for d in 0..dim {
+        features[feature_base + d] += scale * cells[cell_base + d] / denom;
+    }
+}
+
+fn value_from_features(features: &[f32], weights: &CodebookWeights) -> f32 {
+    let mut logit = weights.bias;
+    for (x, w) in features.iter().zip(&weights.head) {
+        logit += x * w;
+    }
+    for rank in 0..weights.fm_rank {
+        let mut sum = 0.0f32;
+        let mut square_sum = 0.0f32;
+        for (idx, &x) in features.iter().enumerate() {
+            let vx = weights.factors[idx * weights.fm_rank + rank] * x;
+            sum += vx;
+            square_sum += vx * vx;
+        }
+        logit += 0.5 * (sum * sum - square_sum);
+    }
+    logit
+}
+
+#[inline]
+fn cell_slice(cells: &[f32], cell: usize, dim: usize) -> &[f32] {
+    let start = cell * dim;
+    &cells[start..start + dim]
+}
+
+#[inline]
+fn cell_slice_mut(cells: &mut [f32], cell: usize, dim: usize) -> &mut [f32] {
+    let start = cell * dim;
+    &mut cells[start..start + dim]
+}
+
+fn region_of_cell(cell: usize) -> usize {
+    let row = cell / BOARD_SIZE;
+    let col = cell % BOARD_SIZE;
+    let rr = (row / 5).min(2);
+    let cc = (col / 5).min(2);
+    rr * 3 + cc
+}
+
+fn region_cell_count(_region: usize) -> usize {
+    25
+}
+
+fn deterministic_vec(state: &mut u64, n: usize, scale: f32) -> Vec<f32> {
+    (0..n).map(|_| deterministic_f32(state, scale)).collect()
+}
+
+fn deterministic_f32(state: &mut u64, scale: f32) -> f32 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    let unit = ((*state >> 40) as u32) as f32 / (1u32 << 24) as f32;
+    (unit * 2.0 - 1.0) * scale
+}
+
+fn json_str<'a>(v: &'a Value, key: &str) -> Result<&'a str, String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing string field {key}"))
+}
+
+fn json_usize_opt(v: &Value, key: &str) -> Option<usize> {
+    v.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|x| usize::try_from(x).ok())
+}
+
+fn json_f32_opt(v: &Value, key: &str) -> Option<f32> {
+    v.get(key).and_then(Value::as_f64).map(|x| x as f32)
+}
+
+fn json_f32_array(v: &Value, key: &str) -> Result<Vec<f32>, String> {
+    let raw = v
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing array field {key}"))?;
+    raw.iter()
+        .map(|x| {
+            x.as_f64()
+                .map(|v| v as f32)
+                .ok_or_else(|| format!("non-numeric item in {key}"))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::GameResult;
+
+    const TOL: f32 = 1e-4;
+
+    #[test]
+    fn codebook_incremental_matches_full_refresh_smoke() {
+        let weights = CodebookWeights::deterministic(16, 8);
+        let moves = [
+            112, 113, 97, 98, 127, 128, 111, 114, 96, 99, 126, 129, 82, 83, 84, 85, 100, 101, 115,
+            116,
+        ];
+        let mut board = Board::new();
+        let mut inc = IncrementalCodebookEval::new(&weights);
+        inc.refresh(&board, &weights);
+
+        assert_close(inc.value(&board, &weights), evaluate_full(&board, &weights));
+
+        for &mv in &moves {
+            if !board.is_empty(mv) {
+                continue;
+            }
+            board.make_move(mv);
+            inc.push_move(&board, mv, &weights);
+            assert_close(inc.value(&board, &weights), evaluate_full(&board, &weights));
+        }
+
+        for _ in 0..moves.len() {
+            board.undo_move();
+            inc.pop_move(&weights);
+            assert_close(inc.value(&board, &weights), evaluate_full(&board, &weights));
+        }
+    }
+
+    #[test]
+    #[ignore = "RQ542 gate: run explicitly with --release --features codebook-eval"]
+    fn codebook_incremental_100k_transition_gate() {
+        let weights = CodebookWeights::deterministic(16, 8);
+        let mut rng = TestRng::new(0x5420_0001);
+        let mut board = Board::new();
+        let mut inc = IncrementalCodebookEval::new(&weights);
+        inc.refresh(&board, &weights);
+
+        let mut transitions = 0usize;
+        let mut mismatch = 0usize;
+        let mut undo_fail = 0usize;
+        let mut dirty_counts = Vec::with_capacity(100_000);
+
+        while transitions < 100_000 {
+            if board.move_count >= 160
+                || board.game_result() != GameResult::Ongoing
+                || board.candidate_moves().is_empty()
+            {
+                while board.move_count > 0 {
+                    board.undo_move();
+                    inc.pop_move(&weights);
+                    if !close(inc.value(&board, &weights), evaluate_full(&board, &weights)) {
+                        undo_fail += 1;
+                    }
+                }
+                board = Board::new();
+                inc.refresh(&board, &weights);
+            }
+
+            let moves = board.candidate_moves();
+            let mv = moves[rng.usize(moves.len())];
+            board.make_move(mv);
+            inc.push_move(&board, mv, &weights);
+            dirty_counts.push(inc.last_dirty_cells());
+            transitions += 1;
+
+            if !close(inc.value(&board, &weights), evaluate_full(&board, &weights)) {
+                mismatch += 1;
+            }
+        }
+
+        while board.move_count > 0 {
+            board.undo_move();
+            inc.pop_move(&weights);
+            if !close(inc.value(&board, &weights), evaluate_full(&board, &weights)) {
+                undo_fail += 1;
+            }
+        }
+
+        dirty_counts.sort_unstable();
+        let avg_dirty = dirty_counts.iter().sum::<usize>() as f32 / dirty_counts.len() as f32;
+        let p95_dirty = dirty_counts[dirty_counts.len() * 95 / 100] as f32;
+        let avg_ratio = avg_dirty / NUM_CELLS as f32;
+        let p95_ratio = p95_dirty / NUM_CELLS as f32;
+        eprintln!(
+            "RQ542 transitions={transitions} mismatch={mismatch} undo_fail={undo_fail} \
+             avg_dirty_ratio={avg_ratio:.6} p95_dirty_ratio={p95_ratio:.6}"
+        );
+
+        assert_eq!(mismatch, 0, "full-vs-increment mismatch count");
+        assert_eq!(undo_fail, 0, "undo roundtrip failure count");
+        assert!(
+            (0.16..=0.24).contains(&avg_ratio),
+            "avg dirty ratio {avg_ratio:.6} is outside random-play sanity range"
+        );
+        assert!(
+            (0.20..=0.27).contains(&p95_ratio),
+            "p95 dirty ratio {p95_ratio:.6} is outside random-play sanity range"
+        );
+    }
+
+    #[test]
+    #[ignore = "RQ542 gate: set FIGRID_RQ542_GAMES_JSONL to rq535_accept_off_100g_games.jsonl"]
+    fn codebook_incremental_rq535_trace_gate() {
+        let path = std::env::var("FIGRID_RQ542_GAMES_JSONL")
+            .expect("set FIGRID_RQ542_GAMES_JSONL to rq535 game JSONL");
+        let games = load_trace_games(&path);
+        assert!(!games.is_empty(), "no games loaded from {path}");
+
+        let weights = CodebookWeights::deterministic(16, 8);
+        let mut transitions = 0usize;
+        let mut mismatch = 0usize;
+        let mut undo_fail = 0usize;
+        let mut passes = 0usize;
+        let mut dirty_counts = Vec::with_capacity(100_000);
+
+        while transitions < 100_000 {
+            passes += 1;
+            for game in &games {
+                if transitions >= 100_000 {
+                    break;
+                }
+                let mut board = Board::new();
+                let mut inc = IncrementalCodebookEval::new(&weights);
+                inc.refresh(&board, &weights);
+                let mut played = 0usize;
+                for &mv in game {
+                    if transitions >= 100_000 {
+                        break;
+                    }
+                    assert!(board.is_empty(mv), "illegal trace move {mv} in {path}");
+                    board.make_move(mv);
+                    inc.push_move(&board, mv, &weights);
+                    dirty_counts.push(inc.last_dirty_cells());
+                    transitions += 1;
+                    played += 1;
+
+                    if !close(inc.value(&board, &weights), evaluate_full(&board, &weights)) {
+                        mismatch += 1;
+                    }
+                }
+                for _ in 0..played {
+                    board.undo_move();
+                    inc.pop_move(&weights);
+                    if !close(inc.value(&board, &weights), evaluate_full(&board, &weights)) {
+                        undo_fail += 1;
+                    }
+                }
+            }
+        }
+
+        dirty_counts.sort_unstable();
+        let avg_dirty = dirty_counts.iter().sum::<usize>() as f32 / dirty_counts.len() as f32;
+        let p95_dirty = dirty_counts[dirty_counts.len() * 95 / 100] as f32;
+        let avg_ratio = avg_dirty / NUM_CELLS as f32;
+        let p95_ratio = p95_dirty / NUM_CELLS as f32;
+        eprintln!(
+            "RQ542 trace_gate path={path} passes={passes} transitions={transitions} \
+             mismatch={mismatch} undo_fail={undo_fail} avg_dirty_ratio={avg_ratio:.6} \
+             p95_dirty_ratio={p95_ratio:.6}"
+        );
+
+        assert_eq!(mismatch, 0, "full-vs-increment mismatch count");
+        assert_eq!(undo_fail, 0, "undo roundtrip failure count");
+        assert!(
+            (0.18..=0.20).contains(&avg_ratio),
+            "avg dirty ratio {avg_ratio:.6} drifted away from RQ540 K0"
+        );
+        assert!(
+            (0.21..=0.23).contains(&p95_ratio),
+            "p95 dirty ratio {p95_ratio:.6} drifted away from RQ540 K0"
+        );
+    }
+
+    fn assert_close(a: f32, b: f32) {
+        assert!(
+            close(a, b),
+            "left={a:.9} right={b:.9} diff={:.9}",
+            (a - b).abs()
+        );
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() <= TOL
+    }
+
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn usize(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 as usize) % n
+        }
+    }
+
+    fn load_trace_games(path: &str) -> Vec<Vec<Move>> {
+        let text =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let mut games = Vec::new();
+        for (line_no, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("failed to parse {path}:{}: {e}", line_no + 1));
+            let moves = value
+                .get("moves")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("missing moves array in {path}:{}", line_no + 1));
+            let mut out = Vec::with_capacity(moves.len());
+            for mv in moves {
+                let x = mv
+                    .get("x")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| panic!("missing move x in {path}:{}", line_no + 1))
+                    as usize;
+                let y = mv
+                    .get("y")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| panic!("missing move y in {path}:{}", line_no + 1))
+                    as usize;
+                assert!(
+                    x < BOARD_SIZE && y < BOARD_SIZE,
+                    "out-of-board move in {path}"
+                );
+                out.push(y * BOARD_SIZE + x);
+            }
+            games.push(out);
+        }
+        games
+    }
+}

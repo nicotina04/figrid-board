@@ -5,8 +5,11 @@
 //! as `pbrain-figrid-legacy` for continuity with the 0.3.x series.
 
 use std::io::{self, BufRead, Write};
+use std::sync::OnceLock;
 use std::time::Duration;
 
+#[cfg(feature = "codebook-eval")]
+use figrid_board::codebook_eval::CodebookWeights;
 use figrid_board::{book, to_idx, Board, RuleSet, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
 use noru::network::NnueWeights;
 
@@ -54,6 +57,52 @@ const DEFAULT_MATCH_MS: i64 = 1_000_000_000;
 /// well before Piskvork's deadline. Without this, the 128-node deadline
 /// check can overshoot by ~50 ms on NNUE-heavy positions.
 const SAFETY_MARGIN_MS: i64 = 150;
+
+fn pbrain_max_depth() -> u32 {
+    static VALUE: OnceLock<u32> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("NORU_PBRAIN_MAX_DEPTH")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .filter(|depth| *depth > 0)
+            .unwrap_or(MAX_DEPTH)
+    })
+}
+
+fn pbrain_fixed_depth() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("NORU_PBRAIN_FIXED_DEPTH")
+            .map(|raw| {
+                let trimmed = raw.trim();
+                !(trimmed == "0"
+                    || trimmed.eq_ignore_ascii_case("false")
+                    || trimmed.eq_ignore_ascii_case("off")
+                    || trimmed.eq_ignore_ascii_case("no"))
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(feature = "codebook-eval")]
+fn load_codebook_weights() -> Result<Option<CodebookWeights>, String> {
+    let path = std::env::var("FIGRID_CODEBOOK_WEIGHTS")
+        .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_MODEL"))
+        .unwrap_or_default();
+    let trimmed = path.trim();
+    if trimmed.is_empty()
+        || trimmed == "0"
+        || trimmed.eq_ignore_ascii_case("off")
+        || trimmed.eq_ignore_ascii_case("false")
+    {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(trimmed)
+        .map_err(|e| format!("failed to read codebook weights from `{trimmed}`: {e}"))?;
+    CodebookWeights::from_json_bytes(&bytes)
+        .map(Some)
+        .map_err(|e| format!("failed to parse codebook weights `{trimmed}`: {e}"))
+}
 
 struct ProtocolInfo {
     timeout_turn: i64,
@@ -186,6 +235,8 @@ impl ProtocolInfo {
 struct Engine {
     board: Board,
     weights: NnueWeights,
+    #[cfg(feature = "codebook-eval")]
+    codebook_weights: Option<CodebookWeights>,
     searcher: Searcher,
     info: ProtocolInfo,
     started: bool,
@@ -199,6 +250,8 @@ impl Engine {
         Ok(Self {
             board: Board::new(),
             weights,
+            #[cfg(feature = "codebook-eval")]
+            codebook_weights: load_codebook_weights()?,
             searcher: Searcher::new(),
             info: ProtocolInfo::new(),
             started: false,
@@ -238,10 +291,29 @@ impl Engine {
         // tables stay in `crate::book` for a future self-play book attempt.
         let _ = book::lookup; // keep the symbol live for the next try.
 
-        let budget = self.info.turn_budget(self.board.move_count);
+        let max_depth = pbrain_max_depth();
+        let time_limit = if pbrain_fixed_depth() {
+            None
+        } else {
+            Some(self.info.turn_budget(self.board.move_count))
+        };
+        #[cfg(feature = "codebook-eval")]
+        let result = if let Some(codebook_weights) = &self.codebook_weights {
+            self.searcher.search_codebook_eval(
+                &mut self.board,
+                &self.weights,
+                codebook_weights,
+                max_depth,
+                time_limit,
+            )
+        } else {
+            self.searcher
+                .search(&mut self.board, &self.weights, max_depth, time_limit)
+        };
+        #[cfg(not(feature = "codebook-eval"))]
         let result = self
             .searcher
-            .search(&mut self.board, &self.weights, MAX_DEPTH, Some(budget));
+            .search(&mut self.board, &self.weights, max_depth, time_limit);
         let mv = result
             .best_move
             .or_else(|| self.board.candidate_moves().first().copied())?;
@@ -314,7 +386,8 @@ fn main() {
                     continue;
                 }
                 engine.reset_board();
-                // Tell the board which terminal-line semantics to use.
+                // Standard rule (rule=1): exactly-5 wins. Tell the board so
+                // its check_win drops overlines from the win-set.
                 engine
                     .board
                     .set_rule_set(engine.info.rule_set().unwrap_or(RuleSet::Freestyle));

@@ -32,16 +32,25 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, Criterion};
 use noru::network::NnueWeights;
 
+use figrid_board::pattern_table::{swap_mapped_id, PATTERN_NUM_IDS};
 use figrid_board::vct::classify_move_fast;
-use figrid_board::{evaluate, to_idx, Board, IncrementalEval, Searcher, GOMOKU_NNUE_CONFIG};
+use figrid_board::{
+    evaluate, to_idx, Board, IncrementalEval, Searcher, Stone, BOARD_SIZE, GOMOKU_NNUE_CONFIG,
+    NUM_CELLS,
+};
+
+const CODEBOOK_DIM: usize = 16;
+const CODEBOOK_REGIONS: usize = 9;
+const CODEBOOK_FEATURES: usize = CODEBOOK_DIM * CODEBOOK_REGIONS;
+const CODEBOOK_FM_RANK: usize = 8;
 
 /// Bench weights. Defaults to zeros (self-contained); override with
 /// `FIGRID_BENCH_WEIGHTS=<path>` to time a real model file.
 fn bench_weights() -> NnueWeights {
     match std::env::var("FIGRID_BENCH_WEIGHTS") {
         Ok(path) => {
-            let data = std::fs::read(&path)
-                .unwrap_or_else(|e| panic!("FIGRID_BENCH_WEIGHTS={path}: {e}"));
+            let data =
+                std::fs::read(&path).unwrap_or_else(|e| panic!("FIGRID_BENCH_WEIGHTS={path}: {e}"));
             NnueWeights::load_from_bytes(&data, Some(GOMOKU_NNUE_CONFIG.clone()))
                 .unwrap_or_else(|e| panic!("load_from_bytes({path}): {e}"))
         }
@@ -53,8 +62,20 @@ fn bench_weights() -> NnueWeights {
 /// five, so the position stays `Ongoing` and every hot path has real work to do.
 fn midgame_board() -> Board {
     const SEQ: [(usize, usize); 14] = [
-        (7, 7), (7, 8), (8, 8), (6, 7), (8, 6), (8, 7), (6, 8),
-        (9, 5), (5, 9), (6, 6), (9, 9), (5, 5), (10, 7), (7, 10),
+        (7, 7),
+        (7, 8),
+        (8, 8),
+        (6, 7),
+        (8, 6),
+        (8, 7),
+        (6, 8),
+        (9, 5),
+        (5, 9),
+        (6, 6),
+        (9, 9),
+        (5, 5),
+        (10, 7),
+        (7, 10),
     ];
     let mut b = Board::new();
     for &(r, c) in SEQ.iter() {
@@ -141,6 +162,186 @@ fn bench_eval(c: &mut Criterion) {
     g.finish();
 }
 
+struct CodebookBenchModel {
+    embeddings: Vec<f32>,
+    star_self: [f32; CODEBOOK_DIM],
+    star_global: [f32; CODEBOOK_DIM],
+    star_bias: [f32; CODEBOOK_DIM],
+    head: Vec<f32>,
+    factors: Vec<f32>,
+}
+
+impl CodebookBenchModel {
+    fn new() -> Self {
+        Self {
+            embeddings: deterministic_vec(PATTERN_NUM_IDS * CODEBOOK_DIM, 0.02),
+            star_self: deterministic_array(0xA11C_E001, 0.75),
+            star_global: deterministic_array(0xA11C_E002, 0.25),
+            star_bias: deterministic_array(0xA11C_E003, 0.01),
+            head: deterministic_vec(CODEBOOK_FEATURES, 0.02),
+            factors: deterministic_vec(CODEBOOK_FEATURES * CODEBOOK_FM_RANK, 0.02),
+        }
+    }
+
+    fn per_cell_map(&self, board: &Board, cell_pre: &mut [f32]) {
+        debug_assert_eq!(cell_pre.len(), NUM_CELLS * CODEBOOK_DIM);
+        cell_pre.fill(0.0);
+        let swap = board.side_to_move == Stone::White;
+        for (cell, dirs) in board.line_pattern_ids.iter().enumerate() {
+            let cell_base = cell * CODEBOOK_DIM;
+            for &pid in dirs {
+                let pid = if swap { swap_mapped_id(pid) } else { pid };
+                let emb_base = pid as usize * CODEBOOK_DIM;
+                for d in 0..CODEBOOK_DIM {
+                    cell_pre[cell_base + d] += self.embeddings[emb_base + d];
+                }
+            }
+            for d in 0..CODEBOOK_DIM {
+                cell_pre[cell_base + d] = cell_pre[cell_base + d].max(0.0);
+            }
+        }
+    }
+
+    fn region_pool(&self, cell_pre: &[f32], features: &mut [f32]) {
+        debug_assert_eq!(features.len(), CODEBOOK_FEATURES);
+        features.fill(0.0);
+        for cell in 0..NUM_CELLS {
+            let region = region_of_cell(cell);
+            let feature_base = region * CODEBOOK_DIM;
+            let cell_base = cell * CODEBOOK_DIM;
+            for d in 0..CODEBOOK_DIM {
+                features[feature_base + d] += cell_pre[cell_base + d] / 25.0;
+            }
+        }
+    }
+
+    fn star_block(&self, features: &[f32], out: &mut [f32]) {
+        debug_assert_eq!(features.len(), CODEBOOK_FEATURES);
+        debug_assert_eq!(out.len(), CODEBOOK_FEATURES);
+        let mut global = [0.0f32; CODEBOOK_DIM];
+        for region in 0..CODEBOOK_REGIONS {
+            let base = region * CODEBOOK_DIM;
+            for d in 0..CODEBOOK_DIM {
+                global[d] += features[base + d] / CODEBOOK_REGIONS as f32;
+            }
+        }
+        for region in 0..CODEBOOK_REGIONS {
+            let base = region * CODEBOOK_DIM;
+            for d in 0..CODEBOOK_DIM {
+                let x = features[base + d] * self.star_self[d]
+                    + global[d] * self.star_global[d]
+                    + self.star_bias[d];
+                out[base + d] = x.max(0.0);
+            }
+        }
+    }
+
+    fn head(&self, features: &[f32]) -> f32 {
+        debug_assert_eq!(features.len(), CODEBOOK_FEATURES);
+        let mut logit = 0.0f32;
+        for (x, w) in features.iter().zip(&self.head) {
+            logit += x * w;
+        }
+        for rank in 0..CODEBOOK_FM_RANK {
+            let mut sum = 0.0f32;
+            let mut square_sum = 0.0f32;
+            for (idx, &x) in features.iter().enumerate() {
+                let vx = self.factors[idx * CODEBOOK_FM_RANK + rank] * x;
+                sum += vx;
+                square_sum += vx * vx;
+            }
+            logit += 0.5 * (sum * sum - square_sum);
+        }
+        logit
+    }
+
+    fn full_forward(
+        &self,
+        board: &Board,
+        cell_pre: &mut [f32],
+        pooled: &mut [f32],
+        starred: &mut [f32],
+    ) -> f32 {
+        self.per_cell_map(board, cell_pre);
+        self.region_pool(cell_pre, pooled);
+        self.star_block(pooled, starred);
+        self.head(starred)
+    }
+}
+
+fn bench_codebook_eval(c: &mut Criterion) {
+    let mut g = c.benchmark_group("codebook_eval");
+    let model = CodebookBenchModel::new();
+
+    for (tag, board) in [("p14", midgame_board()), ("p60", dense_board(60))] {
+        let mut cell_pre = vec![0.0f32; NUM_CELLS * CODEBOOK_DIM];
+        let mut pooled = vec![0.0f32; CODEBOOK_FEATURES];
+        let mut starred = vec![0.0f32; CODEBOOK_FEATURES];
+
+        model.per_cell_map(&board, &mut cell_pre);
+        model.region_pool(&cell_pre, &mut pooled);
+        model.star_block(&pooled, &mut starred);
+
+        g.bench_function(format!("per_cell_map/{tag}"), |b| {
+            b.iter(|| model.per_cell_map(black_box(&board), black_box(&mut cell_pre)));
+        });
+        g.bench_function(format!("region_pool/{tag}"), |b| {
+            b.iter(|| model.region_pool(black_box(&cell_pre), black_box(&mut pooled)));
+        });
+        g.bench_function(format!("star_block/{tag}"), |b| {
+            b.iter(|| model.star_block(black_box(&pooled), black_box(&mut starred)));
+        });
+        g.bench_function(format!("head/{tag}"), |b| {
+            b.iter(|| black_box(model.head(black_box(&starred))));
+        });
+        g.bench_function(format!("full_forward/{tag}"), |b| {
+            b.iter(|| {
+                black_box(model.full_forward(
+                    black_box(&board),
+                    black_box(&mut cell_pre),
+                    black_box(&mut pooled),
+                    black_box(&mut starred),
+                ))
+            });
+        });
+    }
+
+    g.finish();
+}
+
+fn deterministic_vec(n: usize, scale: f32) -> Vec<f32> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    (0..n)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let unit = ((state >> 40) as u32) as f32 / (1u32 << 24) as f32;
+            (unit * 2.0 - 1.0) * scale
+        })
+        .collect()
+}
+
+fn deterministic_array(mut state: u64, scale: f32) -> [f32; CODEBOOK_DIM] {
+    let mut out = [0.0f32; CODEBOOK_DIM];
+    for item in &mut out {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let unit = ((state >> 40) as u32) as f32 / (1u32 << 24) as f32;
+        *item = (unit * 2.0 - 1.0) * scale;
+    }
+    out
+}
+
+fn region_of_cell(cell: usize) -> usize {
+    let row = cell / BOARD_SIZE;
+    let col = cell % BOARD_SIZE;
+    let rr = (row / 5).min(2);
+    let cc = (col / 5).min(2);
+    rr * 3 + cc
+}
+
 fn bench_movegen(c: &mut Criterion) {
     let board = midgame_board();
     c.bench_function("movegen/candidate_moves", |b| {
@@ -180,5 +381,12 @@ fn bench_search(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_eval, bench_movegen, bench_pattern, bench_search);
+criterion_group!(
+    benches,
+    bench_eval,
+    bench_codebook_eval,
+    bench_movegen,
+    bench_pattern,
+    bench_search
+);
 criterion_main!(benches);

@@ -39,6 +39,9 @@ embed-weights = ["dep:flate2"]
 # parts. The Gomocup submission build should turn this on; library users on
 # stable Rust should leave it off.
 avx512 = ["noru/avx512"]
+# Experimental codebook evaluator used by the Relation-Factor UE research
+# line. Disabled by default; runtime promotion requires separate gates.
+codebook-eval = []
 
 [dependencies]
 noru = { version = "2.2" }
@@ -74,6 +77,10 @@ path = "bin/relation_lite_val.rs"
 [[bin]]
 name = "relation-root-audit"
 path = "bin/relation_root_audit.rs"
+
+[[bin]]
+name = "rq423-feature-dump"
+path = "bin/rq423_feature_dump.rs"
 
 [profile.release]
 opt-level = 3

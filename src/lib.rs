@@ -10,14 +10,21 @@
 
 pub mod board;
 pub mod book;
+pub(crate) mod candidate_local_ensemble;
 pub(crate) mod candidate_ranker;
+#[cfg(feature = "codebook-eval")]
+pub mod codebook_eval;
+pub(crate) mod codebook_sidecar;
 pub mod coord;
 pub mod eval;
 pub mod features;
 pub mod heuristic;
 pub mod pattern_dense;
 pub mod pattern_table;
+pub(crate) mod relation_fusion_gate;
 pub(crate) mod relation_lite;
+#[doc(hidden)]
+pub mod rq423_root_accept;
 pub mod search;
 pub mod transposition;
 pub mod vct;

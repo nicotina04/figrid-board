@@ -6,7 +6,7 @@
 
 use std::io::{self, BufRead, Write};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "codebook-eval")]
 use figrid_board::codebook_eval::CodebookWeights;
@@ -57,6 +57,7 @@ const DEFAULT_MATCH_MS: i64 = 1_000_000_000;
 /// well before Piskvork's deadline. Without this, the 128-node deadline
 /// check can overshoot by ~50 ms on NNUE-heavy positions.
 const SAFETY_MARGIN_MS: i64 = 150;
+const TELEMETRY_WIN_SCORE: i32 = 999_000;
 
 fn pbrain_max_depth() -> u32 {
     static VALUE: OnceLock<u32> = OnceLock::new();
@@ -102,6 +103,49 @@ fn load_codebook_weights() -> Result<Option<CodebookWeights>, String> {
     CodebookWeights::from_json_bytes(&bytes)
         .map(Some)
         .map_err(|e| format!("failed to parse codebook weights `{trimmed}`: {e}"))
+}
+
+fn telemetry_score(score: i32) -> String {
+    if score.abs() >= TELEMETRY_WIN_SCORE - 1_000 {
+        let mate = (TELEMETRY_WIN_SCORE - score.abs()).max(1);
+        if score >= 0 {
+            format!("+M{mate}")
+        } else {
+            format!("-M{mate}")
+        }
+    } else {
+        score.to_string()
+    }
+}
+
+fn telemetry_count(value: u64) -> String {
+    if value >= 1_000_000_000 {
+        format!("{}G", value / 1_000_000_000)
+    } else if value >= 1_000_000 {
+        format!("{}M", value / 1_000_000)
+    } else if value >= 1_000 {
+        format!("{}K", value / 1_000)
+    } else {
+        value.to_string()
+    }
+}
+
+fn emit_search_message(result: &figrid_board::SearchResult, elapsed: Duration) {
+    let time_ms = elapsed.as_millis().max(1) as u64;
+    let nps = result.nodes.saturating_mul(1_000) / time_ms;
+    let depth = if result.depth == 0 {
+        "0-0".to_string()
+    } else {
+        format!("{}-{}", result.depth, result.depth)
+    };
+    println!(
+        "MESSAGE Speed {} | Depth {} | Eval {} | Node {} | Time {}ms",
+        telemetry_count(nps),
+        depth,
+        telemetry_score(result.score),
+        telemetry_count(result.nodes),
+        time_ms
+    );
 }
 
 struct ProtocolInfo {
@@ -297,6 +341,7 @@ impl Engine {
         } else {
             Some(self.info.turn_budget(self.board.move_count))
         };
+        let search_start = Instant::now();
         #[cfg(feature = "codebook-eval")]
         let result = if let Some(codebook_weights) = &self.codebook_weights {
             self.searcher.search_codebook_eval(
@@ -314,6 +359,7 @@ impl Engine {
         let result = self
             .searcher
             .search(&mut self.board, &self.weights, max_depth, time_limit);
+        emit_search_message(&result, search_start.elapsed());
         let mv = result
             .best_move
             .or_else(|| self.board.candidate_moves().first().copied())?;

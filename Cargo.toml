@@ -82,6 +82,10 @@ path = "bin/relation_root_audit.rs"
 name = "rq423-feature-dump"
 path = "bin/rq423_feature_dump.rs"
 
+[[bin]]
+name = "rq544-eval-scale"
+path = "bin/rq544_eval_scale.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

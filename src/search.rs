@@ -762,6 +762,236 @@ impl Searcher {
         self.tt.occupancy()
     }
 
+    fn reset_for_search(&mut self, time_limit: Option<Duration>) {
+        self.nodes = 0;
+        self.tt_cutoffs = 0;
+        self.aborted = false;
+        self.node_limit = None;
+        self.node_limit_hit = false;
+        self.killers = [[None; 2]; 64];
+        self.history = [[0; NUM_CELLS]; 2];
+        for row in self.cont_hist_1.iter_mut() {
+            row.fill(0);
+        }
+        for row in self.cont_hist_2.iter_mut() {
+            row.fill(0);
+        }
+        self.deadline = time_limit.map(|d| Instant::now() + d);
+        self.tt.reset_stats();
+        self.tt.clear();
+    }
+
+    fn try_root_vct(
+        &mut self,
+        board: &mut Board,
+        time_limit: Option<Duration>,
+        root_search_decision_audit: bool,
+    ) -> Option<SearchResult> {
+        if !root_vct_enabled() {
+            return None;
+        }
+        let vct_budget = match time_limit {
+            Some(d) => (d / ROOT_VCT_BUDGET_FRACTION)
+                .max(Duration::from_millis(ROOT_VCT_BUDGET_FLOOR_MS))
+                .min(Duration::from_millis(ROOT_VCT_BUDGET_CAP_MS)),
+            None => Duration::from_millis(ROOT_VCT_BUDGET_MS),
+        };
+        let vct_cfg = VctConfig {
+            max_depth: ROOT_VCT_DEPTH,
+            time_budget: Some(vct_budget),
+        };
+        if let Some(seq) = search_vct(board, &vct_cfg) {
+            if let Some(&first) = seq.first() {
+                let result = SearchResult {
+                    best_move: Some(first),
+                    score: WIN_SCORE,
+                    depth: seq.len() as u32,
+                    nodes: self.nodes,
+                };
+                if root_search_decision_audit {
+                    crate::candidate_local_ensemble::append_root_search_decision_audit(
+                        board,
+                        result.best_move,
+                        result.best_move,
+                        result.score,
+                        result.depth,
+                        result.nodes,
+                        self.aborted,
+                        &[],
+                    );
+                }
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn search_with_eval_state<E: SearchEvalState>(
+        &mut self,
+        board: &mut Board,
+        weights: &NnueWeights,
+        inc: &mut E,
+        max_depth: u32,
+        root_search_decision_audit: bool,
+    ) -> SearchResult {
+        let mut best_result = SearchResult {
+            best_move: None,
+            score: 0,
+            depth: 0,
+            nodes: 0,
+        };
+        let mut prev_best: Option<Move> = None;
+        let mut prev_score: Option<i32> = None;
+        let final_only_candidate_ranker = candidate_ranker_root_final_only_enabled()
+            || crate::candidate_local_ensemble::root_tiebreak_enabled_for(board);
+        let collect_root_candidates = final_only_candidate_ranker || root_search_decision_audit;
+        let allow_root_iteration_tiebreak =
+            !final_only_candidate_ranker && !candidate_ranker_root_final_only_enabled();
+        let mut final_candidates = Vec::new();
+
+        for depth in 1..=max_depth {
+            let aspirate = depth >= ASPIRATION_MIN_DEPTH && prev_score.is_some();
+            let (alpha_init, beta_init) = if aspirate {
+                let s = prev_score.unwrap();
+                (s - ASPIRATION_INITIAL_DELTA, s + ASPIRATION_INITIAL_DELTA)
+            } else {
+                (-INF, INF)
+            };
+
+            let mut alpha = alpha_init;
+            let mut beta = beta_init;
+            let mut delta = ASPIRATION_INITIAL_DELTA;
+
+            let iter_result = loop {
+                let current = if collect_root_candidates {
+                    final_candidates.clear();
+                    self.root_pvs_iteration_with_audit(
+                        board,
+                        weights,
+                        inc,
+                        depth,
+                        alpha,
+                        beta,
+                        prev_best,
+                        Some(&mut final_candidates),
+                        allow_root_iteration_tiebreak,
+                    )
+                } else {
+                    self.root_pvs_iteration(board, weights, inc, depth, alpha, beta, prev_best)
+                };
+                if self.aborted {
+                    break current;
+                }
+                let score = current.1;
+                if !aspirate {
+                    break current;
+                }
+                if score <= alpha {
+                    delta = (delta * 2).min(INF / 4);
+                    alpha = (alpha - delta).max(-INF);
+                    if alpha == -INF {
+                        break if collect_root_candidates {
+                            final_candidates.clear();
+                            self.root_pvs_iteration_with_audit(
+                                board,
+                                weights,
+                                inc,
+                                depth,
+                                -INF,
+                                INF,
+                                prev_best,
+                                Some(&mut final_candidates),
+                                allow_root_iteration_tiebreak,
+                            )
+                        } else {
+                            self.root_pvs_iteration(
+                                board, weights, inc, depth, -INF, INF, prev_best,
+                            )
+                        };
+                    }
+                } else if score >= beta {
+                    delta = (delta * 2).min(INF / 4);
+                    beta = (beta + delta).min(INF);
+                    if beta == INF {
+                        break if collect_root_candidates {
+                            final_candidates.clear();
+                            self.root_pvs_iteration_with_audit(
+                                board,
+                                weights,
+                                inc,
+                                depth,
+                                -INF,
+                                INF,
+                                prev_best,
+                                Some(&mut final_candidates),
+                                allow_root_iteration_tiebreak,
+                            )
+                        } else {
+                            self.root_pvs_iteration(
+                                board, weights, inc, depth, -INF, INF, prev_best,
+                            )
+                        };
+                    }
+                } else {
+                    break current;
+                }
+            };
+
+            if self.aborted {
+                break;
+            }
+
+            let (best_move, score) = iter_result;
+            best_result = SearchResult {
+                best_move,
+                score,
+                depth,
+                nodes: self.nodes,
+            };
+
+            if score.abs() > WIN_SCORE - 100 {
+                break;
+            }
+
+            prev_best = best_move;
+            prev_score = Some(score);
+        }
+
+        let search_best_move = best_result.best_move;
+        if final_only_candidate_ranker {
+            if let Some(best_move) = crate::candidate_local_ensemble::final_root_tiebreak(
+                board,
+                weights,
+                &final_candidates,
+                best_result.best_move,
+                best_result.score,
+            ) {
+                best_result.best_move = Some(best_move);
+            } else if let Some(best_move) = final_root_candidate_tiebreak(
+                board,
+                &final_candidates,
+                best_result.best_move,
+                best_result.score,
+            ) {
+                best_result.best_move = Some(best_move);
+            }
+        }
+        if root_search_decision_audit {
+            crate::candidate_local_ensemble::append_root_search_decision_audit(
+                board,
+                search_best_move,
+                best_result.best_move,
+                best_result.score,
+                best_result.depth,
+                best_result.nodes,
+                self.aborted,
+                &final_candidates,
+            );
+        }
+
+        best_result
+    }
+
     /// Root search entry point.
     pub fn search(
         &mut self,
@@ -1014,138 +1244,21 @@ impl Searcher {
         max_depth: u32,
         time_limit: Option<Duration>,
     ) -> SearchResult {
-        self.nodes = 0;
-        self.tt_cutoffs = 0;
-        self.aborted = false;
-        self.node_limit = None;
-        self.node_limit_hit = false;
-        self.killers = [[None; 2]; 64];
-        self.history = [[0; NUM_CELLS]; 2];
-        for row in self.cont_hist_1.iter_mut() {
-            row.fill(0);
+        self.reset_for_search(time_limit);
+        let root_search_decision_audit =
+            crate::candidate_local_ensemble::root_search_decision_audit_enabled();
+        if let Some(result) = self.try_root_vct(board, time_limit, root_search_decision_audit) {
+            return result;
         }
-        for row in self.cont_hist_2.iter_mut() {
-            row.fill(0);
-        }
-        self.deadline = time_limit.map(|d| Instant::now() + d);
-        self.tt.reset_stats();
-        self.tt.clear();
-
-        if root_vct_enabled() {
-            let vct_budget = match time_limit {
-                Some(d) => (d / ROOT_VCT_BUDGET_FRACTION)
-                    .max(Duration::from_millis(ROOT_VCT_BUDGET_FLOOR_MS))
-                    .min(Duration::from_millis(ROOT_VCT_BUDGET_CAP_MS)),
-                None => Duration::from_millis(ROOT_VCT_BUDGET_MS),
-            };
-            let vct_cfg = VctConfig {
-                max_depth: ROOT_VCT_DEPTH,
-                time_budget: Some(vct_budget),
-            };
-            if let Some(seq) = search_vct(board, &vct_cfg) {
-                if let Some(&first) = seq.first() {
-                    return SearchResult {
-                        best_move: Some(first),
-                        score: WIN_SCORE,
-                        depth: seq.len() as u32,
-                        nodes: self.nodes,
-                    };
-                }
-            }
-        }
-
         let scale = codebook_eval_scale();
         let mut inc = CodebookEvalState::new(board, codebook_weights, scale);
-        let mut best_result = SearchResult {
-            best_move: None,
-            score: 0,
-            depth: 0,
-            nodes: 0,
-        };
-        let mut prev_best: Option<Move> = None;
-        let mut prev_score: Option<i32> = None;
-
-        for depth in 1..=max_depth {
-            let aspirate = depth >= ASPIRATION_MIN_DEPTH && prev_score.is_some();
-            let (alpha_init, beta_init) = if aspirate {
-                let s = prev_score.unwrap();
-                (s - ASPIRATION_INITIAL_DELTA, s + ASPIRATION_INITIAL_DELTA)
-            } else {
-                (-INF, INF)
-            };
-            let mut alpha = alpha_init;
-            let mut beta = beta_init;
-            let mut delta = ASPIRATION_INITIAL_DELTA;
-
-            let iter_result = loop {
-                let current = self.root_pvs_iteration(
-                    board,
-                    ordering_weights,
-                    &mut inc,
-                    depth,
-                    alpha,
-                    beta,
-                    prev_best,
-                );
-                if self.aborted {
-                    break current;
-                }
-                let score = current.1;
-                if !aspirate {
-                    break current;
-                }
-                if score <= alpha {
-                    delta = (delta * 2).min(INF / 4);
-                    alpha = (alpha - delta).max(-INF);
-                    if alpha == -INF {
-                        break self.root_pvs_iteration(
-                            board,
-                            ordering_weights,
-                            &mut inc,
-                            depth,
-                            -INF,
-                            INF,
-                            prev_best,
-                        );
-                    }
-                } else if score >= beta {
-                    delta = (delta * 2).min(INF / 4);
-                    beta = (beta + delta).min(INF);
-                    if beta == INF {
-                        break self.root_pvs_iteration(
-                            board,
-                            ordering_weights,
-                            &mut inc,
-                            depth,
-                            -INF,
-                            INF,
-                            prev_best,
-                        );
-                    }
-                } else {
-                    break current;
-                }
-            };
-
-            if self.aborted {
-                break;
-            }
-
-            let (best_move, score) = iter_result;
-            best_result = SearchResult {
-                best_move,
-                score,
-                depth,
-                nodes: self.nodes,
-            };
-            if score.abs() > WIN_SCORE - 100 {
-                break;
-            }
-            prev_best = best_move;
-            prev_score = Some(score);
-        }
-
-        best_result
+        self.search_with_eval_state(
+            board,
+            ordering_weights,
+            &mut inc,
+            max_depth,
+            root_search_decision_audit,
+        )
     }
 
     /// Search normally, but keep the root candidate table from the last

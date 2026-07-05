@@ -34,6 +34,12 @@ const ROOT_VCT_BUDGET_CAP_MS: u64 = 2_000;
 /// Root VCT ?????????????(????????븐뼐???????????????????TT warmup??????.
 const ROOT_VCT_BUDGET_FLOOR_MS: u64 = 100;
 
+const ROOT_DEFENSIVE_VCT_DEPTH: u32 = 14;
+const ROOT_DEFENSIVE_VCT_BUDGET_FRACTION: u32 = 10;
+const ROOT_DEFENSIVE_VCT_BUDGET_CAP_MS: u64 = 250;
+const ROOT_DEFENSIVE_VCT_BUDGET_FLOOR_MS: u64 = 50;
+const ROOT_DEFENSIVE_VCT_BUDGET_DEFAULT_MS: u64 = 100;
+
 fn root_vct_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -47,6 +53,78 @@ fn root_vct_enabled() -> bool {
             })
             .unwrap_or(true)
     })
+}
+
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|raw| {
+            let trimmed = raw.trim();
+            !(trimmed == "0"
+                || trimmed.eq_ignore_ascii_case("false")
+                || trimmed.eq_ignore_ascii_case("off")
+                || trimmed.eq_ignore_ascii_case("no"))
+        })
+        .unwrap_or(default)
+}
+
+fn root_defensive_vct_veto_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("NORU_ROOT_DEFENSIVE_VCT_VETO", false))
+}
+
+fn root_defensive_vct_budget(time_limit: Option<Duration>) -> Duration {
+    match time_limit {
+        Some(d) => (d / ROOT_DEFENSIVE_VCT_BUDGET_FRACTION)
+            .max(Duration::from_millis(ROOT_DEFENSIVE_VCT_BUDGET_FLOOR_MS))
+            .min(Duration::from_millis(ROOT_DEFENSIVE_VCT_BUDGET_CAP_MS)),
+        None => Duration::from_millis(ROOT_DEFENSIVE_VCT_BUDGET_DEFAULT_MS),
+    }
+}
+
+fn allows_opponent_vct(board: &mut Board, mv: Move, cfg: &VctConfig) -> bool {
+    board.make_move(mv);
+    let hit = search_vct(board, cfg).is_some();
+    board.undo_move();
+    hit
+}
+
+fn defensive_vct_veto_replacement(
+    board: &mut Board,
+    incumbent: Option<Move>,
+    candidates: &[RootCandidateAudit],
+    time_limit: Option<Duration>,
+) -> Option<Move> {
+    if !root_defensive_vct_veto_enabled() {
+        return incumbent;
+    }
+    let incumbent = incumbent?;
+    if candidates.is_empty() {
+        return Some(incumbent);
+    }
+    let cfg = VctConfig {
+        max_depth: ROOT_DEFENSIVE_VCT_DEPTH,
+        time_budget: Some(root_defensive_vct_budget(time_limit)),
+    };
+    if !allows_opponent_vct(board, incumbent, &cfg) {
+        return Some(incumbent);
+    }
+
+    let mut ranked = candidates
+        .iter()
+        .filter(|candidate| candidate.mv != incumbent)
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by(|a, b| {
+        b.search_score
+            .cmp(&a.search_score)
+            .then_with(|| b.is_forcing.cmp(&a.is_forcing))
+            .then_with(|| a.mv.cmp(&b.mv))
+    });
+    for candidate in ranked {
+        if !allows_opponent_vct(board, candidate.mv, &cfg) {
+            return Some(candidate.mv);
+        }
+    }
+    Some(incumbent)
 }
 
 #[cfg(feature = "codebook-eval")]
@@ -842,9 +920,11 @@ impl Searcher {
         };
         let mut prev_best: Option<Move> = None;
         let mut prev_score: Option<i32> = None;
+        let defensive_vct_veto = root_defensive_vct_veto_enabled();
         let final_only_candidate_ranker = candidate_ranker_root_final_only_enabled()
             || crate::candidate_local_ensemble::root_tiebreak_enabled_for(board);
-        let collect_root_candidates = final_only_candidate_ranker || root_search_decision_audit;
+        let collect_root_candidates =
+            final_only_candidate_ranker || root_search_decision_audit || defensive_vct_veto;
         let allow_root_iteration_tiebreak =
             !final_only_candidate_ranker && !candidate_ranker_root_final_only_enabled();
         let mut final_candidates = Vec::new();
@@ -976,6 +1056,15 @@ impl Searcher {
                 best_result.best_move = Some(best_move);
             }
         }
+        if defensive_vct_veto {
+            best_result.best_move = defensive_vct_veto_replacement(
+                board,
+                best_result.best_move,
+                &final_candidates,
+                self.deadline
+                    .and_then(|deadline| deadline.checked_duration_since(Instant::now())),
+            );
+        }
         if root_search_decision_audit {
             crate::candidate_local_ensemble::append_root_search_decision_audit(
                 board,
@@ -1076,9 +1165,11 @@ impl Searcher {
         // this drastically reduces re-search cost.
         let mut prev_best: Option<Move> = None;
         let mut prev_score: Option<i32> = None;
+        let defensive_vct_veto = root_defensive_vct_veto_enabled();
         let final_only_candidate_ranker = candidate_ranker_root_final_only_enabled()
             || crate::candidate_local_ensemble::root_tiebreak_enabled_for(board);
-        let collect_root_candidates = final_only_candidate_ranker || root_search_decision_audit;
+        let collect_root_candidates =
+            final_only_candidate_ranker || root_search_decision_audit || defensive_vct_veto;
         let allow_root_iteration_tiebreak =
             !final_only_candidate_ranker && !candidate_ranker_root_final_only_enabled();
         let mut final_candidates = Vec::new();
@@ -1218,6 +1309,15 @@ impl Searcher {
             ) {
                 best_result.best_move = Some(best_move);
             }
+        }
+        if defensive_vct_veto {
+            best_result.best_move = defensive_vct_veto_replacement(
+                board,
+                best_result.best_move,
+                &final_candidates,
+                self.deadline
+                    .and_then(|deadline| deadline.checked_duration_since(Instant::now())),
+            );
         }
         if root_search_decision_audit {
             crate::candidate_local_ensemble::append_root_search_decision_audit(

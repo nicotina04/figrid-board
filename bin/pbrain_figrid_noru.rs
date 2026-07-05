@@ -572,7 +572,8 @@ fn main() {
             "ABOUT" => {
                 writeln!(
                     stdout,
-                    "name=\"figrid\", version=\"0.6.9\", author=\"nicotina04 (successor to wuwbobo2021)\", country=\"KR\""
+                    "name=\"figrid\", version=\"{}\", author=\"nicotina04 (successor to wuwbobo2021)\", country=\"KR\"",
+                    env!("CARGO_PKG_VERSION")
                 )
                 .ok();
             }

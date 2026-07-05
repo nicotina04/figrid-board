@@ -1,6 +1,4 @@
-use super::{
-    CaroSerCalc, CheckerRec, FreeSerCalc, Rec, Rule, Stack, StdSerCalc, Tree,
-};
+use super::{CaroSerCalc, CheckerRec, FreeSerCalc, Rec, Rule, Stack, StdSerCalc, Tree};
 use crate::{Coord, CoordState, Error};
 
 use std::time::{Duration, Instant};

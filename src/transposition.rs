@@ -25,11 +25,11 @@ pub enum Bound {
 /// 한 entry. 16 바이트.
 #[derive(Debug, Clone, Copy)]
 pub struct TtEntry {
-    pub key: u64,        // 8 bytes — 충돌 검증용 full key
-    pub score: i32,      // 4 bytes
-    pub depth: u8,       // 1 byte — 저장 시점의 depth
-    pub bound: Bound,    // 1 byte
-    pub best_move: u16,  // 2 bytes — Move (usize) 의 u16 표현. NUM_CELLS=225라 OK.
+    pub key: u64,       // 8 bytes — 충돌 검증용 full key
+    pub score: i32,     // 4 bytes
+    pub depth: u8,      // 1 byte — 저장 시점의 depth
+    pub bound: Bound,   // 1 byte
+    pub best_move: u16, // 2 bytes — Move (usize) 의 u16 표현. NUM_CELLS=225라 OK.
 }
 
 impl TtEntry {
@@ -63,11 +63,11 @@ const EMPTY_BUCKET: Bucket = Bucket {
 /// 비용은 매 probe/store당 ~1ns. 정상 동작에 영향 없음.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TtStats {
-    pub probes: u64,            // probe() 호출 총수
-    pub hits: u64,               // 키 일치한 횟수 (cutoff 가능 여부 별개)
-    pub stores: u64,             // store() 호출 총수
+    pub probes: u64,               // probe() 호출 총수
+    pub hits: u64,                 // 키 일치한 횟수 (cutoff 가능 여부 별개)
+    pub stores: u64,               // store() 호출 총수
     pub displaced_depth_pref: u64, // depth_pref slot이 비어있지 않은데 덮어쓴 횟수
-    pub stored_to_always: u64,   // always_replace slot에 저장한 횟수 (= depth_pref가 더 깊어서 보존)
+    pub stored_to_always: u64, // always_replace slot에 저장한 횟수 (= depth_pref가 더 깊어서 보존)
     /// 저장 시점의 depth 분포 (0..15는 그 depth, 15는 15+ 통합).
     pub depth_hist: [u64; 16],
 }
@@ -140,8 +140,12 @@ impl TranspositionTable {
         let mut dp = 0usize;
         let mut ar = 0usize;
         for b in &self.buckets {
-            if !b.depth_pref.is_empty() { dp += 1; }
-            if !b.always_replace.is_empty() { ar += 1; }
+            if !b.depth_pref.is_empty() {
+                dp += 1;
+            }
+            if !b.always_replace.is_empty() {
+                ar += 1;
+            }
         }
         (dp, ar, self.buckets.len())
     }
@@ -171,7 +175,14 @@ impl TranspositionTable {
     /// 비어있는 채로 활용 안 됨 (진단 2026-04-27: always 사용률 2.1%).
     /// Push-down 후엔 always-replace가 "두 번째로 좋은 entry" 역할을 함.
     #[inline]
-    pub fn store(&mut self, key: u64, score: i32, depth: u8, bound: Bound, best_move: Option<Move>) {
+    pub fn store(
+        &mut self,
+        key: u64,
+        score: i32,
+        depth: u8,
+        bound: Bound,
+        best_move: Option<Move>,
+    ) {
         self.stores.set(self.stores.get() + 1);
         let depth_idx = (depth as usize).min(15);
         let h = &self.depth_hist[depth_idx];
@@ -186,7 +197,8 @@ impl TranspositionTable {
         let bucket = &mut self.buckets[(key as usize) & self.mask];
         if bucket.depth_pref.is_empty() || depth >= bucket.depth_pref.depth {
             if !bucket.depth_pref.is_empty() {
-                self.displaced_depth_pref.set(self.displaced_depth_pref.get() + 1);
+                self.displaced_depth_pref
+                    .set(self.displaced_depth_pref.get() + 1);
                 // Push-down: 같은 키 update가 아닐 때만 always-replace로 보존.
                 // 같은 키면 새 entry가 갱신본이라 기존을 보존할 이유 없음.
                 if bucket.depth_pref.key != key {
@@ -217,7 +229,7 @@ impl TranspositionTable {
     pub fn prefetch(&self, key: u64) {
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
             let idx = (key as usize) & self.mask;
             let bucket_ptr = self.buckets.as_ptr().add(idx);
             _mm_prefetch(bucket_ptr as *const i8, _MM_HINT_T0);

@@ -2,7 +2,7 @@
 //! at the first divergent position.
 
 use figrid_board::vct::classify_move_fast;
-use figrid_board::{to_idx, to_rc, Board, Move, Searcher, Stone, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
+use figrid_board::{BOARD_SIZE, Board, GOMOKU_NNUE_CONFIG, Move, Searcher, Stone, to_idx, to_rc};
 use noru::network::NnueWeights;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -35,20 +35,46 @@ fn main() {
     println!("  max_depth: {}", args.max_depth);
     println!("  time_ms : {}", args.time_ms);
     println!(
-        "  sidecar : {}",
+        "  relation-lite sidecar : {}",
         env::var("NORU_RELATION_LITE_SIDECAR").unwrap_or_else(|_| "(off)".to_string())
     );
     println!(
-        "  mode    : {}",
+        "  relation-lite mode    : {}",
         env::var("NORU_RELATION_LITE_MODE").unwrap_or_else(|_| "(unset)".to_string())
     );
     println!(
-        "  margin  : {}",
+        "  relation-lite margin  : {}",
         env::var("NORU_RELATION_LITE_ROOT_MARGIN").unwrap_or_else(|_| "(default)".to_string())
     );
     println!(
-        "  gate    : {}",
+        "  relation-lite gate    : {}",
         env::var("NORU_RELATION_LITE_ROOT_GATE").unwrap_or_else(|_| "(unset)".to_string())
+    );
+    println!(
+        "  defensive sidecar     : {}",
+        env::var("NORU_DEF_RELATION_SIDECAR").unwrap_or_else(|_| "(off)".to_string())
+    );
+    println!(
+        "  defensive alpha       : {}",
+        env::var("NORU_DEF_RELATION_ALPHA").unwrap_or_else(|_| "(default)".to_string())
+    );
+    println!(
+        "  candidate root tie    : {}",
+        env::var("NORU_CANDIDATE_RANKER_ROOT_TIEBREAK").unwrap_or_else(|_| "(default)".to_string())
+    );
+    println!(
+        "  candidate order tie   : {}",
+        env::var("NORU_CANDIDATE_RANKER_ORDER_TIEBREAK")
+            .unwrap_or_else(|_| "(default)".to_string())
+    );
+    println!(
+        "  candidate order topk  : {}",
+        env::var("NORU_CANDIDATE_RANKER_ORDER_TOPK").unwrap_or_else(|_| "(default)".to_string())
+    );
+    println!(
+        "  candidate order margin: {}",
+        env::var("NORU_CANDIDATE_RANKER_ORDER_TIE_MARGIN")
+            .unwrap_or_else(|_| "(default)".to_string())
     );
 
     for seed in &args.seeds {
@@ -127,6 +153,18 @@ fn audit_seed(seed: i64, base: &Value, other: &Value, weights: &NnueWeights, arg
         relation_rank.entry(c.mv).or_insert(i + 1);
     }
 
+    let mut candidate_ranked: Vec<_> = audit
+        .candidates
+        .iter()
+        .filter(|c| c.candidate_rank_score.is_some())
+        .cloned()
+        .collect();
+    candidate_ranked.sort_by(|a, b| b.candidate_rank_score.cmp(&a.candidate_rank_score));
+    let mut candidate_rank = HashMap::new();
+    for (i, c) in candidate_ranked.iter().enumerate() {
+        candidate_rank.entry(c.mv).or_insert(i + 1);
+    }
+
     let raw_best = search_ranked
         .first()
         .map(|c| c.search_score)
@@ -136,6 +174,9 @@ fn audit_seed(seed: i64, base: &Value, other: &Value, weights: &NnueWeights, arg
         rows.insert(c.mv);
     }
     for c in relation_ranked.iter().take(args.top) {
+        rows.insert(c.mv);
+    }
+    for c in candidate_ranked.iter().take(args.top) {
         rows.insert(c.mv);
     }
     rows.insert(base_mv);
@@ -180,7 +221,9 @@ fn audit_seed(seed: i64, base: &Value, other: &Value, weights: &NnueWeights, arg
         rows.len(),
         raw_best
     );
-    println!("  move\tmarks\ts_rank\tr_rank\tsearch\tdelta\trelation\tattack\tblock\tforcing");
+    println!(
+        "  move\tmarks\ts_rank\tr_rank\tc_rank\tsearch\tdelta\trelation\tcandidate\tattack\tblock\tforcing"
+    );
 
     let by_move: HashMap<Move, _> = audit.candidates.iter().map(|c| (c.mv, c)).collect();
     for mv in rows {
@@ -204,6 +247,9 @@ fn audit_seed(seed: i64, base: &Value, other: &Value, weights: &NnueWeights, arg
         if relation_rank.get(&mv) == Some(&1) {
             marks.push('R');
         }
+        if candidate_rank.get(&mv) == Some(&1) {
+            marks.push('K');
+        }
         if marks.is_empty() {
             marks.push('-');
         }
@@ -212,7 +258,7 @@ fn audit_seed(seed: i64, base: &Value, other: &Value, weights: &NnueWeights, arg
         let attack = classify_move_fast(&board, mv, side);
         let block = classify_move_fast(&board, mv, side.opponent());
         println!(
-            "  {}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}\t{}",
+            "  {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}\t{}",
             move_name(mv),
             marks,
             search_rank
@@ -223,9 +269,16 @@ fn audit_seed(seed: i64, base: &Value, other: &Value, weights: &NnueWeights, arg
                 .get(&mv)
                 .map(usize::to_string)
                 .unwrap_or_else(|| "-".to_string()),
+            candidate_rank
+                .get(&mv)
+                .map(usize::to_string)
+                .unwrap_or_else(|| "-".to_string()),
             c.search_score,
             raw_best - c.search_score,
             c.relation_score
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            c.candidate_rank_score
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "-".to_string()),
             attack,

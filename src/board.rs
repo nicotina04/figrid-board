@@ -2,7 +2,6 @@
 ///
 /// 15×15 보드. Bitboard 표현 (u128 × 2로 225비트 커버).
 /// 흑(선공)과 백(후공) 각각 bitboard 보유.
-
 use std::fmt;
 
 pub const BOARD_SIZE: usize = 15;
@@ -263,8 +262,8 @@ impl Board {
             zobrist: 0,
             // 정확한 초기값은 fill_initial_pattern_ids 에서 채움 (가장자리는
             // boundary 포함이라 ID ≠ 0).
-            line_pattern_ids: Box::new([[0u16; 4]; NUM_CELLS]),
             rule_set: RuleSet::Freestyle,
+            line_pattern_ids: Box::new([[0u16; 4]; NUM_CELLS]),
             exact5: false,
         };
         b.fill_initial_pattern_ids();
@@ -297,14 +296,8 @@ impl Board {
             let row = (cell / BOARD_SIZE) as i32;
             let col = (cell % BOARD_SIZE) as i32;
             for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
-                let w = crate::pattern_table::read_window(
-                    &self.black,
-                    &self.white,
-                    row,
-                    col,
-                    dr,
-                    dc,
-                );
+                let w =
+                    crate::pattern_table::read_window(&self.black, &self.white, row, col, dr, dc);
                 let packed = crate::pattern_table::pack_window(&w);
                 self.line_pattern_ids[cell][dir_idx] =
                     crate::pattern_table::lookup_mapped_id(packed);
@@ -449,14 +442,7 @@ impl Board {
                     continue;
                 }
                 let cell = (r as usize) * BOARD_SIZE + c as usize;
-                let w = crate::pattern_table::read_window(
-                    &self.black,
-                    &self.white,
-                    r,
-                    c,
-                    dr,
-                    dc,
-                );
+                let w = crate::pattern_table::read_window(&self.black, &self.white, r, c, dr, dc);
                 let packed = crate::pattern_table::pack_window(&w);
                 self.line_pattern_ids[cell][dir_idx] =
                     crate::pattern_table::lookup_mapped_id(packed);
@@ -464,7 +450,7 @@ impl Board {
         }
     }
 
-    /// 5목 승리 판정 (마지막 착수 기준)
+    /// Return whether the stone at `mv` completes a winning line under the active rule.
     pub fn check_win(&self, mv: Move) -> bool {
         let (row, col) = to_rc(mv);
         let (side, stone) = if self.black.get(mv) {
@@ -521,7 +507,7 @@ impl Board {
         mv < NUM_CELLS && self.is_empty(mv)
     }
 
-    /// ?? ?? ??
+    /// 게임 결과 확인
     pub fn game_result(&self) -> GameResult {
         if let Some(mv) = self.last_move {
             if self.check_win(mv) {
@@ -618,11 +604,15 @@ mod tests {
         for i in (1..keys.len()).rev() {
             board.undo_move();
             assert_eq!(
-                board.zobrist, keys[i - 1],
+                board.zobrist,
+                keys[i - 1],
                 "zobrist mismatch after undo step {i}"
             );
         }
-        assert_eq!(board.zobrist, 0, "zobrist did not return to 0 after full undo");
+        assert_eq!(
+            board.zobrist, 0,
+            "zobrist did not return to 0 after full undo"
+        );
     }
 
     /// Pattern4 state cache 정합성: incremental update 결과가 같은 보드를
@@ -669,9 +659,13 @@ mod tests {
                     let expected = crate::pattern_table::lookup_mapped_id(packed);
                     let actual = board.line_pattern_ids[cell][dir_idx];
                     assert_eq!(
-                        actual, expected,
+                        actual,
+                        expected,
                         "mismatch at cell {} dir {} after move {} (ply {})",
-                        cell, dir_idx, mv, i + 1
+                        cell,
+                        dir_idx,
+                        mv,
+                        i + 1
                     );
                 }
             }
@@ -701,7 +695,7 @@ mod tests {
     #[test]
     fn zobrist_path_independence() {
         let seq1 = [112, 113, 97, 98]; // B(7,7) W(7,8) B(6,7) W(6,8)
-        let seq2 = [112, 98, 97, 113]; // 같은 4 돌, 다른 순서 — 단 흑/백 같은 셀에 두는 순서 보존되어야 함
+        let _seq2 = [112, 98, 97, 113]; // 같은 4 돌, 다른 순서 — 단 흑/백 같은 셀에 두는 순서 보존되어야 함
 
         // seq2 invalid (흑이 (7,7)→(6,8)→(6,7)→(7,8) 순서로 두면 백도 다른 셀)
         // 정확한 path-equivalent 짝: 두 흑 수 순서 바꾸기
@@ -710,9 +704,13 @@ mod tests {
         let seq2 = [97, 113, 112, 98];
 
         let mut b1 = Board::new();
-        for &m in &seq1 { b1.make_move(m); }
+        for &m in &seq1 {
+            b1.make_move(m);
+        }
         let mut b2 = Board::new();
-        for &m in &seq2 { b2.make_move(m); }
+        for &m in &seq2 {
+            b2.make_move(m);
+        }
 
         assert_eq!(b1.black.lo, b2.black.lo);
         assert_eq!(b1.black.hi, b2.black.hi);
@@ -720,7 +718,10 @@ mod tests {
         assert_eq!(b1.white.hi, b2.white.hi);
         assert_eq!(b1.side_to_move, b2.side_to_move);
 
-        assert_eq!(b1.zobrist, b2.zobrist, "same position should have same zobrist");
+        assert_eq!(
+            b1.zobrist, b2.zobrist,
+            "same position should have same zobrist"
+        );
     }
 
     #[test]

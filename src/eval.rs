@@ -1,16 +1,17 @@
 //! NNUE 평가 — 4096 피처 (PS + LP-Rich + Compound + Density) 추출.
 
-use crate::board::{Board, Stone, BOARD_SIZE, NUM_CELLS};
+use crate::board::{BOARD_SIZE, Board, NUM_CELLS, Stone};
 use crate::features::{
-    broken_index, compound_index, conv_k3_bucket, conv_kernel_index, count_bucket, cross_line_hash,
-    cross_line_index, density_index, five_stone_index, five_stone_swap_perspective,
-    last_move_index, length_bucket, local_density_bucket, lp_rich_index, open_bucket, phase_bucket,
-    phase_index, ps_index, zone_for, BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR,
-    BROKEN_SHAPE_THREE, DENSITY_CAT_LEGAL, DENSITY_CAT_MY_COUNT, DENSITY_CAT_MY_LOCAL,
-    DENSITY_CAT_OPP_COUNT, DENSITY_CAT_OPP_LOCAL, MAX_ACTIVE_FEATURES,
+    BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE, DENSITY_CAT_LEGAL,
+    DENSITY_CAT_MY_COUNT, DENSITY_CAT_MY_LOCAL, DENSITY_CAT_OPP_COUNT, DENSITY_CAT_OPP_LOCAL,
+    MAX_ACTIVE_FEATURES, broken_index, compound_index, conv_k3_bucket, conv_kernel_index,
+    count_bucket, cross_line_hash, cross_line_index, density_index, five_stone_index,
+    five_stone_swap_perspective, last_move_index, length_bucket, local_density_bucket,
+    lp_rich_index, open_bucket, phase_bucket, phase_index, ps_index, relation_ue_multi_index,
+    relation_ue_pair_index, zone_for,
 };
-use crate::heuristic::{scan_line, DIR};
-use noru::network::{forward, Accumulator, FeatureDelta, NnueWeights};
+use crate::heuristic::{DIR, scan_line};
+use noru::network::{Accumulator, FeatureDelta, NnueWeights, forward};
 use std::sync::OnceLock;
 
 /// Incremental update시 한 수로 인해 feature가 바뀔 가능성이 있는 cell 집합 반환.
@@ -40,6 +41,21 @@ static COMPOUND_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn compound_enabled() -> bool {
     *COMPOUND_ENABLED.get_or_init(|| std::env::var("NORU_NO_COMPOUND").is_err())
+}
+
+static RELATION_UE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn relation_ue_enabled() -> bool {
+    *RELATION_UE_ENABLED.get_or_init(|| {
+        std::env::var("NORU_RELATION_UE")
+            .map(|v| {
+                matches!(
+                    v.as_str(),
+                    "1" | "true" | "TRUE" | "on" | "ON" | "yes" | "YES"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// 보드 상태에서 활성 피처를 추출.
@@ -195,8 +211,18 @@ fn push_density_features(
     push_density(stm, nstm, DENSITY_CAT_OPP_COUNT, count_bucket(opp_count));
 
     let (my_local, opp_local) = local_density(board);
-    push_density(stm, nstm, DENSITY_CAT_MY_LOCAL, local_density_bucket(my_local));
-    push_density(stm, nstm, DENSITY_CAT_OPP_LOCAL, local_density_bucket(opp_local));
+    push_density(
+        stm,
+        nstm,
+        DENSITY_CAT_MY_LOCAL,
+        local_density_bucket(my_local),
+    );
+    push_density(
+        stm,
+        nstm,
+        DENSITY_CAT_OPP_LOCAL,
+        local_density_bucket(opp_local),
+    );
 
     let legal = (NUM_CELLS as u32).saturating_sub(my_count + opp_count);
     push_density(stm, nstm, DENSITY_CAT_LEGAL, count_bucket(legal));
@@ -218,6 +244,12 @@ fn push_density_features(
     if conv_kernels_enabled() {
         push_conv_kernel_features(my_bb, opp_bb, stm, nstm);
     }
+
+    // K: Relation UE candidate summary. Off by default until relation-UE
+    // weights are trained; old weights have random values in this reserved tail.
+    if relation_ue_enabled() {
+        push_relation_ue_features(board, my_bb, opp_bb, stm, nstm);
+    }
 }
 
 /// Whether to emit `I` (5-stone window) features. **ON by default for figrid
@@ -225,14 +257,22 @@ fn push_density_features(
 /// Allow disabling via `NORU_FIVE_STONE=0` for ablation testing only.
 fn five_stone_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("NORU_FIVE_STONE").map(|v| v != "0").unwrap_or(true))
+    *ENABLED.get_or_init(|| {
+        std::env::var("NORU_FIVE_STONE")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
 }
 
 /// Whether to emit `J` (conv kernel) features. **ON by default for figrid
 /// 0.6.8+** for the same reason as 5-stone above.
 fn conv_kernels_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("NORU_CONV_KERNELS").map(|v| v != "0").unwrap_or(true))
+    *ENABLED.get_or_init(|| {
+        std::env::var("NORU_CONV_KERNELS")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
 }
 
 /// J: Conv kernel emit. K1 (3×3 own), K2 (3×3 opp), K3 (5×5 diamond own).
@@ -244,9 +284,18 @@ fn push_conv_kernel_features(
 ) {
     const CROSS_4: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
     const DIAMOND_12: [(i32, i32); 12] = [
-        (-2, 0), (-1, -1), (-1, 0), (-1, 1),
-        (0, -2), (0, -1), (0, 1), (0, 2),
-        (1, -1), (1, 0), (1, 1), (2, 0),
+        (-2, 0),
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -2),
+        (0, -1),
+        (0, 1),
+        (0, 2),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+        (2, 0),
     ];
 
     for r in 0..BOARD_SIZE as i32 {
@@ -303,6 +352,74 @@ fn push_conv_kernel_features(
 ///
 /// `perspective_mine` / `perspective_opp`: stm 관점에서 "내 돌"이 0, "상대 돌"이 1.
 #[allow(clippy::too_many_arguments)]
+fn push_relation_ue_features(
+    _board: &Board,
+    my_bb: &crate::board::BitBoard,
+    opp_bb: &crate::board::BitBoard,
+    stm: &mut Vec<usize>,
+    nstm: &mut Vec<usize>,
+) {
+    for cell in 0..NUM_CELLS {
+        if my_bb.get(cell) || opp_bb.get(cell) {
+            continue;
+        }
+
+        let (attack1, attack2) = candidate_relation_threat_buckets(my_bb, opp_bb, cell);
+        let (block1, block2) = candidate_relation_threat_buckets(opp_bb, my_bb, cell);
+        if attack1 == 0 && block1 == 0 {
+            continue;
+        }
+
+        let row = (cell / BOARD_SIZE) as i32;
+        let col = (cell % BOARD_SIZE) as i32;
+        let zone = zone_for(row, col);
+
+        stm.push(relation_ue_pair_index(0, attack1, block1, zone));
+        stm.push(relation_ue_pair_index(1, block1, attack1, zone));
+        nstm.push(relation_ue_pair_index(0, block1, attack1, zone));
+        nstm.push(relation_ue_pair_index(1, attack1, block1, zone));
+
+        if attack2 != 0 || block2 != 0 {
+            stm.push(relation_ue_multi_index(0, attack2, block2));
+            stm.push(relation_ue_multi_index(1, block2, attack2));
+            nstm.push(relation_ue_multi_index(0, block2, attack2));
+            nstm.push(relation_ue_multi_index(1, attack2, block2));
+        }
+    }
+}
+
+fn candidate_relation_threat_buckets(
+    stones: &crate::board::BitBoard,
+    opp: &crate::board::BitBoard,
+    cell: usize,
+) -> (usize, usize) {
+    let row = (cell / BOARD_SIZE) as i32;
+    let col = (cell % BOARD_SIZE) as i32;
+    let mut placed = *stones;
+    placed.set(cell);
+
+    let mut buckets = [0usize; 4];
+    for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
+        let info = scan_line(&placed, opp, row, col, dr, dc);
+        let open = info.open_front as u32 + info.open_back as u32;
+        buckets[dir_idx] = relation_threat_bucket(classify_threat(info.count, open));
+    }
+    buckets.sort_unstable_by(|a, b| b.cmp(a));
+    (buckets[0], buckets[1])
+}
+
+#[inline]
+fn relation_threat_bucket(threat: Threat) -> usize {
+    match threat {
+        Threat::None => 0,
+        Threat::OpenTwo => 1,
+        Threat::ClosedThree => 2,
+        Threat::OpenThree => 3,
+        Threat::ClosedFour => 4,
+        Threat::OpenFour | Threat::Five => 5,
+    }
+}
+
 fn detect_broken_and_push(
     stones: &crate::board::BitBoard,
     opp: &crate::board::BitBoard,
@@ -510,12 +627,12 @@ fn push_density(stm: &mut Vec<usize>, nstm: &mut Vec<usize>, cat: usize, bucket:
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Threat {
     None,
-    OpenTwo,   // 열린 2
+    OpenTwo,     // 열린 2
     ClosedThree, // 닫힌 3
-    OpenThree, // 열린 3
-    ClosedFour, // 닫힌 4
-    OpenFour,  // 열린 4
-    Five,      // 5목
+    OpenThree,   // 열린 3
+    ClosedFour,  // 닫힌 4
+    OpenFour,    // 열린 4
+    Five,        // 5목
 }
 
 fn classify_threat(count: u32, open_ends: u32) -> Threat {
@@ -568,12 +685,12 @@ fn compound_combo_id(threats: &[Threat; 4]) -> Option<usize> {
 
     // 이중 위협 combo
     let dual_id = match t1_rank {
-        0 => 6 + t2_rank,               // Five + X: 6..12
-        1 => 12 + (t2_rank - 1),        // OF + X: 12..17
-        2 => 17 + (t2_rank - 2),        // CF + X: 17..21
-        3 => 21 + (t2_rank - 3),        // O3 + X: 21..24
-        4 => 24 + (t2_rank - 4),        // C3 + X: 24..26
-        5 => 26,                         // O2 + O2: 26
+        0 => 6 + t2_rank,        // Five + X: 6..12
+        1 => 12 + (t2_rank - 1), // OF + X: 12..17
+        2 => 17 + (t2_rank - 2), // CF + X: 17..21
+        3 => 21 + (t2_rank - 3), // O3 + X: 21..24
+        4 => 24 + (t2_rank - 4), // C3 + X: 24..26
+        5 => 26,                 // O2 + O2: 26
         _ => return None,
     };
 
@@ -657,11 +774,7 @@ pub fn evaluate(board: &Board, weights: &NnueWeights) -> i32 {
 /// branch is disabled and `apply_dense_input` short-circuits, so this call
 /// is a near-zero-cost no-op pre-Phase-A.1 weights.
 #[inline]
-fn apply_pattern4_dense(
-    acc: &mut Accumulator,
-    weights: &NnueWeights,
-    board: &Board,
-) {
+fn apply_pattern4_dense(acc: &mut Accumulator, weights: &NnueWeights, board: &Board) {
     if weights.dense_to_acc.is_empty() {
         return;
     }
@@ -807,8 +920,11 @@ impl IncrementalEval {
                 old_nstm,
             );
 
-            undo.cell_changes
-                .push((c, std::mem::take(&mut self.cell_features[c].0), std::mem::take(&mut self.cell_features[c].1)));
+            undo.cell_changes.push((
+                c,
+                std::mem::take(&mut self.cell_features[c].0),
+                std::mem::take(&mut self.cell_features[c].1),
+            ));
             self.cell_features[c].0 = new_stm_buf.clone();
             self.cell_features[c].1 = new_nstm_buf.clone();
         }
@@ -921,7 +1037,10 @@ fn chunk_pairs<'a>(
 ) -> Vec<(&'a [usize], &'a [usize])> {
     let n_add = add.len();
     let n_rem = rem.len();
-    let chunks = n_add.div_ceil(max_chunk).max(n_rem.div_ceil(max_chunk)).max(1);
+    let chunks = n_add
+        .div_ceil(max_chunk)
+        .max(n_rem.div_ceil(max_chunk))
+        .max(1);
     let mut out = Vec::with_capacity(chunks);
     for i in 0..chunks {
         let a_start = (i * max_chunk).min(n_add);
@@ -966,9 +1085,10 @@ mod tests {
     use super::*;
     use crate::board::Board;
     use crate::features::{
-        broken_index, compound_index, BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR,
-        BROKEN_SHAPE_THREE, GOMOKU_NNUE_CONFIG, HALF_FEATURE_SIZE, LP_BASE, MAX_ACTIVE_FEATURES,
-        PS_BASE, TOTAL_FEATURE_SIZE,
+        BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE, GOMOKU_NNUE_CONFIG,
+        HALF_FEATURE_SIZE, LP_BASE, MAX_ACTIVE_FEATURES, PS_BASE, RELATION_UE_BASE,
+        RELATION_UE_TOTAL, TOTAL_FEATURE_SIZE, broken_index, compound_index,
+        relation_ue_pair_index,
     };
 
     #[test]
@@ -996,9 +1116,7 @@ mod tests {
         board.make_move(0); // W
         board.make_move(7 * 15 + 8); // B (가로 2연)
         let (stm, _) = compute_active_features(&board);
-        let has_lp = stm
-            .iter()
-            .any(|&f| f >= LP_BASE && f < LP_BASE + 2 * 1152);
+        let has_lp = stm.iter().any(|&f| f >= LP_BASE && f < LP_BASE + 2 * 1152);
         assert!(has_lp, "should have LP-Rich features after 2-in-row");
     }
 
@@ -1010,8 +1128,41 @@ mod tests {
         }
         let (stm, nstm) = compute_active_features(&board);
         for &f in stm.iter().chain(nstm.iter()) {
-            assert!(f < TOTAL_FEATURE_SIZE, "feature {f} >= {TOTAL_FEATURE_SIZE}");
+            assert!(
+                f < TOTAL_FEATURE_SIZE,
+                "feature {f} >= {TOTAL_FEATURE_SIZE}"
+            );
         }
+    }
+
+    #[test]
+    fn relation_ue_direct_emit_open_three_candidate() {
+        let mut board = Board::new();
+        board.make_move(7 * 15 + 6); // B
+        board.make_move(0); // W
+        board.make_move(7 * 15 + 7); // B
+        board.make_move(1); // W
+
+        let mut stm = Vec::new();
+        let mut nstm = Vec::new();
+        push_relation_ue_features(&board, &board.black, &board.white, &mut stm, &mut nstm);
+
+        assert!(
+            !stm.is_empty(),
+            "two connected stones should expose relation UE candidate features"
+        );
+        for &f in stm.iter().chain(nstm.iter()) {
+            assert!(
+                (RELATION_UE_BASE..RELATION_UE_BASE + RELATION_UE_TOTAL).contains(&f),
+                "relation UE feature {f} outside reserved tail"
+            );
+        }
+
+        let expected = relation_ue_pair_index(0, 3, 0, zone_for(7, 8));
+        assert!(
+            stm.contains(&expected),
+            "expected open-three candidate relation feature {expected}; stm={stm:?}"
+        );
     }
 
     #[test]
@@ -1035,8 +1186,7 @@ mod tests {
         for sq in 0..20 {
             for i in 0..acc_size {
                 weights.feature_weights[sq][i] = ((sq * 7 + i) % 13) as i16 - 6;
-                weights.feature_weights[sq + HALF_FEATURE_SIZE][i] =
-                    ((sq * 3 + i) % 11) as i16 - 5;
+                weights.feature_weights[sq + HALF_FEATURE_SIZE][i] = ((sq * 3 + i) % 11) as i16 - 5;
             }
         }
         let mut board = Board::new();
@@ -1068,8 +1218,7 @@ mod tests {
                 weights.feature_weights[f][i] =
                     ((f.wrapping_mul(13).wrapping_add(i) % 31) as i16) - 15;
             }
-            weights.feature_bias[i_mod(f, acc_size)] =
-                ((f.wrapping_mul(7) % 19) as i16) - 9;
+            weights.feature_bias[i_mod(f, acc_size)] = ((f.wrapping_mul(7) % 19) as i16) - 9;
         }
 
         let moves = [
@@ -1082,7 +1231,11 @@ mod tests {
         inc.refresh(&board, &weights);
 
         let initial = inc.eval(&weights, &board);
-        assert_eq!(initial, evaluate(&board, &weights), "refresh mismatch at empty");
+        assert_eq!(
+            initial,
+            evaluate(&board, &weights),
+            "refresh mismatch at empty"
+        );
 
         for (i, &mv) in moves.iter().enumerate() {
             if !board.is_empty(mv) {
@@ -1094,9 +1247,13 @@ mod tests {
             let inc_val = inc.eval(&weights, &board);
             let full_val = evaluate(&board, &weights);
             assert_eq!(
-                inc_val, full_val,
+                inc_val,
+                full_val,
                 "mismatch after move {} (ply {}): inc={} full={}",
-                mv, i + 1, inc_val, full_val
+                mv,
+                i + 1,
+                inc_val,
+                full_val
             );
         }
 
@@ -1151,9 +1308,13 @@ mod tests {
             let inc_val = inc.eval(&weights, &board);
             let full_val = evaluate(&board, &weights);
             assert_eq!(
-                inc_val, full_val,
+                inc_val,
+                full_val,
                 "far-apart mismatch after move {} (ply {}): inc={} full={}",
-                mv, i + 1, inc_val, full_val
+                mv,
+                i + 1,
+                inc_val,
+                full_val
             );
         }
 
@@ -1161,7 +1322,11 @@ mod tests {
         for _ in 0..moves.len() {
             board.undo_move();
             inc.pop_move();
-            assert_eq!(inc.eval(&weights, &board), evaluate(&board, &weights), "undo mismatch");
+            assert_eq!(
+                inc.eval(&weights, &board),
+                evaluate(&board, &weights),
+                "undo mismatch"
+            );
         }
     }
 
@@ -1185,9 +1350,8 @@ mod tests {
         });
         let data = std::fs::read(&path)
             .unwrap_or_else(|e| panic!("failed to read weights from {path}: {e}"));
-        let weights =
-            NnueWeights::load_from_bytes(&data, Some(GOMOKU_NNUE_CONFIG.clone()))
-                .unwrap_or_else(|e| panic!("load_from_bytes failed for {path}: {e}"));
+        let weights = NnueWeights::load_from_bytes(&data, Some(GOMOKU_NNUE_CONFIG.clone()))
+            .unwrap_or_else(|e| panic!("load_from_bytes failed for {path}: {e}"));
 
         // 100 random 160-ply trials — Codex가 수동 harness로 확인한 것과
         // 동일한 커버리지. 재학습 시 saturation divergence 자동 적발.
@@ -1230,13 +1394,13 @@ mod tests {
         // (7,7) 은 가로 기준 왼쪽 인접이 흑(7,6), 세로 기준 위 인접이 흑(6,7)
         // 이라 두 방향 모두 line_start 아님. 수정 전엔 double-three 미검출.
         board.make_move(7 * 15 + 5); // B (7,5)
-        board.make_move(0);          // W (0,0) — far away, no interference
+        board.make_move(0); // W (0,0) — far away, no interference
         board.make_move(7 * 15 + 6); // B (7,6)
-        board.make_move(1);          // W (0,1)
+        board.make_move(1); // W (0,1)
         board.make_move(7 * 15 + 7); // B (7,7) ← crossing stone
-        board.make_move(2);          // W (0,2)
+        board.make_move(2); // W (0,2)
         board.make_move(6 * 15 + 7); // B (6,7)
-        board.make_move(3);          // W (0,3)
+        board.make_move(3); // W (0,3)
         board.make_move(8 * 15 + 7); // B (8,7)
         // side_to_move = White (9수 후 흑이 마지막)
 
@@ -1261,11 +1425,11 @@ mod tests {
         let mut board = Board::new();
         // 가로: 빈(7,4) / 흑(7,5) / 흑(7,6) / 빈(7,7) / 흑(7,8) / 빈(7,9)
         // 양쪽 열림 (open_left at (7,4), open_right at (7,9)), gap 1개 at (7,7).
-        board.make_move(7 * 15 + 5);  // B (7,5) 앵커
-        board.make_move(0);           // W far
-        board.make_move(7 * 15 + 6);  // B (7,6)
-        board.make_move(1);           // W far
-        board.make_move(7 * 15 + 8);  // B (7,8)
+        board.make_move(7 * 15 + 5); // B (7,5) 앵커
+        board.make_move(0); // W far
+        board.make_move(7 * 15 + 6); // B (7,6)
+        board.make_move(1); // W far
+        board.make_move(7 * 15 + 8); // B (7,8)
         // side_to_move = White (5수 후 흑이 마지막)
 
         let (stm, _) = compute_active_features(&board);
@@ -1284,13 +1448,13 @@ mod tests {
     fn jump_four_detected() {
         let mut board = Board::new();
         // 가로: 빈(7,4) 흑(7,5) 흑(7,6) 흑(7,7) 빈(7,8) 흑(7,9) 빈(7,10)
-        board.make_move(7 * 15 + 5);  // B (7,5) 앵커
+        board.make_move(7 * 15 + 5); // B (7,5) 앵커
         board.make_move(0);
-        board.make_move(7 * 15 + 6);  // B (7,6)
+        board.make_move(7 * 15 + 6); // B (7,6)
         board.make_move(1);
-        board.make_move(7 * 15 + 7);  // B (7,7)
+        board.make_move(7 * 15 + 7); // B (7,7)
         board.make_move(2);
-        board.make_move(7 * 15 + 9);  // B (7,9)
+        board.make_move(7 * 15 + 9); // B (7,9)
         // side_to_move = White
 
         let (stm, _) = compute_active_features(&board);
@@ -1309,11 +1473,11 @@ mod tests {
     fn double_broken_three_detected() {
         let mut board = Board::new();
         // 가로: 빈(7,4) 흑(7,5) 빈(7,6) 흑(7,7) 빈(7,8) 흑(7,9) 빈(7,10)
-        board.make_move(7 * 15 + 5);  // B (7,5) 앵커
+        board.make_move(7 * 15 + 5); // B (7,5) 앵커
         board.make_move(0);
-        board.make_move(7 * 15 + 7);  // B (7,7)
+        board.make_move(7 * 15 + 7); // B (7,7)
         board.make_move(1);
-        board.make_move(7 * 15 + 9);  // B (7,9)
+        board.make_move(7 * 15 + 9); // B (7,9)
         // side_to_move = White
 
         let (stm, _) = compute_active_features(&board);
@@ -1334,9 +1498,9 @@ mod tests {
         let mut board = Board::new();
         // 가로 3연만 (세로/대각 threat 없음) → 각 흑 돌은 O3 단일 위협.
         board.make_move(7 * 15 + 6); // B (7,6)
-        board.make_move(0);          // W
+        board.make_move(0); // W
         board.make_move(7 * 15 + 7); // B (7,7)
-        board.make_move(1);          // W
+        board.make_move(1); // W
         board.make_move(7 * 15 + 8); // B (7,8)
         // side_to_move = White
 

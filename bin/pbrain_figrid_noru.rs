@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "codebook-eval")]
 use figrid_board::codebook_eval::CodebookWeights;
-use figrid_board::{book, to_idx, Board, RuleSet, Searcher, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
+use figrid_board::{BOARD_SIZE, Board, GOMOKU_NNUE_CONFIG, RuleSet, Searcher, book, to_idx};
 use noru::network::NnueWeights;
 
 /// Source the v52 NNUE weights. Two modes:

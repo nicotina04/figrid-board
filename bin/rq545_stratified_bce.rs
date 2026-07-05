@@ -1,10 +1,10 @@
 #![cfg(feature = "codebook-eval")]
 
-use figrid_board::codebook_eval::{evaluate_full, CodebookWeights};
+use figrid_board::codebook_eval::{CodebookWeights, evaluate_full};
 use figrid_board::eval::evaluate;
-use figrid_board::{to_idx, Board, Stone, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
+use figrid_board::{BOARD_SIZE, Board, GOMOKU_NNUE_CONFIG, Stone, to_idx};
 use noru::network::NnueWeights;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;

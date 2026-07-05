@@ -78,11 +78,7 @@ pub fn canonicalize(w: &LineWindow) -> LineWindow {
     let reversed: LineWindow = std::array::from_fn(|i| w[10 - i]);
     let p1 = pack_window(w);
     let p2 = pack_window(&reversed);
-    if p1 <= p2 {
-        *w
-    } else {
-        reversed
-    }
+    if p1 <= p2 { *w } else { reversed }
 }
 
 /// 패턴이 보드에서 실제 등장 가능한가?
@@ -151,7 +147,7 @@ pub fn enumerate_patterns() -> HashMap<u32, PatternId> {
 // 거의 lossless이면서 Pattern4 weights 대부분이 학습 가능 영역에 진입.
 pub const PATTERN_TOP_K: usize = 4096;
 pub const PATTERN_RARE_ID: u16 = PATTERN_TOP_K as u16; // = 4096, "그 외" bucket
-pub const PATTERN_NUM_IDS: usize = PATTERN_TOP_K + 1;  // = 4097
+pub const PATTERN_NUM_IDS: usize = PATTERN_TOP_K + 1; // = 4097
 
 /// `pattern_freq_stats --dump-top-k 16384` 가 만든 binary embed.
 /// 16384 × u32 little-endian = 65 536 bytes. canonical packed value를
@@ -232,8 +228,7 @@ fn build_swap_table() -> [u16; PATTERN_NUM_IDS] {
 
     // Top 16K canonical packed의 swap → 그 canonical의 mapped ID.
     // 1) canonical_packed → mapped 사전 재구성.
-    let mut canonical_to_mapped: HashMap<u32, u16> =
-        HashMap::with_capacity(PATTERN_TOP_K);
+    let mut canonical_to_mapped: HashMap<u32, u16> = HashMap::with_capacity(PATTERN_TOP_K);
     for (i, chunk) in TOPK_BYTES.chunks(4).enumerate() {
         let p = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         canonical_to_mapped.insert(p, i as u16);
@@ -241,8 +236,7 @@ fn build_swap_table() -> [u16; PATTERN_NUM_IDS] {
 
     // 2) 각 mapped id의 canonical → mine/opp swap → re-canonicalize → mapped.
     for (i, chunk) in TOPK_BYTES.chunks(4).enumerate() {
-        let canonical_packed =
-            u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let canonical_packed = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let w = unpack_window(canonical_packed);
         let swapped: LineWindow = std::array::from_fn(|j| match w[j] {
             1 => 2,
@@ -330,7 +324,6 @@ fn classify_window_anchor_mine_rule(
         _ => WindowThreat::None,
     }
 }
-
 
 /// O(1) lookup of the `LineThreat` produced when `mine` plays at an empty
 /// anchor cell, given the current `mapped pattern ID` for the surrounding

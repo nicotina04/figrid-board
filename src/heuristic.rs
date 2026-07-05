@@ -9,8 +9,7 @@
 ///   - 닫힌 3: 500
 ///   - 열린 2: 100
 ///   - 닫힌 2: 10
-
-use crate::board::{BitBoard, Board, Stone, BOARD_SIZE, NUM_CELLS};
+use crate::board::{BOARD_SIZE, BitBoard, Board, NUM_CELLS, Stone};
 
 pub const DIR: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
 
@@ -25,7 +24,14 @@ pub struct LineInfo {
     pub open_back: bool,
 }
 
-pub fn scan_line(stones: &BitBoard, opp: &BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> LineInfo {
+pub fn scan_line(
+    stones: &BitBoard,
+    opp: &BitBoard,
+    row: i32,
+    col: i32,
+    dr: i32,
+    dc: i32,
+) -> LineInfo {
     let mut count = 1u32;
 
     let mut open_front = false;
@@ -65,18 +71,18 @@ pub fn scan_line(stones: &BitBoard, opp: &BitBoard, row: i32, col: i32, dr: i32,
     }
 }
 
-/// ??? ?? ??
+/// 패턴별 점수 변환
 fn pattern_score(info: &LineInfo) -> i32 {
     let open_ends = info.open_front as u32 + info.open_back as u32;
 
     match (info.count, open_ends) {
-        (5.., _) => 1_000_000,     // 5목 이상 = 승리
-        (4, 2) => 100_000,         // 열린 4 = 거의 승리
-        (4, 1) => 10_000,          // 닫힌 4
-        (3, 2) => 5_000,           // 열린 3
-        (3, 1) => 500,             // 닫힌 3
-        (2, 2) => 100,             // 열린 2
-        (2, 1) => 10,              // 닫힌 2
+        (5.., _) => 1_000_000, // 5목 이상 = 승리
+        (4, 2) => 100_000,     // 열린 4 = 거의 승리
+        (4, 1) => 10_000,      // 닫힌 4
+        (3, 2) => 5_000,       // 열린 3
+        (3, 1) => 500,         // 닫힌 3
+        (2, 2) => 100,         // 열린 2
+        (2, 1) => 10,          // 닫힌 2
         _ => 0,
     }
 }
@@ -104,11 +110,12 @@ pub fn heuristic_eval(board: &Board) -> i32 {
                 // 이 돌이 라인의 시작인지 확인 (이전 칸이 같은 돌이 아닌 경우)
                 let pr = row - dr;
                 let pc = col - dc;
-                let is_start = if pr < 0 || pr >= BOARD_SIZE as i32 || pc < 0 || pc >= BOARD_SIZE as i32 {
-                    true
-                } else {
-                    !my_stones.get(pr as usize * BOARD_SIZE + pc as usize)
-                };
+                let is_start =
+                    if pr < 0 || pr >= BOARD_SIZE as i32 || pc < 0 || pc >= BOARD_SIZE as i32 {
+                        true
+                    } else {
+                        !my_stones.get(pr as usize * BOARD_SIZE + pc as usize)
+                    };
 
                 if is_start {
                     let info = scan_line(my_stones, opp_stones, row, col, dr, dc);
@@ -122,11 +129,12 @@ pub fn heuristic_eval(board: &Board) -> i32 {
             if opp_stones.get(idx) {
                 let pr = row - dr;
                 let pc = col - dc;
-                let is_start = if pr < 0 || pr >= BOARD_SIZE as i32 || pc < 0 || pc >= BOARD_SIZE as i32 {
-                    true
-                } else {
-                    !opp_stones.get(pr as usize * BOARD_SIZE + pc as usize)
-                };
+                let is_start =
+                    if pr < 0 || pr >= BOARD_SIZE as i32 || pc < 0 || pc >= BOARD_SIZE as i32 {
+                        true
+                    } else {
+                        !opp_stones.get(pr as usize * BOARD_SIZE + pc as usize)
+                    };
 
                 if is_start {
                     let info = scan_line(opp_stones, my_stones, row, col, dr, dc);
@@ -334,7 +342,10 @@ mod tests {
         board.make_move(to_idx(7, 6));
         // 현재 백 턴. 흑이 열린 4, 백은 위협 없음 → 백 관점 매우 불리
         let eval = heuristic_eval(&board);
-        assert!(eval < -50_000, "should detect opponent's open four, got {eval}");
+        assert!(
+            eval < -50_000,
+            "should detect opponent's open four, got {eval}"
+        );
     }
 
     #[test]

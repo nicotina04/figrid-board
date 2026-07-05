@@ -6,8 +6,8 @@
 
 use serde_json::Value;
 
-use crate::board::{Board, Move, Stone, BOARD_SIZE, NUM_CELLS};
-use crate::pattern_table::{swap_mapped_id, PATTERN_NUM_IDS};
+use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
+use crate::pattern_table::{PATTERN_NUM_IDS, swap_mapped_id};
 
 const REGIONS: usize = 9;
 const WINDOW_LENS: [usize; 3] = [5, 6, 7];

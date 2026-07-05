@@ -29,14 +29,14 @@
 
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use noru::network::NnueWeights;
 
-use figrid_board::pattern_table::{swap_mapped_id, PATTERN_NUM_IDS};
+use figrid_board::pattern_table::{PATTERN_NUM_IDS, swap_mapped_id};
 use figrid_board::vct::classify_move_fast;
 use figrid_board::{
-    evaluate, to_idx, Board, IncrementalEval, Searcher, Stone, BOARD_SIZE, GOMOKU_NNUE_CONFIG,
-    NUM_CELLS,
+    BOARD_SIZE, Board, GOMOKU_NNUE_CONFIG, IncrementalEval, NUM_CELLS, Searcher, Stone, evaluate,
+    to_idx,
 };
 
 const CODEBOOK_DIM: usize = 16;

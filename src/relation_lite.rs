@@ -3,8 +3,8 @@
 //! Disabled unless `NORU_RELATION_LITE_SIDECAR` points at a JSON sidecar
 //! produced by noru-tactic's `relation-lite-probe`.
 
-use crate::board::{Board, Stone, NUM_CELLS};
-use crate::vct::{classify_move_fast, ThreatKind, THREAT_KIND_COUNT};
+use crate::board::{BOARD_SIZE, Board, NUM_CELLS, Stone};
+use crate::vct::{THREAT_KIND_COUNT, ThreatKind, classify_move_fast};
 use serde_json::Value;
 use std::sync::OnceLock;
 
@@ -65,6 +65,24 @@ enum SidecarMode {
     Both,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LeafGateMode {
+    All,
+    Tactical,
+    Urgent,
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeConfig {
+    mode: SidecarMode,
+    leaf_gate: LeafGateMode,
+    output_scale: f32,
+    blend: f32,
+    root_margin: i32,
+    root_min_ply: usize,
+    root_max_center_dist: Option<usize>,
+}
+
 impl SidecarMode {
     #[inline]
     fn leaf_enabled(self) -> bool {
@@ -78,35 +96,49 @@ impl SidecarMode {
 }
 
 pub(crate) fn apply_sidecar(board: &Board, base_eval: i32) -> i32 {
-    if !sidecar_mode().leaf_enabled() {
+    let config = runtime_config();
+    if !config.mode.leaf_enabled() {
+        return base_eval;
+    }
+    if !leaf_gate_allows(board, config.leaf_gate) {
         return base_eval;
     }
     let Some(sidecar) = sidecar() else {
         return base_eval;
     };
-    let scaled = scaled_prediction(sidecar, board, base_eval) as f32;
-    let blend = blend_weight();
-    ((base_eval as f32) * (1.0 - blend) + scaled * blend).round() as i32
+    let scaled = scaled_prediction(sidecar, board, base_eval, config.output_scale);
+    let blend = config.blend;
+    ((base_eval as f32) * (1.0 - blend) + (scaled as f32) * blend).round() as i32
 }
 
 pub(crate) fn root_enabled() -> bool {
-    sidecar_mode().root_enabled()
+    runtime_config().mode.root_enabled()
 }
 
 pub(crate) fn root_candidate_eval(board: &Board, base_eval: i32) -> Option<i32> {
-    if !sidecar_mode().root_enabled() {
+    let config = runtime_config();
+    if !config.mode.root_enabled() {
         return None;
     }
-    sidecar().map(|sidecar| scaled_prediction(sidecar, board, base_eval))
+    sidecar().map(|sidecar| scaled_prediction(sidecar, board, base_eval, config.output_scale))
 }
 
 pub(crate) fn root_margin() -> i32 {
-    static MARGIN: OnceLock<i32> = OnceLock::new();
-    *MARGIN.get_or_init(|| {
-        parse_env_i32("NORU_RELATION_LITE_ROOT_MARGIN")
-            .filter(|v| *v >= 0)
-            .unwrap_or(50)
-    })
+    runtime_config().root_margin
+}
+
+pub(crate) fn root_min_ply() -> usize {
+    runtime_config().root_min_ply
+}
+
+pub(crate) fn root_move_allowed(mv: usize) -> bool {
+    let Some(max_dist) = runtime_config().root_max_center_dist else {
+        return true;
+    };
+    let row = mv / BOARD_SIZE;
+    let col = mv % BOARD_SIZE;
+    let center = BOARD_SIZE / 2;
+    row.abs_diff(center) + col.abs_diff(center) <= max_dist
 }
 
 fn sidecar() -> Option<&'static Sidecar> {
@@ -114,25 +146,73 @@ fn sidecar() -> Option<&'static Sidecar> {
     SIDECAR.get_or_init(load_sidecar).as_ref()
 }
 
-fn sidecar_mode() -> SidecarMode {
-    static MODE: OnceLock<SidecarMode> = OnceLock::new();
-    *MODE.get_or_init(|| {
-        let Ok(raw) = std::env::var("NORU_RELATION_LITE_MODE") else {
-            return SidecarMode::Leaf;
-        };
-        let trimmed = raw.trim();
-        if is_disabled_value(trimmed) {
-            return SidecarMode::Off;
+fn runtime_config() -> &'static RuntimeConfig {
+    static CONFIG: OnceLock<RuntimeConfig> = OnceLock::new();
+    CONFIG.get_or_init(load_runtime_config)
+}
+
+fn load_runtime_config() -> RuntimeConfig {
+    RuntimeConfig {
+        mode: parse_sidecar_mode(),
+        leaf_gate: parse_leaf_gate_mode(),
+        output_scale: parse_env_f32("NORU_RELATION_LITE_SCALE")
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(32.0),
+        blend: parse_env_f32("NORU_RELATION_LITE_BLEND")
+            .filter(|v| v.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0),
+        root_margin: parse_env_i32("NORU_RELATION_LITE_ROOT_MARGIN")
+            .filter(|v| *v >= 0)
+            .unwrap_or(50),
+        root_min_ply: parse_env_usize("NORU_RELATION_LITE_ROOT_MIN_PLY")
+            .filter(|v| *v > 0)
+            .unwrap_or(0),
+        root_max_center_dist: parse_env_usize("NORU_RELATION_LITE_ROOT_MAX_CENTER_DIST"),
+    }
+}
+
+fn parse_sidecar_mode() -> SidecarMode {
+    let Ok(raw) = std::env::var("NORU_RELATION_LITE_MODE") else {
+        return SidecarMode::Leaf;
+    };
+    let trimmed = raw.trim();
+    if is_disabled_value(trimmed) {
+        return SidecarMode::Off;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "leaf" | "eval" => SidecarMode::Leaf,
+        "root" | "rerank" | "tiebreak" | "tie-break" => SidecarMode::Root,
+        "both" | "all" => SidecarMode::Both,
+        other => {
+            panic!("invalid NORU_RELATION_LITE_MODE={other:?}; expected leaf, root, both, or off")
         }
-        match trimmed.to_ascii_lowercase().as_str() {
-            "1" | "true" | "on" | "leaf" | "eval" => SidecarMode::Leaf,
-            "root" | "rerank" | "tiebreak" | "tie-break" => SidecarMode::Root,
-            "both" | "all" => SidecarMode::Both,
-            other => panic!(
-                "invalid NORU_RELATION_LITE_MODE={other:?}; expected leaf, root, both, or off"
-            ),
-        }
-    })
+    }
+}
+
+fn parse_leaf_gate_mode() -> LeafGateMode {
+    let Ok(raw) = std::env::var("NORU_RELATION_LITE_LEAF_GATE") else {
+        return LeafGateMode::All;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+        return LeafGateMode::All;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "tactical" | "tactic" | "risk" | "risky" => LeafGateMode::Tactical,
+        "urgent" | "forcing" | "forced" => LeafGateMode::Urgent,
+        other => panic!(
+            "invalid NORU_RELATION_LITE_LEAF_GATE={other:?}; expected all, tactical, or urgent"
+        ),
+    }
+}
+
+fn leaf_gate_allows(board: &Board, mode: LeafGateMode) -> bool {
+    match mode {
+        LeafGateMode::All => true,
+        LeafGateMode::Tactical => has_tactical_leaf_signal(board),
+        LeafGateMode::Urgent => has_urgent_leaf_signal(board),
+    }
 }
 
 fn load_sidecar() -> Option<Sidecar> {
@@ -234,8 +314,8 @@ impl Sidecar {
     }
 }
 
-fn scaled_prediction(sidecar: &Sidecar, board: &Board, base_eval: i32) -> i32 {
-    (sidecar.predict(board, base_eval) * output_scale()).round() as i32
+fn scaled_prediction(sidecar: &Sidecar, board: &Board, base_eval: i32, output_scale: f32) -> i32 {
+    (sidecar.predict(board, base_eval) * output_scale).round() as i32
 }
 
 fn push_relation_features(board: &Board, features: &mut Vec<f32>) {
@@ -327,28 +407,59 @@ fn push_relation_features(board: &Board, features: &mut Vec<f32>) {
     }
 }
 
+fn has_tactical_leaf_signal(board: &Board) -> bool {
+    let side = board.side_to_move;
+    let opp = side.opponent();
+    for mv in board.candidate_moves() {
+        if !board.is_empty(mv) {
+            continue;
+        }
+        let attack = classify_move_fast(board, mv, side);
+        let block = classify_move_fast(board, mv, opp);
+        if is_forcing_kind(attack) || is_forcing_kind(block) {
+            return true;
+        }
+        if matches!(attack, ThreatKind::ClosedFour | ThreatKind::OpenThree)
+            && block == ThreatKind::None
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_urgent_leaf_signal(board: &Board) -> bool {
+    let side = board.side_to_move;
+    let opp = side.opponent();
+    for mv in board.candidate_moves() {
+        if !board.is_empty(mv) {
+            continue;
+        }
+        let attack = classify_move_fast(board, mv, side);
+        let block = classify_move_fast(board, mv, opp);
+        if matches!(
+            attack,
+            ThreatKind::Five
+                | ThreatKind::OpenFour
+                | ThreatKind::DoubleFour
+                | ThreatKind::FourThree
+        ) || matches!(
+            block,
+            ThreatKind::Five
+                | ThreatKind::OpenFour
+                | ThreatKind::DoubleFour
+                | ThreatKind::FourThree
+                | ThreatKind::DoubleThree
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
 #[inline]
 fn is_forcing_kind(kind: ThreatKind) -> bool {
     (FORCING_MASK >> (kind as u8)) & 1 != 0
-}
-
-fn output_scale() -> f32 {
-    static SCALE: OnceLock<f32> = OnceLock::new();
-    *SCALE.get_or_init(|| {
-        parse_env_f32("NORU_RELATION_LITE_SCALE")
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(32.0)
-    })
-}
-
-fn blend_weight() -> f32 {
-    static BLEND: OnceLock<f32> = OnceLock::new();
-    *BLEND.get_or_init(|| {
-        parse_env_f32("NORU_RELATION_LITE_BLEND")
-            .filter(|v| v.is_finite())
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0)
-    })
 }
 
 fn parse_env_f32(key: &str) -> Option<f32> {
@@ -361,6 +472,12 @@ fn parse_env_i32(key: &str) -> Option<i32> {
     std::env::var(key)
         .ok()
         .and_then(|raw| raw.trim().parse::<i32>().ok())
+}
+
+fn parse_env_usize(key: &str) -> Option<usize> {
+    std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
 }
 
 fn is_disabled_value(value: &str) -> bool {

@@ -104,7 +104,7 @@ pub fn pool_dense_input(line_pattern_ids: &[[u16; 4]]) -> [f32; PATTERN4_DENSE_D
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{to_idx, Board};
+    use crate::board::{Board, to_idx};
 
     #[test]
     fn embedding_table_has_expected_shape() {

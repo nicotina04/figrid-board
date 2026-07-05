@@ -3,8 +3,8 @@
 //! This is a small harness for the env-gated Relation Lite sidecar:
 //! run once normally, then run again with `NORU_RELATION_LITE_SIDECAR=...`.
 
-use figrid_board::vct::{classify_move_fast, ThreatKind};
-use figrid_board::{evaluate, to_idx, Board, Move, Stone, BOARD_SIZE, GOMOKU_NNUE_CONFIG};
+use figrid_board::vct::{ThreatKind, classify_move_fast};
+use figrid_board::{BOARD_SIZE, Board, GOMOKU_NNUE_CONFIG, Move, Stone, evaluate, to_idx};
 use noru::network::NnueWeights;
 use std::collections::BTreeMap;
 use std::env;
@@ -295,11 +295,7 @@ fn pearson(xs: &[f64], ys: &[f64]) -> f64 {
         den_y += dy * dy;
     }
     let den = (den_x * den_y).sqrt();
-    if den == 0.0 {
-        0.0
-    } else {
-        num / den
-    }
+    if den == 0.0 { 0.0 } else { num / den }
 }
 
 fn move_value(rec: &serde_json::Value, key: &str) -> Option<Move> {

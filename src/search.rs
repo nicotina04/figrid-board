@@ -4,7 +4,7 @@
 /// - ????????ㅻ깹???????????????袁ｋ쨨?? ???????ル???????븐뼐???????????筌뤾퍓愿?????????ъ몴??/// - ??????????뀀?????? ????????????????????遺얘턁????????????(4??????? ???????ル????)
 /// - ?????????+ ????????⑤벡????????????????????????紐껊짍
 /// - ??????????????
-use crate::board::{BOARD_SIZE, Board, GameResult, Move, NUM_CELLS, Stone};
+use crate::board::{BOARD_SIZE, Board, GameResult, Move, NUM_CELLS, Stone, to_rc};
 #[cfg(feature = "codebook-eval")]
 use crate::codebook_eval::{CodebookWeights, IncrementalCodebookEval};
 use crate::eval::IncrementalEval;
@@ -12,6 +12,9 @@ use crate::heuristic::{DIR, scan_line};
 use crate::transposition::{Bound, TranspositionTable, TtStats};
 use crate::vct::{THREAT_KIND_COUNT, ThreatKind, VctConfig, classify_move_fast, search_vct};
 use noru::network::NnueWeights;
+use serde_json::json;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -81,11 +84,69 @@ fn root_defensive_vct_budget(time_limit: Option<Duration>) -> Duration {
     }
 }
 
-fn allows_opponent_vct(board: &mut Board, mv: Move, cfg: &VctConfig) -> bool {
+fn root_defensive_vct_audit_path() -> Option<&'static str> {
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::var("NORU_ROOT_DEFENSIVE_VCT_VETO_AUDIT")
+            .ok()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+    })
+    .as_deref()
+}
+
+fn move_to_audit_json(mv: Move) -> serde_json::Value {
+    let (row, col) = to_rc(mv);
+    json!({"x": col, "y": row})
+}
+
+fn optional_move_to_audit_json(mv: Option<Move>) -> serde_json::Value {
+    mv.map(move_to_audit_json).unwrap_or(serde_json::Value::Null)
+}
+
+fn sequence_to_audit_json(seq: Option<&[Move]>) -> serde_json::Value {
+    seq.map(|moves| moves.iter().copied().map(move_to_audit_json).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into()
+}
+
+fn append_defensive_vct_veto_audit(
+    incumbent: Move,
+    replacement: Move,
+    candidate_count: usize,
+    checked_candidates: usize,
+    budget: Duration,
+    unsafe_sequence: Option<&[Move]>,
+) {
+    let Some(path) = root_defensive_vct_audit_path() else {
+        return;
+    };
+    let row = json!({
+        "event": "root_defensive_vct_veto",
+        "pid": std::process::id(),
+        "incumbent": move_to_audit_json(incumbent),
+        "replacement": move_to_audit_json(replacement),
+        "changed": incumbent != replacement,
+        "candidate_count": candidate_count,
+        "checked_candidates": checked_candidates,
+        "max_depth": ROOT_DEFENSIVE_VCT_DEPTH,
+        "budget_ms": budget.as_millis() as u64,
+        "incumbent_unsafe": unsafe_sequence.is_some(),
+        "unsafe_sequence_len": unsafe_sequence.map(|seq| seq.len()).unwrap_or(0),
+        "unsafe_first_move": optional_move_to_audit_json(unsafe_sequence.and_then(|seq| seq.first().copied())),
+        "unsafe_sequence": sequence_to_audit_json(unsafe_sequence),
+    });
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(file, "{row}");
+}
+
+fn opponent_vct_sequence(board: &mut Board, mv: Move, cfg: &VctConfig) -> Option<Vec<Move>> {
     board.make_move(mv);
-    let hit = search_vct(board, cfg).is_some();
+    let seq = search_vct(board, cfg);
     board.undo_move();
-    hit
+    seq
 }
 
 fn defensive_vct_veto_replacement(
@@ -101,11 +162,14 @@ fn defensive_vct_veto_replacement(
     if candidates.is_empty() {
         return Some(incumbent);
     }
+    let budget = root_defensive_vct_budget(time_limit);
     let cfg = VctConfig {
         max_depth: ROOT_DEFENSIVE_VCT_DEPTH,
-        time_budget: Some(root_defensive_vct_budget(time_limit)),
+        time_budget: Some(budget),
     };
-    if !allows_opponent_vct(board, incumbent, &cfg) {
+    let unsafe_sequence = opponent_vct_sequence(board, incumbent, &cfg);
+    if unsafe_sequence.is_none() {
+        append_defensive_vct_veto_audit(incumbent, incumbent, candidates.len(), 0, budget, None);
         return Some(incumbent);
     }
 
@@ -119,11 +183,29 @@ fn defensive_vct_veto_replacement(
             .then_with(|| b.is_forcing.cmp(&a.is_forcing))
             .then_with(|| a.mv.cmp(&b.mv))
     });
+    let mut checked_candidates = 0usize;
     for candidate in ranked {
-        if !allows_opponent_vct(board, candidate.mv, &cfg) {
+        checked_candidates += 1;
+        if opponent_vct_sequence(board, candidate.mv, &cfg).is_none() {
+            append_defensive_vct_veto_audit(
+                incumbent,
+                candidate.mv,
+                candidates.len(),
+                checked_candidates,
+                budget,
+                unsafe_sequence.as_deref(),
+            );
             return Some(candidate.mv);
         }
     }
+    append_defensive_vct_veto_audit(
+        incumbent,
+        incumbent,
+        candidates.len(),
+        checked_candidates,
+        budget,
+        unsafe_sequence.as_deref(),
+    );
     Some(incumbent)
 }
 

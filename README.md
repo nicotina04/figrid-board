@@ -51,7 +51,7 @@ If you build without `embed-weights`, set `FIGRID_WEIGHTS=path/to/weights.bin` o
 
 ```toml
 [dependencies]
-figrid-board = "0.6"
+figrid-board = "0.7"
 ```
 
 ```rust

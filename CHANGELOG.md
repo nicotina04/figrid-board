@@ -1,5 +1,24 @@
 # Changes
 
+## 0.7.3 (2026-07-05)
+* **Fix a low-frequency root VCT false-positive proof bug.** Versions
+  0.4.x through 0.7.2 could treat `FourThree` / `DoubleThree` as terminal
+  VCT proof shortcuts and reuse positive TT proofs too aggressively. RQ547
+  through RQ550 found the issue with recursive Rapfi-defender audits and
+  proof-tree logging. The fix keeps those threat kinds as forcing moves, but
+  only `Five`, `OpenFour`, and `DoubleFour` are terminal proof shortcuts;
+  VCT TT reuse now keeps negative `Fails` cutoffs but does not shortcut on
+  cached positive `AttackerWins` proofs.
+* **Strength attribution:** RQ550b isolated the VCT change against the same
+  build overlay and measured `+8.0 pp` vs. Pela over 100 paired games
+  (`30/100` vs. `22/100`, discordant `9:1`, sign-test `p=0.021`). The
+  earlier independent 200-game confirmation (`+9.0 pp`) is supporting
+  evidence, but it compared against an older multi-commit baseline and is not
+  the isolated strength claim.
+* **Clean-checkout build restored.** The RQ550b audit exposed that the current
+  checked-in tree depended on local support modules. Those support modules are
+  now committed so release builds no longer depend on an uncommitted overlay.
+
 ## 0.7.2 (2026-06-09)
 * **Honor the Standard rule (exact-five) in NNUE threat detection.** Threat
   scanning previously treated any line of five-or-more as a win, which is

@@ -22,6 +22,7 @@ struct Args {
     configs: Vec<SolveConfig>,
     max_positions: usize,
     include_proof: bool,
+    enable_jump_three: bool,
 }
 
 fn main() -> Result<(), String> {
@@ -58,7 +59,12 @@ fn main() -> Result<(), String> {
                 continue;
             }
         };
-        let solved = match solve_record(&rec, &args.configs, args.include_proof) {
+        let solved = match solve_record(
+            &rec,
+            &args.configs,
+            args.include_proof,
+            args.enable_jump_three,
+        ) {
             Ok(v) => v,
             Err(e) => {
                 skipped += 1;
@@ -85,6 +91,7 @@ fn main() -> Result<(), String> {
         "format": "rq547-vct-solve-summary-v1",
         "positions_jsonl": args.positions_jsonl,
         "configs": args.configs.iter().map(|c| json!({"depth": c.depth, "budget_ms": c.budget_ms})).collect::<Vec<_>>(),
+        "enable_jump_three": args.enable_jump_three,
         "records_scanned": records,
         "usable": usable,
         "skipped": skipped,
@@ -108,6 +115,7 @@ fn solve_record(
     rec: &Value,
     configs: &[SolveConfig],
     include_proof: bool,
+    enable_jump_three: bool,
 ) -> Result<Value, String> {
     let class = rec
         .get("class")
@@ -131,11 +139,11 @@ fn solve_record(
         ));
     }
 
-    let pre_vct = run_sweep(&board, configs, include_proof);
+    let pre_vct = run_sweep(&board, configs, include_proof, enable_jump_three);
     let actual_move = parse_move(rec.get("actual_move").ok_or("missing actual_move")?)?;
     let after_actual_opp_vct = if board.is_empty(actual_move) {
         board.make_move(actual_move);
-        let out = run_sweep(&board, configs, include_proof);
+        let out = run_sweep(&board, configs, include_proof, enable_jump_three);
         board.undo_move();
         out
     } else {
@@ -170,12 +178,18 @@ fn solve_record(
         "verdict_source": verdict_source,
         "verdict": verdict,
         "first_hit_relation": first_hit_relation,
+        "enable_jump_three": enable_jump_three,
         "pre_vct": pre_vct,
         "after_actual_opp_vct": after_actual_opp_vct,
     }))
 }
 
-fn run_sweep(board: &Board, configs: &[SolveConfig], include_proof: bool) -> Value {
+fn run_sweep(
+    board: &Board,
+    configs: &[SolveConfig],
+    include_proof: bool,
+    enable_jump_three: bool,
+) -> Value {
     let mut attempts = Vec::new();
     let mut first_hit: Option<Value> = None;
     for (idx, cfg) in configs.iter().enumerate() {
@@ -183,6 +197,7 @@ fn run_sweep(board: &Board, configs: &[SolveConfig], include_proof: bool) -> Val
         let cfg_obj = VctConfig {
             max_depth: cfg.depth,
             time_budget: Some(Duration::from_millis(cfg.budget_ms)),
+            enable_jump_three,
         };
         let should_capture_proof = include_proof && first_hit.is_none();
         let (seq, proof) = if should_capture_proof {
@@ -346,6 +361,7 @@ fn parse_args() -> Result<Args, String> {
     ];
     let mut max_positions = 0usize;
     let mut include_proof = false;
+    let mut enable_jump_three = env_flag("FIGRID_VCT_ENABLE_JUMP_THREE");
 
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -360,6 +376,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("invalid --max-positions: {e}"))?
             }
             "--include-proof" => include_proof = true,
+            "--enable-jump-three" => enable_jump_three = true,
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -374,6 +391,7 @@ fn parse_args() -> Result<Args, String> {
         configs,
         max_positions,
         include_proof,
+        enable_jump_three,
     })
 }
 
@@ -399,8 +417,15 @@ fn next_arg(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String,
     it.next().ok_or_else(|| format!("{flag} requires a value"))
 }
 
+fn env_flag(name: &str) -> bool {
+    matches!(
+        env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") | Ok("on") | Ok("ON")
+    )
+}
+
 fn print_help() {
     eprintln!(
-        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof]"
+        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three]"
     );
 }

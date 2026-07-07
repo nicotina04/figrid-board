@@ -276,6 +276,7 @@ pub enum WindowThreat {
     ClosedFour = 4,
     OpenFour = 5,
     Five = 6,
+    JumpThree = 7,
 }
 
 /// Classify the line threat for an 11-cell window where the anchor (index 5)
@@ -320,9 +321,33 @@ fn classify_window_anchor_mine_rule(
         (4, 1) => WindowThreat::ClosedFour,
         (3, 2) => WindowThreat::OpenThree,
         (3, 1) => WindowThreat::ClosedThree,
+        _ if window_has_jump_three(w) => WindowThreat::JumpThree,
         (2, 2) => WindowThreat::OpenTwo,
         _ => WindowThreat::None,
     }
+}
+
+fn window_has_jump_three(w: &LineWindow) -> bool {
+    // Open broken-three shapes produced by the anchor move:
+    // .X.XX. and .XX.X.  The segment must include the anchor (index 5), so
+    // pre-existing broken threes elsewhere in the 11-cell window do not count.
+    const PATTERNS: [[u8; 6]; 2] = [[0, 1, 0, 1, 1, 0], [0, 1, 1, 0, 1, 0]];
+    for start in 0..=5 {
+        if !(start <= 5 && 5 < start + 6) {
+            continue;
+        }
+        let mut matched = false;
+        for pat in PATTERNS {
+            matched = (0..6).all(|i| w[start + i] == pat[i]);
+            if matched {
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
 }
 
 /// O(1) lookup of the `LineThreat` produced when `mine` plays at an empty

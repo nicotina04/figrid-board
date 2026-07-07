@@ -4919,6 +4919,7 @@ fn threat_kind_label(kind: ThreatKind) -> &'static str {
         ThreatKind::DoubleFour => "DoubleFour",
         ThreatKind::FourThree => "FourThree",
         ThreatKind::DoubleThree => "DoubleThree",
+        ThreatKind::JumpThree => "JumpThree",
     }
 }
 

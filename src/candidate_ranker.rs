@@ -37,7 +37,8 @@ const TIER_BLOCK_OPEN_THREE: i32 = 900_000;
 const TIER_SCALE: f32 = TIER_WIN as f32;
 const EVAL_SCALE: f32 = 200.0;
 const SCORE_SCALE: f32 = 100_000.0;
-const FORCING_MASK: u8 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6);
+const FORCING_MASK: u16 =
+    (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 8);
 
 const MOVE_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
     0,
@@ -48,6 +49,7 @@ const MOVE_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
     TIER_DOUBLE_FOUR,
     TIER_DOUBLE_FOUR,
     TIER_DOUBLE_THREE,
+    TIER_OPEN_THREE,
 ];
 
 const MOVE_BLOCK_TABLE: [i32; THREAT_KIND_COUNT] = [
@@ -59,6 +61,7 @@ const MOVE_BLOCK_TABLE: [i32; THREAT_KIND_COUNT] = [
     TIER_BLOCK_DOUBLE_FOUR,
     TIER_BLOCK_DOUBLE_FOUR,
     TIER_BLOCK_DOUBLE_THREE,
+    TIER_BLOCK_OPEN_THREE,
 ];
 
 #[derive(Clone)]
@@ -1241,7 +1244,7 @@ fn neighbor_counts(board: &Board, mv: Move, radius: i32) -> (usize, usize) {
 }
 
 fn is_forcing_kind(kind: ThreatKind) -> bool {
-    (FORCING_MASK >> (kind as u8)) & 1 != 0
+    (FORCING_MASK >> (kind as u16)) & 1 != 0
 }
 
 fn is_weak_attack(attack: ThreatKind, block: ThreatKind) -> bool {
@@ -1258,6 +1261,7 @@ fn threat_kinds() -> [ThreatKind; THREAT_KIND_COUNT] {
         ThreatKind::DoubleFour,
         ThreatKind::FourThree,
         ThreatKind::DoubleThree,
+        ThreatKind::JumpThree,
     ]
 }
 

@@ -34,6 +34,7 @@ const MOVE_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
     TIER_DOUBLE_FOUR,
     TIER_DOUBLE_FOUR,
     TIER_DOUBLE_THREE,
+    TIER_OPEN_THREE,
 ];
 
 const MOVE_BLOCK_TABLE: [i32; THREAT_KIND_COUNT] = [
@@ -45,9 +46,11 @@ const MOVE_BLOCK_TABLE: [i32; THREAT_KIND_COUNT] = [
     TIER_BLOCK_DOUBLE_FOUR,
     TIER_BLOCK_DOUBLE_FOUR,
     TIER_BLOCK_DOUBLE_THREE,
+    TIER_BLOCK_OPEN_THREE,
 ];
 
-const FORCING_MASK: u8 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6);
+const FORCING_MASK: u16 =
+    (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 8);
 
 #[derive(Clone)]
 struct Sidecar {
@@ -459,7 +462,7 @@ fn has_urgent_leaf_signal(board: &Board) -> bool {
 
 #[inline]
 fn is_forcing_kind(kind: ThreatKind) -> bool {
-    (FORCING_MASK >> (kind as u8)) & 1 != 0
+    (FORCING_MASK >> (kind as u16)) & 1 != 0
 }
 
 fn parse_env_f32(key: &str) -> Option<f32> {

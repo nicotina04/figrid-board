@@ -21,8 +21,9 @@
 use crate::board::{BOARD_SIZE, BitBoard, Board, Move, NUM_CELLS, RuleSet, Stone};
 use crate::heuristic::{DIR, scan_line};
 use crate::pattern_table::{
-    PATTERN_RARE_ID, WindowThreat, pattern_threat_after_my_play, pattern_threat_after_my_play_caro,
-    pattern_threat_after_my_play_exact5, read_window, swap_mapped_id,
+    LineWindow, PATTERN_RARE_ID, WindowThreat, pattern_threat_after_my_play,
+    pattern_threat_after_my_play_caro, pattern_threat_after_my_play_exact5, read_window,
+    swap_mapped_id,
 };
 use noru::trainer::SimpleRng;
 use serde_json::{Value, json};
@@ -126,10 +127,11 @@ pub enum ThreatKind {
     DoubleFour = 5,
     FourThree = 6,
     DoubleThree = 7,
+    JumpThree = 8,
 }
 
 /// `ThreatKind` discriminant의 수 — 테이블 크기 상수.
-pub const THREAT_KIND_COUNT: usize = 8;
+pub const THREAT_KIND_COUNT: usize = 9;
 
 impl ThreatKind {
     /// 이 Threat이 형성되면 상대가 1수로 막을 수 없는지.
@@ -146,7 +148,10 @@ impl ThreatKind {
 
     /// 재귀 탐색해볼 가치가 있는 Forcing move인가 (방어 가능하지만 강제).
     pub fn is_forcing(self) -> bool {
-        matches!(self, ThreatKind::ClosedFour | ThreatKind::OpenThree) || self.is_winning()
+        matches!(
+            self,
+            ThreatKind::ClosedFour | ThreatKind::OpenThree | ThreatKind::JumpThree
+        ) || self.is_winning()
     }
 }
 
@@ -180,6 +185,17 @@ pub fn classify_move_rules(
     side: Stone,
     rule_set: RuleSet,
 ) -> ThreatKind {
+    classify_move_rules_with_jump_three(my_bb, opp_bb, mv, side, rule_set, false)
+}
+
+fn classify_move_rules_with_jump_three(
+    my_bb: &BitBoard,
+    opp_bb: &BitBoard,
+    mv: Move,
+    side: Stone,
+    rule_set: RuleSet,
+    enable_jump_three: bool,
+) -> ThreatKind {
     let row = (mv / BOARD_SIZE) as i32;
     let col = (mv % BOARD_SIZE) as i32;
 
@@ -191,6 +207,7 @@ pub fn classify_move_rules(
     let mut open_threes = 0u32;
     let mut closed_fours = 0u32;
     let mut fives = 0u32;
+    let mut jump_threes = 0u32;
 
     for &(dr, dc) in &DIR {
         let info = scan_line(&my_tmp, opp_bb, row, col, dr, dc);
@@ -207,6 +224,12 @@ pub fn classify_move_rules(
             }
             LineThreat::OpenThree => open_threes += 1,
             _ => {}
+        }
+        if enable_jump_three {
+            let w = read_window(&my_tmp, opp_bb, row, col, dr, dc);
+            if window_has_jump_three(&w) {
+                jump_threes += 1;
+            }
         }
     }
 
@@ -231,7 +254,30 @@ pub fn classify_move_rules(
     if open_threes >= 1 {
         return ThreatKind::OpenThree;
     }
+    if enable_jump_three && jump_threes >= 1 {
+        return ThreatKind::JumpThree;
+    }
     ThreatKind::None
+}
+
+fn window_has_jump_three(w: &LineWindow) -> bool {
+    const PATTERNS: [[u8; 6]; 2] = [[0, 1, 0, 1, 1, 0], [0, 1, 1, 0, 1, 0]];
+    for start in 0..=5 {
+        if !(start <= 5 && 5 < start + 6) {
+            continue;
+        }
+        let mut matched = false;
+        for pat in PATTERNS {
+            matched = (0..6).all(|i| w[start + i] == pat[i]);
+            if matched {
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
 }
 
 /// Pattern4 fast path. Uses `board.line_pattern_ids` (incrementally
@@ -250,6 +296,15 @@ pub fn classify_move_rules(
 /// per-node cost, so the actual nodes-per-second uplift is measured rather
 /// than assumed.
 pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
+    classify_move_fast_with_jump_three(board, mv, side, false)
+}
+
+fn classify_move_fast_with_jump_three(
+    board: &Board,
+    mv: Move,
+    side: Stone,
+    enable_jump_three: bool,
+) -> ThreatKind {
     let row = (mv / BOARD_SIZE) as i32;
     let col = (mv % BOARD_SIZE) as i32;
     let side_is_black = matches!(side, Stone::Black);
@@ -265,6 +320,7 @@ pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
     let mut closed_fours = 0u32;
     let mut open_threes = 0u32;
     let mut fives = 0u32;
+    let mut jump_threes = 0u32;
 
     for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
         // line_pattern_ids stores patterns from the black-relative frame.
@@ -318,6 +374,7 @@ pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
                     (4, 1) => WindowThreat::ClosedFour,
                     (3, 2) => WindowThreat::OpenThree,
                     (3, 1) => WindowThreat::ClosedThree,
+                    _ if enable_jump_three && window_has_jump_three(&w) => WindowThreat::JumpThree,
                     (2, 2) => WindowThreat::OpenTwo,
                     _ => WindowThreat::None,
                 }
@@ -344,6 +401,7 @@ pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
                 fours += 1;
             }
             WindowThreat::OpenThree => open_threes += 1,
+            WindowThreat::JumpThree if enable_jump_three => jump_threes += 1,
             _ => {}
         }
         // dr / dc are only consumed inside the RARE fallback's `read_window`;
@@ -372,6 +430,9 @@ pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
     if open_threes >= 1 {
         return ThreatKind::OpenThree;
     }
+    if enable_jump_three && jump_threes >= 1 {
+        return ThreatKind::JumpThree;
+    }
     ThreatKind::None
 }
 
@@ -381,6 +442,8 @@ pub struct VctConfig {
     pub max_depth: u32,
     /// 전체 시간 예산. 초과 시 None 반환.
     pub time_budget: Option<Duration>,
+    /// RQ560 W1 vocabulary gate. Off preserves the pre-JumpThree VCT proof path.
+    pub enable_jump_three: bool,
 }
 
 impl Default for VctConfig {
@@ -388,6 +451,7 @@ impl Default for VctConfig {
         Self {
             max_depth: 16,
             time_budget: Some(Duration::from_millis(500)),
+            enable_jump_three: false,
         }
     }
 }
@@ -406,6 +470,7 @@ pub fn search_vct(board: &mut Board, cfg: &VctConfig) -> Option<Vec<Move>> {
         attacker,
         cfg.max_depth,
         deadline,
+        cfg.enable_jump_three,
         &mut sequence,
         &mut tt,
     ) {
@@ -426,6 +491,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         attacker,
         cfg.max_depth,
         deadline,
+        cfg.enable_jump_three,
         &mut sequence,
         &mut tt,
         &mut audit,
@@ -475,6 +541,7 @@ fn vct_or(
     attacker: Stone,
     depth: u32,
     deadline: Option<Instant>,
+    enable_jump_three: bool,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
 ) -> bool {
@@ -502,7 +569,7 @@ fn vct_or(
     let rule_set = board.effective_rule_set();
     let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
 
-    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set);
+    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, enable_jump_three);
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -534,7 +601,15 @@ fn vct_or(
         }
         sequence.push(mv);
         board.make_move(mv);
-        let won = vct_and(board, attacker, depth - 1, deadline, sequence, tt);
+        let won = vct_and(
+            board,
+            attacker,
+            depth - 1,
+            deadline,
+            enable_jump_three,
+            sequence,
+            tt,
+        );
         board.undo_move();
         if won {
             tt.insert(
@@ -569,6 +644,7 @@ fn vct_and(
     attacker: Stone,
     depth: u32,
     deadline: Option<Instant>,
+    enable_jump_three: bool,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
 ) -> bool {
@@ -592,7 +668,7 @@ fn vct_and(
     //  승리 오판. 수비 측이 **자기 winning threat**을 만들 수 있는 수는 반드시
     //  포함해야 함.)
     let defenses = match board.last_move {
-        Some(attack_mv) => find_defenses_with_counters(board, attack_mv),
+        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, enable_jump_three),
         None => board.candidate_moves(),
     };
     if defenses.is_empty() {
@@ -606,7 +682,15 @@ fn vct_and(
         sequence.push(mv);
 
         board.make_move(mv);
-        let attacker_still_wins = vct_or(board, attacker, depth - 1, deadline, sequence, tt);
+        let attacker_still_wins = vct_or(
+            board,
+            attacker,
+            depth - 1,
+            deadline,
+            enable_jump_three,
+            sequence,
+            tt,
+        );
         board.undo_move();
 
         if !attacker_still_wins {
@@ -624,6 +708,7 @@ fn vct_or_audit(
     attacker: Stone,
     depth: u32,
     deadline: Option<Instant>,
+    enable_jump_three: bool,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     audit: &mut VctAuditLog,
@@ -659,7 +744,7 @@ fn vct_or_audit(
     let rule_set = board.effective_rule_set();
     let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
 
-    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set);
+    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, enable_jump_three);
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -722,7 +807,16 @@ fn vct_or_audit(
         }
         sequence.push(mv);
         board.make_move(mv);
-        let won = vct_and_audit(board, attacker, depth - 1, deadline, sequence, tt, audit);
+        let won = vct_and_audit(
+            board,
+            attacker,
+            depth - 1,
+            deadline,
+            enable_jump_three,
+            sequence,
+            tt,
+            audit,
+        );
         board.undo_move();
         if won {
             tt.insert(
@@ -751,6 +845,7 @@ fn vct_and_audit(
     attacker: Stone,
     depth: u32,
     deadline: Option<Instant>,
+    enable_jump_three: bool,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     audit: &mut VctAuditLog,
@@ -786,7 +881,7 @@ fn vct_and_audit(
     }
 
     let defenses = match board.last_move {
-        Some(attack_mv) => find_defenses_with_counters(board, attack_mv),
+        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, enable_jump_three),
         None => board.candidate_moves(),
     };
     if defenses.is_empty() {
@@ -813,8 +908,16 @@ fn vct_and_audit(
 
         let tt_before = audit.tt_hit_count;
         board.make_move(mv);
-        let attacker_still_wins =
-            vct_or_audit(board, attacker, depth - 1, deadline, sequence, tt, audit);
+        let attacker_still_wins = vct_or_audit(
+            board,
+            attacker,
+            depth - 1,
+            deadline,
+            enable_jump_three,
+            sequence,
+            tt,
+            audit,
+        );
         board.undo_move();
         let tt_after = audit.tt_hit_count;
         let continuation = sequence[checkpoint..]
@@ -866,6 +969,7 @@ fn gather_attack_moves(
     opp: &BitBoard,
     side: Stone,
     rule_set: RuleSet,
+    enable_jump_three: bool,
 ) -> Vec<(Move, ThreatKind)> {
     let mut out = Vec::new();
     let cells = my.count_ones() + opp.count_ones();
@@ -877,7 +981,8 @@ fn gather_attack_moves(
         if my.get(idx) || opp.get(idx) {
             continue;
         }
-        let kind = classify_move_rules(my, opp, idx, side, rule_set);
+        let kind =
+            classify_move_rules_with_jump_three(my, opp, idx, side, rule_set, enable_jump_three);
         if kind.is_forcing() {
             out.push((idx, kind));
         }
@@ -896,6 +1001,7 @@ fn threat_priority(k: ThreatKind) -> i32 {
         ThreatKind::DoubleThree => 4,
         ThreatKind::ClosedFour => 5,
         ThreatKind::OpenThree => 6,
+        ThreatKind::JumpThree => 7,
         ThreatKind::None => 100,
     }
 }
@@ -922,8 +1028,12 @@ fn in_board(r: i32, c: i32) -> bool {
 /// find_defenses만 쓰면 원거리 카운터 공격이 누락돼 AND가 false positive를
 /// 내는 치명적 문제가 있어, 이 래퍼를 통해 "수비 측 관점에서 winning threat을
 /// 만드는 모든 수"를 추가 포함한다. 비용 추가: 225 셀 classify_move 1회.
-fn find_defenses_with_counters(board: &Board, attack_move: Move) -> Vec<Move> {
-    let mut defenses = find_defenses(board, attack_move);
+fn find_defenses_with_counters(
+    board: &Board,
+    attack_move: Move,
+    enable_jump_three: bool,
+) -> Vec<Move> {
+    let mut defenses = find_defenses(board, attack_move, enable_jump_three);
     let mut seen = BitBoard::EMPTY;
     for &d in &defenses {
         seen.set(d);
@@ -935,7 +1045,14 @@ fn find_defenses_with_counters(board: &Board, attack_move: Move) -> Vec<Move> {
         if def_my.get(idx) || def_opp.get(idx) || seen.get(idx) {
             continue;
         }
-        let kind = classify_move_rules(def_my, def_opp, idx, board.side_to_move, rule_set);
+        let kind = classify_move_rules_with_jump_three(
+            def_my,
+            def_opp,
+            idx,
+            board.side_to_move,
+            rule_set,
+            enable_jump_three,
+        );
         // Winning 위협뿐 아니라 Forcing(ClosedFour/OpenThree) 반격도 포함해야
         // 원거리 카운터 공격을 AND가 놓치지 않음.
         if kind.is_forcing() {
@@ -952,7 +1069,7 @@ fn find_defenses_with_counters(board: &Board, attack_move: Move) -> Vec<Move> {
 /// 위협을 막을 수 있는 모든 수를 포함하도록 의도된 conservative 범위.
 /// 기존 candidate_moves(40~60개) 대비 보통 5~20개로 축소되어 AND 노드 브랜칭
 /// 팩터 대폭 감소.
-fn find_defenses(board: &Board, attack_move: Move) -> Vec<Move> {
+fn find_defenses(board: &Board, attack_move: Move, enable_jump_three: bool) -> Vec<Move> {
     let row = (attack_move / BOARD_SIZE) as i32;
     let col = (attack_move % BOARD_SIZE) as i32;
     let mut seen = BitBoard::EMPTY;
@@ -994,7 +1111,52 @@ fn find_defenses(board: &Board, attack_move: Move) -> Vec<Move> {
         }
     }
 
+    if enable_jump_three {
+        append_jump_three_defenses(board, attack_move, &mut seen, &mut out);
+    }
+
     out
+}
+
+fn append_jump_three_defenses(
+    board: &Board,
+    attack_move: Move,
+    seen: &mut BitBoard,
+    out: &mut Vec<Move>,
+) {
+    let row = (attack_move / BOARD_SIZE) as i32;
+    let col = (attack_move % BOARD_SIZE) as i32;
+    let attacker = board.side_to_move.opponent();
+    let (my, opp) = bb_pair(board, attacker);
+
+    for &(dr, dc) in &DIR {
+        let w = read_window(my, opp, row, col, dr, dc);
+        for start in 0..=5 {
+            if !(start <= 5 && 5 < start + 6) {
+                continue;
+            }
+            let s = &w[start..start + 6];
+            if s != [0, 1, 0, 1, 1, 0] && s != [0, 1, 1, 0, 1, 0] {
+                continue;
+            }
+            for i in 0..6 {
+                if s[i] != 0 {
+                    continue;
+                }
+                let off = (start + i) as i32 - 5;
+                let nr = row + dr * off;
+                let nc = col + dc * off;
+                if !in_board(nr, nc) {
+                    continue;
+                }
+                let idx = (nr as usize) * BOARD_SIZE + nc as usize;
+                if board.is_empty(idx) && !seen.get(idx) {
+                    seen.set(idx);
+                    out.push(idx);
+                }
+            }
+        }
+    }
 }
 
 fn bb_pair(board: &Board, side: Stone) -> (&BitBoard, &BitBoard) {
@@ -1052,6 +1214,7 @@ fn threat_json(kind: ThreatKind) -> &'static str {
         ThreatKind::DoubleFour => "DoubleFour",
         ThreatKind::FourThree => "FourThree",
         ThreatKind::DoubleThree => "DoubleThree",
+        ThreatKind::JumpThree => "JumpThree",
     }
 }
 
@@ -1152,6 +1315,204 @@ mod tests {
         // (7,3) 또는 (7,7)에 두면 열린 4.
         let k = classify_move(&board.black, &board.white, to_idx(7, 7), false);
         assert_eq!(k, ThreatKind::OpenFour);
+        assert_ne!(
+            k,
+            ThreatKind::Five,
+            "open four must not be classified as Five"
+        );
+    }
+
+    #[test]
+    fn test_classify_move_jump_three() {
+        let mut board = Board::new();
+        // Black has .X.XX. after playing (7,3):
+        // empty (7,2), X (7,3), gap (7,4), X (7,5), X (7,6), empty (7,7).
+        board.make_move(to_idx(7, 5));
+        board.make_move(to_idx(0, 0));
+        board.make_move(to_idx(7, 6));
+        board.make_move(to_idx(0, 14));
+
+        let mv = to_idx(7, 3);
+        let slow = classify_move_rules_with_jump_three(
+            &board.black,
+            &board.white,
+            mv,
+            Stone::Black,
+            board.effective_rule_set(),
+            true,
+        );
+        let fast = classify_move_fast_with_jump_three(&board, mv, Stone::Black, true);
+        assert_eq!(slow, ThreatKind::JumpThree);
+        assert_eq!(fast, ThreatKind::JumpThree);
+        assert_eq!(
+            classify_move(&board.black, &board.white, mv, false),
+            ThreatKind::None
+        );
+        assert_eq!(
+            classify_move_fast(&board, mv, Stone::Black),
+            ThreatKind::None
+        );
+        assert!(ThreatKind::JumpThree.is_forcing());
+        assert!(!ThreatKind::JumpThree.is_winning());
+        assert!(!is_vct_terminal_win(ThreatKind::JumpThree));
+    }
+
+    #[test]
+    fn rq560_jump_three_flag_on_off_preserves_legacy_classification() {
+        let mut left_gap = Board::new();
+        left_gap.make_move(to_idx(7, 5));
+        left_gap.make_move(to_idx(0, 0));
+        left_gap.make_move(to_idx(7, 6));
+        left_gap.make_move(to_idx(0, 14));
+        let left_mv = to_idx(7, 3);
+        assert_eq!(
+            classify_move_rules_with_jump_three(
+                &left_gap.black,
+                &left_gap.white,
+                left_mv,
+                Stone::Black,
+                left_gap.effective_rule_set(),
+                false,
+            ),
+            ThreatKind::None
+        );
+        assert_eq!(
+            classify_move_rules_with_jump_three(
+                &left_gap.black,
+                &left_gap.white,
+                left_mv,
+                Stone::Black,
+                left_gap.effective_rule_set(),
+                true,
+            ),
+            ThreatKind::JumpThree
+        );
+        assert_eq!(
+            classify_move_fast_with_jump_three(&left_gap, left_mv, Stone::Black, false),
+            ThreatKind::None
+        );
+        assert_eq!(
+            classify_move_fast_with_jump_three(&left_gap, left_mv, Stone::Black, true),
+            ThreatKind::JumpThree
+        );
+
+        let mut right_gap = Board::new();
+        right_gap.make_move(to_idx(7, 3));
+        right_gap.make_move(to_idx(0, 0));
+        right_gap.make_move(to_idx(7, 4));
+        right_gap.make_move(to_idx(0, 14));
+        let right_mv = to_idx(7, 6);
+        assert_eq!(
+            classify_move_rules_with_jump_three(
+                &right_gap.black,
+                &right_gap.white,
+                right_mv,
+                Stone::Black,
+                right_gap.effective_rule_set(),
+                false,
+            ),
+            ThreatKind::None
+        );
+        assert_eq!(
+            classify_move_rules_with_jump_three(
+                &right_gap.black,
+                &right_gap.white,
+                right_mv,
+                Stone::Black,
+                right_gap.effective_rule_set(),
+                true,
+            ),
+            ThreatKind::JumpThree
+        );
+    }
+
+    #[test]
+    fn test_jump_three_is_attack_candidate() {
+        let mut board = Board::new();
+        board.make_move(to_idx(7, 5));
+        board.make_move(to_idx(0, 0));
+        board.make_move(to_idx(7, 6));
+        board.make_move(to_idx(0, 14));
+
+        let moves = gather_attack_moves(
+            &board.black,
+            &board.white,
+            Stone::Black,
+            board.effective_rule_set(),
+            true,
+        );
+        assert!(
+            moves
+                .iter()
+                .any(|&(mv, kind)| mv == to_idx(7, 3) && kind == ThreatKind::JumpThree),
+            "jump-three move must enter attack candidates: {:?}",
+            moves
+        );
+    }
+
+    #[test]
+    fn rq560_g90_jump_three_attack_candidate() {
+        let mut board = Board::new();
+        for mv in [
+            to_idx(7, 7),
+            to_idx(8, 7),
+            to_idx(5, 8),
+            to_idx(10, 7),
+            to_idx(5, 9),
+            to_idx(6, 8),
+            to_idx(5, 7),
+            to_idx(5, 6),
+            to_idx(4, 7),
+            to_idx(6, 7),
+            to_idx(6, 9),
+            to_idx(7, 10),
+        ] {
+            board.make_move(mv);
+        }
+
+        let rapfi = to_idx(3, 9);
+        assert_eq!(
+            classify_move_fast_with_jump_three(&board, rapfi, Stone::Black, true),
+            ThreatKind::JumpThree
+        );
+        assert_eq!(
+            classify_move_fast(&board, rapfi, Stone::Black),
+            ThreatKind::None
+        );
+        let moves = gather_attack_moves(
+            &board.black,
+            &board.white,
+            Stone::Black,
+            board.effective_rule_set(),
+            true,
+        );
+        assert!(
+            moves
+                .iter()
+                .any(|&(mv, kind)| mv == rapfi && kind == ThreatKind::JumpThree),
+            "g90 rapfi move (9,3) must be a JumpThree attack candidate: {:?}",
+            moves
+        );
+    }
+
+    #[test]
+    fn test_jump_three_defenses_include_gap_and_completion_cells() {
+        let mut board = Board::new();
+        board.make_move(to_idx(7, 5));
+        board.make_move(to_idx(0, 0));
+        board.make_move(to_idx(7, 6));
+        board.make_move(to_idx(0, 14));
+        board.make_move(to_idx(7, 3));
+
+        let defenses = find_defenses(&board, to_idx(7, 3), true);
+        for expected in [to_idx(7, 2), to_idx(7, 4), to_idx(7, 7)] {
+            assert!(
+                defenses.contains(&expected),
+                "jump-three defense set must include {:?}; got {:?}",
+                expected,
+                defenses
+            );
+        }
     }
 
     /// Standard 규칙(exact5)의 핵심: 6목(overline)을 만드는 수는 승리가 아니다.
@@ -1317,6 +1678,7 @@ mod tests {
         let cfg = VctConfig {
             max_depth: 8,
             time_budget: Some(Duration::from_millis(100)),
+            enable_jump_three: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -1364,6 +1726,7 @@ mod tests {
         let cfg = VctConfig {
             max_depth: 8,
             time_budget: Some(Duration::from_millis(300)),
+            enable_jump_three: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -1382,6 +1745,7 @@ mod tests {
         let cfg = VctConfig {
             max_depth: 8,
             time_budget: Some(Duration::from_millis(500)),
+            enable_jump_three: false,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

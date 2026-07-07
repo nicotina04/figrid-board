@@ -176,6 +176,7 @@ fn defensive_vct_veto_replacement(
     let cfg = VctConfig {
         max_depth: ROOT_DEFENSIVE_VCT_DEPTH,
         time_budget: Some(budget),
+        enable_jump_three: false,
     };
     let unsafe_sequence = opponent_vct_sequence(board, incumbent, &cfg);
     if unsafe_sequence.is_none() {
@@ -1010,6 +1011,7 @@ impl Searcher {
         let vct_cfg = VctConfig {
             max_depth: ROOT_VCT_DEPTH,
             time_budget: Some(vct_budget),
+            enable_jump_three: false,
         };
         if let Some(seq) = search_vct(board, &vct_cfg) {
             if let Some(&first) = seq.first() {
@@ -1256,6 +1258,7 @@ impl Searcher {
             let vct_cfg = VctConfig {
                 max_depth: ROOT_VCT_DEPTH,
                 time_budget: Some(vct_budget),
+                enable_jump_three: false,
             };
             if let Some(seq) = search_vct(board, &vct_cfg) {
                 if let Some(&first) = seq.first() {
@@ -1553,6 +1556,7 @@ impl Searcher {
             let vct_cfg = VctConfig {
                 max_depth: ROOT_VCT_DEPTH,
                 time_budget: Some(vct_budget),
+                enable_jump_three: false,
             };
             if let Some(seq) = search_vct(board, &vct_cfg) {
                 if let Some(&first) = seq.first() {
@@ -2981,6 +2985,7 @@ const MOVE_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
     TIER_DOUBLE_FOUR,  // DoubleFour
     TIER_DOUBLE_FOUR,  // FourThree
     TIER_DOUBLE_THREE, // DoubleThree
+    TIER_OPEN_THREE,   // JumpThree
 ];
 
 /// Move ordering: ??? ??????????뀀???????븐뼐??????⑤슢?????壤굿??띾????tier ?????
@@ -2993,12 +2998,14 @@ const MOVE_BLOCK_TABLE: [i32; THREAT_KIND_COUNT] = [
     TIER_BLOCK_DOUBLE_FOUR,  // DoubleFour
     TIER_BLOCK_DOUBLE_FOUR,  // FourThree
     TIER_BLOCK_DOUBLE_THREE, // DoubleThree
+    TIER_BLOCK_OPEN_THREE,   // JumpThree
 ];
 
 /// `is_forcing` ???????癲ル슢?ο㎖?????????⑤벡???? bit i set ??ThreatKind discriminant i???????ル??? forcing.
 /// ??????????뀀???嶺?forcing ???遺얘턁?????????? ClosedFour, OpenThree, Five, OpenFour, DoubleFour, FourThree.
 /// (DoubleThree?????耀붾굝??????????????????????關?쒎첎?????蹂?????.)
-const FORCING_MASK: u8 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6);
+const FORCING_MASK: u16 =
+    (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 8);
 
 /// qsearch attack-tier ?????(????????????뀀???. Five????????⑤벡瑜?????????븐뼐???????????癲ル슢??룸퀬苑???????獄쏅챶留덌┼???????????븐뼐????傭?끆?????Β?ｊ콞?轅붽틓?????⑸걦???cutoff).
 const QS_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
@@ -3010,11 +3017,12 @@ const QS_ATTACK_TABLE: [i32; THREAT_KIND_COUNT] = [
     600_000, // DoubleFour
     600_000, // FourThree
     0,       // DoubleThree
+    0,       // JumpThree
 ];
 
 #[inline]
 fn is_forcing_kind(kind: ThreatKind) -> bool {
-    (FORCING_MASK >> (kind as u8)) & 1 != 0
+    (FORCING_MASK >> (kind as u16)) & 1 != 0
 }
 
 fn defensive_open4_risk_after_move(board: &Board, mv: Move, depth: u32) -> DefensiveOpen4Risk {
@@ -3178,6 +3186,7 @@ fn threat_priority(kind: ThreatKind, defending: bool) -> i32 {
         ThreatKind::DoubleThree => 200_000,
         ThreatKind::ClosedFour => 100_000,
         ThreatKind::OpenThree => 30_000,
+        ThreatKind::JumpThree => 30_000,
         ThreatKind::None => 0,
     };
     // ????????????????????????????????? ????(??? ?????關?쒎첎?嫄??怨몄겮???????? ??? ????븐뼐???????????癲됱빖???嶺??????????????).

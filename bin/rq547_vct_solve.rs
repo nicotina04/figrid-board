@@ -1,5 +1,6 @@
 use figrid_board::{
-    BOARD_SIZE, Board, Move, Stone, VctConfig, search_vct, search_vct_audit_json, to_idx, to_rc,
+    BOARD_SIZE, Board, Move, Stone, VctConfig, search_vct_audit_json, search_vct_with_stats,
+    to_idx, to_rc,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -7,7 +8,7 @@ use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy)]
 struct SolveConfig {
@@ -23,6 +24,18 @@ struct Args {
     max_positions: usize,
     include_proof: bool,
     enable_jump_three: bool,
+    enable_jump_three_attack_defense: bool,
+    enable_jump_three_counter: bool,
+}
+
+impl Args {
+    fn jump_three_attack_defense(&self) -> bool {
+        self.enable_jump_three || self.enable_jump_three_attack_defense
+    }
+
+    fn jump_three_counter(&self) -> bool {
+        self.enable_jump_three || self.enable_jump_three_counter
+    }
 }
 
 fn main() -> Result<(), String> {
@@ -64,6 +77,8 @@ fn main() -> Result<(), String> {
             &args.configs,
             args.include_proof,
             args.enable_jump_three,
+            args.enable_jump_three_attack_defense,
+            args.enable_jump_three_counter,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -92,6 +107,8 @@ fn main() -> Result<(), String> {
         "positions_jsonl": args.positions_jsonl,
         "configs": args.configs.iter().map(|c| json!({"depth": c.depth, "budget_ms": c.budget_ms})).collect::<Vec<_>>(),
         "enable_jump_three": args.enable_jump_three,
+        "jump_three_attack_defense": args.jump_three_attack_defense(),
+        "jump_three_counter": args.jump_three_counter(),
         "records_scanned": records,
         "usable": usable,
         "skipped": skipped,
@@ -116,6 +133,8 @@ fn solve_record(
     configs: &[SolveConfig],
     include_proof: bool,
     enable_jump_three: bool,
+    enable_jump_three_attack_defense: bool,
+    enable_jump_three_counter: bool,
 ) -> Result<Value, String> {
     let class = rec
         .get("class")
@@ -139,11 +158,25 @@ fn solve_record(
         ));
     }
 
-    let pre_vct = run_sweep(&board, configs, include_proof, enable_jump_three);
+    let pre_vct = run_sweep(
+        &board,
+        configs,
+        include_proof,
+        enable_jump_three,
+        enable_jump_three_attack_defense,
+        enable_jump_three_counter,
+    );
     let actual_move = parse_move(rec.get("actual_move").ok_or("missing actual_move")?)?;
     let after_actual_opp_vct = if board.is_empty(actual_move) {
         board.make_move(actual_move);
-        let out = run_sweep(&board, configs, include_proof, enable_jump_three);
+        let out = run_sweep(
+            &board,
+            configs,
+            include_proof,
+            enable_jump_three,
+            enable_jump_three_attack_defense,
+            enable_jump_three_counter,
+        );
         board.undo_move();
         out
     } else {
@@ -179,6 +212,8 @@ fn solve_record(
         "verdict": verdict,
         "first_hit_relation": first_hit_relation,
         "enable_jump_three": enable_jump_three,
+        "jump_three_attack_defense": enable_jump_three || enable_jump_three_attack_defense,
+        "jump_three_counter": enable_jump_three || enable_jump_three_counter,
         "pre_vct": pre_vct,
         "after_actual_opp_vct": after_actual_opp_vct,
     }))
@@ -189,6 +224,8 @@ fn run_sweep(
     configs: &[SolveConfig],
     include_proof: bool,
     enable_jump_three: bool,
+    enable_jump_three_attack_defense: bool,
+    enable_jump_three_counter: bool,
 ) -> Value {
     let mut attempts = Vec::new();
     let mut first_hit: Option<Value> = None;
@@ -198,11 +235,14 @@ fn run_sweep(
             max_depth: cfg.depth,
             time_budget: Some(Duration::from_millis(cfg.budget_ms)),
             enable_jump_three,
+            enable_jump_three_attack_defense,
+            enable_jump_three_counter,
         };
+        let started = Instant::now();
         let should_capture_proof = include_proof && first_hit.is_none();
-        let (seq, proof) = if should_capture_proof {
-            let proof = search_vct_audit_json(&mut b, &cfg_obj);
-            let seq = proof
+        let (seq, proof, nodes, deadline_hits, termination_reason) = if should_capture_proof {
+            let proof_json = search_vct_audit_json(&mut b, &cfg_obj);
+            let seq = proof_json
                 .get("sequence")
                 .and_then(Value::as_array)
                 .map(|items| {
@@ -211,15 +251,38 @@ fn run_sweep(
                         .filter_map(|mv| parse_move(mv).ok())
                         .collect::<Vec<_>>()
                 });
-            let proof = if proof.get("hit").and_then(Value::as_bool).unwrap_or(false) {
-                Some(proof)
+            let nodes = proof_json.get("nodes").and_then(Value::as_u64).unwrap_or(0);
+            let deadline_hits = proof_json
+                .get("deadline_hits")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let termination_reason = proof_json
+                .get("termination_reason")
+                .and_then(Value::as_str)
+                .unwrap_or(if seq.is_some() { "proved" } else { "exhausted" })
+                .to_string();
+            let proof = if proof_json
+                .get("hit")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                Some(proof_json)
             } else {
                 None
             };
-            (seq, proof)
+            (seq, proof, nodes, deadline_hits, termination_reason)
         } else {
-            (search_vct(&mut b, &cfg_obj), None)
+            let result = search_vct_with_stats(&mut b, &cfg_obj);
+            let termination_reason = result.termination_reason().to_string();
+            (
+                result.sequence,
+                None,
+                result.stats.nodes,
+                result.stats.deadline_hits,
+                termination_reason,
+            )
         };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         let hit = seq.is_some();
         let seq_json = seq
             .as_ref()
@@ -228,6 +291,10 @@ fn run_sweep(
             "idx": idx,
             "depth": cfg.depth,
             "budget_ms": cfg.budget_ms,
+            "elapsed_ms": elapsed_ms,
+            "nodes": nodes,
+            "deadline_hits": deadline_hits,
+            "termination_reason": termination_reason,
             "hit": hit,
             "sequence_len": seq.as_ref().map(|s| s.len()).unwrap_or(0),
             "sequence": seq_json,
@@ -362,6 +429,9 @@ fn parse_args() -> Result<Args, String> {
     let mut max_positions = 0usize;
     let mut include_proof = false;
     let mut enable_jump_three = env_flag("FIGRID_VCT_ENABLE_JUMP_THREE");
+    let mut enable_jump_three_attack_defense =
+        env_flag("FIGRID_VCT_ENABLE_JUMP_THREE_ATTACK_DEFENSE");
+    let mut enable_jump_three_counter = env_flag("FIGRID_VCT_ENABLE_JUMP_THREE_COUNTER");
 
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -377,6 +447,8 @@ fn parse_args() -> Result<Args, String> {
             }
             "--include-proof" => include_proof = true,
             "--enable-jump-three" => enable_jump_three = true,
+            "--enable-jump-three-attack-defense" => enable_jump_three_attack_defense = true,
+            "--enable-jump-three-counter" => enable_jump_three_counter = true,
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -392,6 +464,8 @@ fn parse_args() -> Result<Args, String> {
         max_positions,
         include_proof,
         enable_jump_three,
+        enable_jump_three_attack_defense,
+        enable_jump_three_counter,
     })
 }
 
@@ -426,6 +500,6 @@ fn env_flag(name: &str) -> bool {
 
 fn print_help() {
     eprintln!(
-        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three]"
+        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter]"
     );
 }

@@ -21,9 +21,8 @@
 use crate::board::{BOARD_SIZE, BitBoard, Board, Move, NUM_CELLS, RuleSet, Stone};
 use crate::heuristic::{DIR, scan_line};
 use crate::pattern_table::{
-    LineWindow, PATTERN_RARE_ID, WindowThreat, pattern_threat_after_my_play,
-    pattern_threat_after_my_play_caro, pattern_threat_after_my_play_exact5, read_window,
-    swap_mapped_id,
+    PATTERN_RARE_ID, WindowThreat, pattern_threat_after_my_play, pattern_threat_after_my_play_caro,
+    pattern_threat_after_my_play_exact5, read_window, swap_mapped_id, window_has_jump_three,
 };
 use noru::trainer::SimpleRng;
 use serde_json::{Value, json};
@@ -260,26 +259,6 @@ fn classify_move_rules_with_jump_three(
     ThreatKind::None
 }
 
-fn window_has_jump_three(w: &LineWindow) -> bool {
-    const PATTERNS: [[u8; 6]; 2] = [[0, 1, 0, 1, 1, 0], [0, 1, 1, 0, 1, 0]];
-    for start in 0..=5 {
-        if !(start <= 5 && 5 < start + 6) {
-            continue;
-        }
-        let mut matched = false;
-        for pat in PATTERNS {
-            matched = (0..6).all(|i| w[start + i] == pat[i]);
-            if matched {
-                break;
-            }
-        }
-        if matched {
-            return true;
-        }
-    }
-    false
-}
-
 /// Pattern4 fast path. Uses `board.line_pattern_ids` (incrementally
 /// maintained on every `make_move` / `undo_move`) to look up each
 /// direction's line threat in O(1) and aggregate into a `ThreatKind`.
@@ -442,8 +421,65 @@ pub struct VctConfig {
     pub max_depth: u32,
     /// 전체 시간 예산. 초과 시 None 반환.
     pub time_budget: Option<Duration>,
-    /// RQ560 W1 vocabulary gate. Off preserves the pre-JumpThree VCT proof path.
+    /// RQ560 compatibility gate. When true, enables all JumpThree sub-flags.
     pub enable_jump_three: bool,
+    /// RQ561 factor: attack JumpThree candidates plus matching gap/completion defenses.
+    pub enable_jump_three_attack_defense: bool,
+    /// RQ561 factor: defender counter-forcing scan may include JumpThree moves.
+    pub enable_jump_three_counter: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct VctJumpThreeFlags {
+    attack_defense: bool,
+    counter: bool,
+}
+
+impl VctConfig {
+    fn jump_three_flags(&self) -> VctJumpThreeFlags {
+        VctJumpThreeFlags {
+            attack_defense: self.enable_jump_three || self.enable_jump_three_attack_defense,
+            counter: self.enable_jump_three || self.enable_jump_three_counter,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VctSearchStats {
+    pub nodes: u64,
+    pub deadline_hits: u64,
+}
+
+impl VctSearchStats {
+    fn enter_node(&mut self) {
+        self.nodes += 1;
+    }
+
+    fn mark_deadline(&mut self) {
+        self.deadline_hits += 1;
+    }
+
+    pub fn hit_deadline(&self) -> bool {
+        self.deadline_hits > 0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VctSearchResult {
+    pub sequence: Option<Vec<Move>>,
+    pub stats: VctSearchStats,
+}
+
+impl VctSearchResult {
+    pub fn termination_reason(&self) -> &'static str {
+        if self.sequence.is_some() {
+            "proved"
+        } else if self.stats.hit_deadline() {
+            "deadline"
+        } else {
+            "exhausted"
+        }
+    }
 }
 
 impl Default for VctConfig {
@@ -452,6 +488,8 @@ impl Default for VctConfig {
             max_depth: 16,
             time_budget: Some(Duration::from_millis(500)),
             enable_jump_three: false,
+            enable_jump_three_attack_defense: false,
+            enable_jump_three_counter: false,
         }
     }
 }
@@ -461,22 +499,29 @@ impl Default for VctConfig {
 /// 성공 시 최초 승리 수열(공격-수비-공격-... 순, 마지막 수는 공격 측 승리수)을
 /// 반환. 실패 / 시간 초과 시 None.
 pub fn search_vct(board: &mut Board, cfg: &VctConfig) -> Option<Vec<Move>> {
+    search_vct_with_stats(board, cfg).sequence
+}
+
+pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchResult {
     let deadline = cfg.time_budget.map(|d| Instant::now() + d);
     let attacker = board.side_to_move;
     let mut sequence = Vec::with_capacity(cfg.max_depth as usize * 2);
     let mut tt: TransTable = HashMap::with_capacity(65536);
-    if vct_or(
+    let mut stats = VctSearchStats::default();
+    let flags = cfg.jump_three_flags();
+    let hit = vct_or(
         board,
         attacker,
         cfg.max_depth,
         deadline,
-        cfg.enable_jump_three,
+        flags,
         &mut sequence,
         &mut tt,
-    ) {
-        Some(sequence)
-    } else {
-        None
+        &mut stats,
+    );
+    VctSearchResult {
+        sequence: if hit { Some(sequence) } else { None },
+        stats,
     }
 }
 
@@ -486,22 +531,34 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
     let mut sequence = Vec::with_capacity(cfg.max_depth as usize * 2);
     let mut tt: TransTable = HashMap::with_capacity(65536);
     let mut audit = VctAuditLog::default();
+    let mut stats = VctSearchStats::default();
+    let flags = cfg.jump_three_flags();
     let hit = vct_or_audit(
         board,
         attacker,
         cfg.max_depth,
         deadline,
-        cfg.enable_jump_three,
+        flags,
         &mut sequence,
         &mut tt,
         &mut audit,
+        &mut stats,
     );
+    let result = VctSearchResult {
+        sequence: if hit { Some(sequence.clone()) } else { None },
+        stats,
+    };
     json!({
         "format": "vct-proof-audit-v1",
         "hit": hit,
         "attacker": stone_json(attacker),
         "max_depth": cfg.max_depth,
         "time_budget_ms": cfg.time_budget.map(|d| d.as_millis() as u64),
+        "termination_reason": result.termination_reason(),
+        "nodes": result.stats.nodes,
+        "deadline_hits": result.stats.deadline_hits,
+        "jump_three_attack_defense": flags.attack_defense,
+        "jump_three_counter": flags.counter,
         "sequence": if hit { Some(sequence.iter().map(|&mv| move_json(mv)).collect::<Vec<_>>()) } else { None },
         "and_nodes": audit.and_nodes,
         "terminal_event_count": audit.terminal_event_count,
@@ -541,14 +598,17 @@ fn vct_or(
     attacker: Stone,
     depth: u32,
     deadline: Option<Instant>,
-    enable_jump_three: bool,
+    jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
+    stats: &mut VctSearchStats,
 ) -> bool {
+    stats.enter_node();
     if depth == 0 {
         return false;
     }
     if timed_out(deadline) {
+        stats.mark_deadline();
         return false;
     }
     debug_assert_eq!(board.side_to_move, attacker);
@@ -569,7 +629,7 @@ fn vct_or(
     let rule_set = board.effective_rule_set();
     let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
 
-    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, enable_jump_three);
+    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, jump_three.attack_defense);
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -606,11 +666,16 @@ fn vct_or(
             attacker,
             depth - 1,
             deadline,
-            enable_jump_three,
+            jump_three,
             sequence,
             tt,
+            stats,
         );
         board.undo_move();
+        if stats.hit_deadline() {
+            sequence.pop();
+            return false;
+        }
         if won {
             tt.insert(
                 hash,
@@ -644,14 +709,17 @@ fn vct_and(
     attacker: Stone,
     depth: u32,
     deadline: Option<Instant>,
-    enable_jump_three: bool,
+    jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
+    stats: &mut VctSearchStats,
 ) -> bool {
+    stats.enter_node();
     if depth == 0 {
         return false;
     }
     if timed_out(deadline) {
+        stats.mark_deadline();
         return false;
     }
     debug_assert_ne!(board.side_to_move, attacker);
@@ -668,7 +736,7 @@ fn vct_and(
     //  승리 오판. 수비 측이 **자기 winning threat**을 만들 수 있는 수는 반드시
     //  포함해야 함.)
     let defenses = match board.last_move {
-        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, enable_jump_three),
+        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, jump_three),
         None => board.candidate_moves(),
     };
     if defenses.is_empty() {
@@ -687,11 +755,16 @@ fn vct_and(
             attacker,
             depth - 1,
             deadline,
-            enable_jump_three,
+            jump_three,
             sequence,
             tt,
+            stats,
         );
         board.undo_move();
+        if stats.hit_deadline() {
+            sequence.truncate(checkpoint);
+            return false;
+        }
 
         if !attacker_still_wins {
             // 이 방어로 공격 실패 → AND 실패. 수열 복원.
@@ -708,15 +781,18 @@ fn vct_or_audit(
     attacker: Stone,
     depth: u32,
     deadline: Option<Instant>,
-    enable_jump_three: bool,
+    jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     audit: &mut VctAuditLog,
+    stats: &mut VctSearchStats,
 ) -> bool {
+    stats.enter_node();
     if depth == 0 {
         return false;
     }
     if timed_out(deadline) {
+        stats.mark_deadline();
         return false;
     }
     debug_assert_eq!(board.side_to_move, attacker);
@@ -744,7 +820,7 @@ fn vct_or_audit(
     let rule_set = board.effective_rule_set();
     let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
 
-    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, enable_jump_three);
+    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, jump_three.attack_defense);
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -812,12 +888,17 @@ fn vct_or_audit(
             attacker,
             depth - 1,
             deadline,
-            enable_jump_three,
+            jump_three,
             sequence,
             tt,
             audit,
+            stats,
         );
         board.undo_move();
+        if stats.hit_deadline() {
+            sequence.pop();
+            return false;
+        }
         if won {
             tt.insert(
                 hash,
@@ -845,15 +926,18 @@ fn vct_and_audit(
     attacker: Stone,
     depth: u32,
     deadline: Option<Instant>,
-    enable_jump_three: bool,
+    jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     audit: &mut VctAuditLog,
+    stats: &mut VctSearchStats,
 ) -> bool {
+    stats.enter_node();
     if depth == 0 {
         return false;
     }
     if timed_out(deadline) {
+        stats.mark_deadline();
         return false;
     }
     debug_assert_ne!(board.side_to_move, attacker);
@@ -881,7 +965,7 @@ fn vct_and_audit(
     }
 
     let defenses = match board.last_move {
-        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, enable_jump_three),
+        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, jump_three),
         None => board.candidate_moves(),
     };
     if defenses.is_empty() {
@@ -913,12 +997,17 @@ fn vct_and_audit(
             attacker,
             depth - 1,
             deadline,
-            enable_jump_three,
+            jump_three,
             sequence,
             tt,
             audit,
+            stats,
         );
         board.undo_move();
+        if stats.hit_deadline() {
+            sequence.truncate(checkpoint);
+            return false;
+        }
         let tt_after = audit.tt_hit_count;
         let continuation = sequence[checkpoint..]
             .iter()
@@ -1031,9 +1120,9 @@ fn in_board(r: i32, c: i32) -> bool {
 fn find_defenses_with_counters(
     board: &Board,
     attack_move: Move,
-    enable_jump_three: bool,
+    jump_three: VctJumpThreeFlags,
 ) -> Vec<Move> {
-    let mut defenses = find_defenses(board, attack_move, enable_jump_three);
+    let mut defenses = find_defenses(board, attack_move, jump_three.attack_defense);
     let mut seen = BitBoard::EMPTY;
     for &d in &defenses {
         seen.set(d);
@@ -1051,7 +1140,7 @@ fn find_defenses_with_counters(
             idx,
             board.side_to_move,
             rule_set,
-            enable_jump_three,
+            jump_three.counter,
         );
         // Winning 위협뿐 아니라 Forcing(ClosedFour/OpenThree) 반격도 포함해야
         // 원거리 카운터 공격을 AND가 놓치지 않음.
@@ -1679,6 +1768,8 @@ mod tests {
             max_depth: 8,
             time_budget: Some(Duration::from_millis(100)),
             enable_jump_three: false,
+            enable_jump_three_attack_defense: false,
+            enable_jump_three_counter: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -1727,6 +1818,8 @@ mod tests {
             max_depth: 8,
             time_budget: Some(Duration::from_millis(300)),
             enable_jump_three: false,
+            enable_jump_three_attack_defense: false,
+            enable_jump_three_counter: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -1746,6 +1839,8 @@ mod tests {
             max_depth: 8,
             time_budget: Some(Duration::from_millis(500)),
             enable_jump_three: false,
+            enable_jump_three_attack_defense: false,
+            enable_jump_three_counter: false,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

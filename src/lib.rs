@@ -39,7 +39,10 @@ pub use eval::{IncrementalEval, evaluate};
 pub use features::GOMOKU_NNUE_CONFIG;
 pub use heuristic::{DIR, LineInfo, scan_line};
 pub use search::{SearchResult, Searcher};
-pub use vct::{VctConfig, search_vct, search_vct_audit_json};
+pub use vct::{
+    VctConfig, VctSearchResult, VctSearchStats, search_vct, search_vct_audit_json,
+    search_vct_with_stats,
+};
 
 /// Possible errors returned from this crate.
 #[derive(Clone, Debug, PartialEq)]

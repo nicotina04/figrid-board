@@ -327,7 +327,7 @@ fn classify_window_anchor_mine_rule(
     }
 }
 
-fn window_has_jump_three(w: &LineWindow) -> bool {
+pub(crate) fn window_has_jump_three(w: &LineWindow) -> bool {
     // Open broken-three shapes produced by the anchor move:
     // .X.XX. and .XX.X.  The segment must include the anchor (index 5), so
     // pre-existing broken threes elsewhere in the 11-cell window do not count.

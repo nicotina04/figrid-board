@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "codebook-eval")]
-use figrid_board::codebook_eval::CodebookWeights;
+use figrid_board::codebook_eval::{CodebookWeights, QuantizedCodebookWeights};
 use figrid_board::{BOARD_SIZE, Board, GOMOKU_NNUE_CONFIG, RuleSet, Searcher, book, to_idx};
 use noru::network::NnueWeights;
 
@@ -86,7 +86,30 @@ fn pbrain_fixed_depth() -> bool {
 }
 
 #[cfg(feature = "codebook-eval")]
-fn load_codebook_weights() -> Result<Option<CodebookWeights>, String> {
+enum CodebookRuntimeWeights {
+    Float(CodebookWeights),
+    Quantized(QuantizedCodebookWeights),
+}
+
+#[cfg(feature = "codebook-eval")]
+fn codebook_quantized_enabled() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("FIGRID_CODEBOOK_QUANT")
+            .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_QUANT"))
+            .map(|raw| {
+                let trimmed = raw.trim();
+                !(trimmed == "0"
+                    || trimmed.eq_ignore_ascii_case("false")
+                    || trimmed.eq_ignore_ascii_case("off")
+                    || trimmed.eq_ignore_ascii_case("no"))
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(feature = "codebook-eval")]
+fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
     let path = std::env::var("FIGRID_CODEBOOK_WEIGHTS")
         .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_MODEL"))
         .unwrap_or_default();
@@ -100,9 +123,15 @@ fn load_codebook_weights() -> Result<Option<CodebookWeights>, String> {
     }
     let bytes = std::fs::read(trimmed)
         .map_err(|e| format!("failed to read codebook weights from `{trimmed}`: {e}"))?;
-    CodebookWeights::from_json_bytes(&bytes)
-        .map(Some)
-        .map_err(|e| format!("failed to parse codebook weights `{trimmed}`: {e}"))
+    let weights = CodebookWeights::from_json_bytes(&bytes)
+        .map_err(|e| format!("failed to parse codebook weights `{trimmed}`: {e}"))?;
+    if codebook_quantized_enabled() {
+        Ok(Some(CodebookRuntimeWeights::Quantized(
+            weights.quantize_i16_s32_s64(),
+        )))
+    } else {
+        Ok(Some(CodebookRuntimeWeights::Float(weights)))
+    }
 }
 
 fn telemetry_score(score: i32) -> String {
@@ -280,7 +309,7 @@ struct Engine {
     board: Board,
     weights: NnueWeights,
     #[cfg(feature = "codebook-eval")]
-    codebook_weights: Option<CodebookWeights>,
+    codebook_weights: Option<CodebookRuntimeWeights>,
     searcher: Searcher,
     info: ProtocolInfo,
     started: bool,
@@ -343,17 +372,28 @@ impl Engine {
         };
         let search_start = Instant::now();
         #[cfg(feature = "codebook-eval")]
-        let result = if let Some(codebook_weights) = &self.codebook_weights {
-            self.searcher.search_codebook_eval(
-                &mut self.board,
-                &self.weights,
-                codebook_weights,
-                max_depth,
-                time_limit,
-            )
-        } else {
-            self.searcher
-                .search(&mut self.board, &self.weights, max_depth, time_limit)
+        let result = match &self.codebook_weights {
+            Some(CodebookRuntimeWeights::Float(codebook_weights)) => {
+                self.searcher.search_codebook_eval(
+                    &mut self.board,
+                    &self.weights,
+                    codebook_weights,
+                    max_depth,
+                    time_limit,
+                )
+            }
+            Some(CodebookRuntimeWeights::Quantized(codebook_weights)) => {
+                self.searcher.search_codebook_eval_quantized(
+                    &mut self.board,
+                    &self.weights,
+                    codebook_weights,
+                    max_depth,
+                    time_limit,
+                )
+            }
+            None => self
+                .searcher
+                .search(&mut self.board, &self.weights, max_depth, time_limit),
         };
         #[cfg(not(feature = "codebook-eval"))]
         let result = self

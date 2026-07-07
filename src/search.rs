@@ -6,7 +6,10 @@
 /// - ??????????????
 use crate::board::{BOARD_SIZE, Board, GameResult, Move, NUM_CELLS, Stone, to_rc};
 #[cfg(feature = "codebook-eval")]
-use crate::codebook_eval::{CodebookWeights, IncrementalCodebookEval};
+use crate::codebook_eval::{
+    CodebookWeights, IncrementalCodebookEval, IncrementalQuantizedCodebookEval,
+    QuantizedCodebookWeights,
+};
 use crate::eval::IncrementalEval;
 use crate::heuristic::{DIR, scan_line};
 use crate::transposition::{Bound, TranspositionTable, TtStats};
@@ -101,13 +104,20 @@ fn move_to_audit_json(mv: Move) -> serde_json::Value {
 }
 
 fn optional_move_to_audit_json(mv: Option<Move>) -> serde_json::Value {
-    mv.map(move_to_audit_json).unwrap_or(serde_json::Value::Null)
+    mv.map(move_to_audit_json)
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn sequence_to_audit_json(seq: Option<&[Move]>) -> serde_json::Value {
-    seq.map(|moves| moves.iter().copied().map(move_to_audit_json).collect::<Vec<_>>())
-        .unwrap_or_default()
-        .into()
+    seq.map(|moves| {
+        moves
+            .iter()
+            .copied()
+            .map(move_to_audit_json)
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default()
+    .into()
 }
 
 fn append_defensive_vct_veto_audit(
@@ -807,6 +817,47 @@ impl SearchEvalState for CodebookEvalState<'_> {
     }
 }
 
+#[cfg(feature = "codebook-eval")]
+struct QuantizedCodebookEvalState<'a> {
+    weights: &'a QuantizedCodebookWeights,
+    inc: IncrementalQuantizedCodebookEval,
+    scale: f32,
+}
+
+#[cfg(feature = "codebook-eval")]
+impl<'a> QuantizedCodebookEvalState<'a> {
+    fn new(board: &Board, weights: &'a QuantizedCodebookWeights, scale: f32) -> Self {
+        let mut inc = IncrementalQuantizedCodebookEval::new(weights);
+        inc.refresh(board, weights);
+        Self {
+            weights,
+            inc,
+            scale,
+        }
+    }
+
+    fn scaled_value(&self, board: &Board) -> i32 {
+        (self.inc.value(board, self.weights) * self.scale)
+            .round()
+            .clamp(-(WIN_SCORE as f32 - 1.0), WIN_SCORE as f32 - 1.0) as i32
+    }
+}
+
+#[cfg(feature = "codebook-eval")]
+impl SearchEvalState for QuantizedCodebookEvalState<'_> {
+    fn push_move(&mut self, board: &Board, mv: Move) {
+        self.inc.push_move(board, mv, self.weights);
+    }
+
+    fn pop_move(&mut self) {
+        self.inc.pop_move(self.weights);
+    }
+
+    fn eval(&self, board: &Board) -> i32 {
+        self.scaled_value(board)
+    }
+}
+
 fn probe_root_move_with(
     searcher: &mut Searcher,
     board: &Board,
@@ -1434,6 +1485,32 @@ impl Searcher {
         }
         let scale = codebook_eval_scale();
         let mut inc = CodebookEvalState::new(board, codebook_weights, scale);
+        self.search_with_eval_state(
+            board,
+            ordering_weights,
+            &mut inc,
+            max_depth,
+            root_search_decision_audit,
+        )
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    pub fn search_codebook_eval_quantized(
+        &mut self,
+        board: &mut Board,
+        ordering_weights: &NnueWeights,
+        codebook_weights: &QuantizedCodebookWeights,
+        max_depth: u32,
+        time_limit: Option<Duration>,
+    ) -> SearchResult {
+        self.reset_for_search(time_limit);
+        let root_search_decision_audit =
+            crate::candidate_local_ensemble::root_search_decision_audit_enabled();
+        if let Some(result) = self.try_root_vct(board, time_limit, root_search_decision_audit) {
+            return result;
+        }
+        let scale = codebook_eval_scale();
+        let mut inc = QuantizedCodebookEvalState::new(board, codebook_weights, scale);
         self.search_with_eval_state(
             board,
             ordering_weights,

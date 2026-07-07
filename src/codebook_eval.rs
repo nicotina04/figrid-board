@@ -10,7 +10,9 @@ use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
 use crate::pattern_table::{PATTERN_NUM_IDS, swap_mapped_id};
 
 const REGIONS: usize = 9;
-const WINDOW_LENS: [usize; 3] = [5, 6, 7];
+pub const QUANT_EMBED_SCALE: i32 = 32;
+pub const QUANT_HEAD_SCALE: i32 = 64;
+pub const QUANT_FACTOR_SCALE: i32 = 64;
 
 #[derive(Clone, Debug)]
 pub struct CodebookWeights {
@@ -119,7 +121,63 @@ impl CodebookWeights {
         REGIONS * self.dim
     }
 
+    pub fn quantize_i16_s32_s64(&self) -> QuantizedCodebookWeights {
+        self.validate();
+        QuantizedCodebookWeights {
+            dim: self.dim,
+            fm_rank: self.fm_rank,
+            embedding_scale: QUANT_EMBED_SCALE,
+            head_scale: QUANT_HEAD_SCALE,
+            factor_scale: QUANT_FACTOR_SCALE,
+            embeddings: quantize_vec_i16(&self.embeddings, QUANT_EMBED_SCALE),
+            head: quantize_vec_i16(&self.head, QUANT_HEAD_SCALE),
+            factors: quantize_vec_i16(&self.factors, QUANT_FACTOR_SCALE),
+            bias: self.bias,
+        }
+    }
+
     fn validate(&self) {
+        debug_assert_eq!(self.embeddings.len(), PATTERN_NUM_IDS * self.dim);
+        debug_assert_eq!(self.head.len(), self.feature_len());
+        debug_assert_eq!(self.factors.len(), self.feature_len() * self.fm_rank);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct QuantizedCodebookWeights {
+    pub dim: usize,
+    pub fm_rank: usize,
+    pub embedding_scale: i32,
+    pub head_scale: i32,
+    pub factor_scale: i32,
+    pub embeddings: Vec<i16>,
+    pub head: Vec<i16>,
+    pub factors: Vec<i16>,
+    pub bias: f32,
+}
+
+impl QuantizedCodebookWeights {
+    #[inline]
+    pub fn feature_len(&self) -> usize {
+        REGIONS * self.dim
+    }
+
+    pub fn dequantized(&self) -> CodebookWeights {
+        self.validate();
+        CodebookWeights {
+            dim: self.dim,
+            fm_rank: self.fm_rank,
+            embeddings: dequantize_vec_i16(&self.embeddings, self.embedding_scale),
+            head: dequantize_vec_i16(&self.head, self.head_scale),
+            factors: dequantize_vec_i16(&self.factors, self.factor_scale),
+            bias: self.bias,
+        }
+    }
+
+    fn validate(&self) {
+        debug_assert!(self.embedding_scale > 0);
+        debug_assert!(self.head_scale > 0);
+        debug_assert!(self.factor_scale > 0);
         debug_assert_eq!(self.embeddings.len(), PATTERN_NUM_IDS * self.dim);
         debug_assert_eq!(self.head.len(), self.feature_len());
         debug_assert_eq!(self.factors.len(), self.feature_len() * self.fm_rank);
@@ -334,31 +392,227 @@ pub fn evaluate_full(board: &Board, weights: &CodebookWeights) -> f32 {
     inc.value(board, weights)
 }
 
+pub struct IncrementalQuantizedCodebookEval {
+    cell_black: Vec<i32>,
+    cell_white: Vec<i32>,
+    features_black: Vec<i32>,
+    features_white: Vec<i32>,
+    stack: Vec<QuantUndoRecord>,
+    last_dirty_cells: usize,
+}
+
+struct QuantUndoRecord {
+    changes: Vec<QuantCellUndo>,
+}
+
+struct QuantCellUndo {
+    cell: usize,
+    black: Vec<i32>,
+    white: Vec<i32>,
+}
+
+impl IncrementalQuantizedCodebookEval {
+    pub fn new(weights: &QuantizedCodebookWeights) -> Self {
+        weights.validate();
+        Self {
+            cell_black: vec![0; NUM_CELLS * weights.dim],
+            cell_white: vec![0; NUM_CELLS * weights.dim],
+            features_black: vec![0; weights.feature_len()],
+            features_white: vec![0; weights.feature_len()],
+            stack: Vec::with_capacity(NUM_CELLS),
+            last_dirty_cells: 0,
+        }
+    }
+
+    pub fn refresh(&mut self, board: &Board, weights: &QuantizedCodebookWeights) {
+        weights.validate();
+        self.cell_black.fill(0);
+        self.cell_white.fill(0);
+        self.features_black.fill(0);
+        self.features_white.fill(0);
+
+        for cell in 0..NUM_CELLS {
+            compute_cell_quantized(
+                board,
+                weights,
+                cell,
+                Stone::Black,
+                quant_cell_slice_mut(&mut self.cell_black, cell, weights.dim),
+            );
+            add_quant_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                cell,
+                weights.dim,
+                1,
+            );
+
+            compute_cell_quantized(
+                board,
+                weights,
+                cell,
+                Stone::White,
+                quant_cell_slice_mut(&mut self.cell_white, cell, weights.dim),
+            );
+            add_quant_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                cell,
+                weights.dim,
+                1,
+            );
+        }
+
+        self.stack.clear();
+        self.last_dirty_cells = 0;
+    }
+
+    pub fn push_move(&mut self, board: &Board, mv: Move, weights: &QuantizedCodebookWeights) {
+        weights.validate();
+        let dirty = dirty_cells_for_move(mv);
+        let mut undo = QuantUndoRecord {
+            changes: Vec::with_capacity(dirty.len()),
+        };
+
+        for cell in dirty.iter().copied() {
+            let old_black = quant_cell_slice(&self.cell_black, cell, weights.dim).to_vec();
+            let old_white = quant_cell_slice(&self.cell_white, cell, weights.dim).to_vec();
+
+            add_quant_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                cell,
+                weights.dim,
+                -1,
+            );
+            add_quant_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                cell,
+                weights.dim,
+                -1,
+            );
+
+            compute_cell_quantized(
+                board,
+                weights,
+                cell,
+                Stone::Black,
+                quant_cell_slice_mut(&mut self.cell_black, cell, weights.dim),
+            );
+            compute_cell_quantized(
+                board,
+                weights,
+                cell,
+                Stone::White,
+                quant_cell_slice_mut(&mut self.cell_white, cell, weights.dim),
+            );
+
+            add_quant_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                cell,
+                weights.dim,
+                1,
+            );
+            add_quant_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                cell,
+                weights.dim,
+                1,
+            );
+
+            undo.changes.push(QuantCellUndo {
+                cell,
+                black: old_black,
+                white: old_white,
+            });
+        }
+
+        self.last_dirty_cells = dirty.len();
+        self.stack.push(undo);
+    }
+
+    pub fn pop_move(&mut self, weights: &QuantizedCodebookWeights) {
+        let Some(undo) = self.stack.pop() else {
+            return;
+        };
+        for change in undo.changes.into_iter().rev() {
+            add_quant_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                change.cell,
+                weights.dim,
+                -1,
+            );
+            add_quant_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                change.cell,
+                weights.dim,
+                -1,
+            );
+
+            quant_cell_slice_mut(&mut self.cell_black, change.cell, weights.dim)
+                .copy_from_slice(&change.black);
+            quant_cell_slice_mut(&mut self.cell_white, change.cell, weights.dim)
+                .copy_from_slice(&change.white);
+
+            add_quant_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                change.cell,
+                weights.dim,
+                1,
+            );
+            add_quant_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                change.cell,
+                weights.dim,
+                1,
+            );
+        }
+        self.last_dirty_cells = 0;
+    }
+
+    pub fn value(&self, board: &Board, weights: &QuantizedCodebookWeights) -> f32 {
+        let features = match board.side_to_move {
+            Stone::Black => &self.features_black,
+            Stone::White => &self.features_white,
+        };
+        quant_value_from_features(features, weights)
+    }
+
+    pub fn last_dirty_cells(&self) -> usize {
+        self.last_dirty_cells
+    }
+}
+
+pub fn evaluate_full_quantized(board: &Board, weights: &QuantizedCodebookWeights) -> f32 {
+    let mut inc = IncrementalQuantizedCodebookEval::new(weights);
+    inc.refresh(board, weights);
+    inc.value(board, weights)
+}
+
 pub fn dirty_cells_for_move(mv: Move) -> Vec<usize> {
     const DIRS: [(i32, i32); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
     let row = (mv / BOARD_SIZE) as i32;
     let col = (mv % BOARD_SIZE) as i32;
     let mut seen = [false; NUM_CELLS];
-    let mut cells = Vec::with_capacity(56);
+    let mut cells = Vec::with_capacity(41);
     for &(dr, dc) in &DIRS {
-        for len in WINDOW_LENS {
-            for shift in 0..len {
-                let start_r = row - dr * shift as i32;
-                let start_c = col - dc * shift as i32;
-                let end_r = start_r + dr * (len as i32 - 1);
-                let end_c = start_c + dc * (len as i32 - 1);
-                if !in_bounds(start_r, start_c) || !in_bounds(end_r, end_c) {
-                    continue;
-                }
-                for k in 0..len {
-                    let r = start_r + dr * k as i32;
-                    let c = start_c + dc * k as i32;
-                    let cell = r as usize * BOARD_SIZE + c as usize;
-                    if !seen[cell] {
-                        seen[cell] = true;
-                        cells.push(cell);
-                    }
-                }
+        for offset in -5i32..=5 {
+            let r = row + dr * offset;
+            let c = col + dc * offset;
+            if !in_bounds(r, c) {
+                continue;
+            }
+            let cell = r as usize * BOARD_SIZE + c as usize;
+            if !seen[cell] {
+                seen[cell] = true;
+                cells.push(cell);
             }
         }
     }
@@ -391,6 +645,27 @@ fn compute_cell(
     }
 }
 
+fn compute_cell_quantized(
+    board: &Board,
+    weights: &QuantizedCodebookWeights,
+    cell: usize,
+    perspective: Stone,
+    out: &mut [i32],
+) {
+    out.fill(0);
+    let swap = perspective == Stone::White;
+    for &pid in &board.line_pattern_ids[cell] {
+        let pid = if swap { swap_mapped_id(pid) } else { pid };
+        let emb_base = pid as usize * weights.dim;
+        for d in 0..weights.dim {
+            out[d] += weights.embeddings[emb_base + d] as i32;
+        }
+    }
+    for x in out {
+        *x = (*x).max(0);
+    }
+}
+
 fn add_cell_to_features(cells: &[f32], features: &mut [f32], cell: usize, dim: usize, scale: f32) {
     let region = region_of_cell(cell);
     let denom = region_cell_count(region) as f32;
@@ -398,6 +673,21 @@ fn add_cell_to_features(cells: &[f32], features: &mut [f32], cell: usize, dim: u
     let feature_base = region * dim;
     for d in 0..dim {
         features[feature_base + d] += scale * cells[cell_base + d] / denom;
+    }
+}
+
+fn add_quant_cell_to_features(
+    cells: &[i32],
+    features: &mut [i32],
+    cell: usize,
+    dim: usize,
+    sign: i32,
+) {
+    let region = region_of_cell(cell);
+    let cell_base = cell * dim;
+    let feature_base = region * dim;
+    for d in 0..dim {
+        features[feature_base + d] += sign * cells[cell_base + d];
     }
 }
 
@@ -419,6 +709,32 @@ fn value_from_features(features: &[f32], weights: &CodebookWeights) -> f32 {
     logit
 }
 
+fn quant_value_from_features(features: &[i32], weights: &QuantizedCodebookWeights) -> f32 {
+    let region_denom = region_cell_count(0) as f64;
+    let feature_denom = weights.embedding_scale as f64 * region_denom;
+    let mut logit = weights.bias as f64;
+
+    let head_denom = feature_denom * weights.head_scale as f64;
+    for (&x, &w) in features.iter().zip(&weights.head) {
+        logit += (x as f64 * w as f64) / head_denom;
+    }
+
+    let factor_denom = feature_denom * weights.factor_scale as f64;
+    for rank in 0..weights.fm_rank {
+        let mut sum = 0.0f64;
+        let mut square_sum = 0.0f64;
+        for (idx, &x) in features.iter().enumerate() {
+            let vx =
+                (x as f64 * weights.factors[idx * weights.fm_rank + rank] as f64) / factor_denom;
+            sum += vx;
+            square_sum += vx * vx;
+        }
+        logit += 0.5 * (sum * sum - square_sum);
+    }
+
+    logit as f32
+}
+
 #[inline]
 fn cell_slice(cells: &[f32], cell: usize, dim: usize) -> &[f32] {
     let start = cell * dim;
@@ -427,6 +743,18 @@ fn cell_slice(cells: &[f32], cell: usize, dim: usize) -> &[f32] {
 
 #[inline]
 fn cell_slice_mut(cells: &mut [f32], cell: usize, dim: usize) -> &mut [f32] {
+    let start = cell * dim;
+    &mut cells[start..start + dim]
+}
+
+#[inline]
+fn quant_cell_slice(cells: &[i32], cell: usize, dim: usize) -> &[i32] {
+    let start = cell * dim;
+    &cells[start..start + dim]
+}
+
+#[inline]
+fn quant_cell_slice_mut(cells: &mut [i32], cell: usize, dim: usize) -> &mut [i32] {
     let start = cell * dim;
     &mut cells[start..start + dim]
 }
@@ -453,6 +781,22 @@ fn deterministic_f32(state: &mut u64, scale: f32) -> f32 {
     *state ^= *state << 17;
     let unit = ((*state >> 40) as u32) as f32 / (1u32 << 24) as f32;
     (unit * 2.0 - 1.0) * scale
+}
+
+fn quantize_vec_i16(values: &[f32], scale: i32) -> Vec<i16> {
+    values
+        .iter()
+        .map(|&x| {
+            (x * scale as f32)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+        })
+        .collect()
+}
+
+fn dequantize_vec_i16(values: &[i16], scale: i32) -> Vec<f32> {
+    let denom = scale as f32;
+    values.iter().map(|&x| x as f32 / denom).collect()
 }
 
 fn json_str<'a>(v: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -522,6 +866,58 @@ mod tests {
     }
 
     #[test]
+    fn quantized_codebook_matches_fake_dequantized_smoke() {
+        let weights = CodebookWeights::deterministic(16, 8);
+        let quantized = weights.quantize_i16_s32_s64();
+        let dequantized = quantized.dequantized();
+        let moves = [
+            112, 113, 97, 98, 127, 128, 111, 114, 96, 99, 126, 129, 82, 83, 84, 85, 100, 101, 115,
+            116,
+        ];
+        let mut board = Board::new();
+        let mut inc = IncrementalQuantizedCodebookEval::new(&quantized);
+        inc.refresh(&board, &quantized);
+
+        assert_close(
+            inc.value(&board, &quantized),
+            evaluate_full_quantized(&board, &quantized),
+        );
+        assert_close(
+            inc.value(&board, &quantized),
+            evaluate_full(&board, &dequantized),
+        );
+
+        for &mv in &moves {
+            if !board.is_empty(mv) {
+                continue;
+            }
+            board.make_move(mv);
+            inc.push_move(&board, mv, &quantized);
+            assert_close(
+                inc.value(&board, &quantized),
+                evaluate_full_quantized(&board, &quantized),
+            );
+            assert_close(
+                inc.value(&board, &quantized),
+                evaluate_full(&board, &dequantized),
+            );
+        }
+
+        for _ in 0..moves.len() {
+            board.undo_move();
+            inc.pop_move(&quantized);
+            assert_close(
+                inc.value(&board, &quantized),
+                evaluate_full_quantized(&board, &quantized),
+            );
+            assert_close(
+                inc.value(&board, &quantized),
+                evaluate_full(&board, &dequantized),
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "RQ542 gate: run explicitly with --release --features codebook-eval"]
     fn codebook_incremental_100k_transition_gate() {
         let weights = CodebookWeights::deterministic(16, 8);
@@ -584,11 +980,11 @@ mod tests {
         assert_eq!(mismatch, 0, "full-vs-increment mismatch count");
         assert_eq!(undo_fail, 0, "undo roundtrip failure count");
         assert!(
-            (0.16..=0.24).contains(&avg_ratio),
+            (0.12..=0.16).contains(&avg_ratio),
             "avg dirty ratio {avg_ratio:.6} is outside random-play sanity range"
         );
         assert!(
-            (0.20..=0.27).contains(&p95_ratio),
+            (0.17..=0.20).contains(&p95_ratio),
             "p95 dirty ratio {p95_ratio:.6} is outside random-play sanity range"
         );
     }
@@ -657,12 +1053,12 @@ mod tests {
         assert_eq!(mismatch, 0, "full-vs-increment mismatch count");
         assert_eq!(undo_fail, 0, "undo roundtrip failure count");
         assert!(
-            (0.18..=0.20).contains(&avg_ratio),
-            "avg dirty ratio {avg_ratio:.6} drifted away from RQ540 K0"
+            (0.12..=0.16).contains(&avg_ratio),
+            "avg dirty ratio {avg_ratio:.6} drifted away from Board pattern-cache dirty set"
         );
         assert!(
-            (0.21..=0.23).contains(&p95_ratio),
-            "p95 dirty ratio {p95_ratio:.6} drifted away from RQ540 K0"
+            (0.17..=0.20).contains(&p95_ratio),
+            "p95 dirty ratio {p95_ratio:.6} drifted away from Board pattern-cache dirty set"
         );
     }
 

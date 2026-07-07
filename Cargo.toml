@@ -98,6 +98,10 @@ path = "bin/rq547_vct_solve.rs"
 name = "rq554-quant-kernel-check"
 path = "bin/rq554_quant_kernel_check.rs"
 
+[[bin]]
+name = "rq558b-color-symmetry"
+path = "bin/rq558b_color_symmetry.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

@@ -427,12 +427,15 @@ pub struct VctConfig {
     pub enable_jump_three_attack_defense: bool,
     /// RQ561 factor: defender counter-forcing scan may include JumpThree moves.
     pub enable_jump_three_counter: bool,
+    /// RQ562 reach-control: only add direct JumpThree defenses for JumpThree OR moves.
+    pub enable_jump_three_kind_scoped_defense: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct VctJumpThreeFlags {
     attack_defense: bool,
     counter: bool,
+    kind_scoped_defense: bool,
 }
 
 impl VctConfig {
@@ -440,6 +443,7 @@ impl VctConfig {
         VctJumpThreeFlags {
             attack_defense: self.enable_jump_three || self.enable_jump_three_attack_defense,
             counter: self.enable_jump_three || self.enable_jump_three_counter,
+            kind_scoped_defense: self.enable_jump_three_kind_scoped_defense,
         }
     }
 }
@@ -490,6 +494,7 @@ impl Default for VctConfig {
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
+            enable_jump_three_kind_scoped_defense: false,
         }
     }
 }
@@ -559,6 +564,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         "deadline_hits": result.stats.deadline_hits,
         "jump_three_attack_defense": flags.attack_defense,
         "jump_three_counter": flags.counter,
+        "jump_three_kind_scoped_defense": flags.kind_scoped_defense,
         "sequence": if hit { Some(sequence.iter().map(|&mv| move_json(mv)).collect::<Vec<_>>()) } else { None },
         "and_nodes": audit.and_nodes,
         "terminal_event_count": audit.terminal_event_count,
@@ -664,6 +670,7 @@ fn vct_or(
         let won = vct_and(
             board,
             attacker,
+            kind,
             depth - 1,
             deadline,
             jump_three,
@@ -707,6 +714,7 @@ fn vct_or(
 fn vct_and(
     board: &mut Board,
     attacker: Stone,
+    attack_kind: ThreatKind,
     depth: u32,
     deadline: Option<Instant>,
     jump_three: VctJumpThreeFlags,
@@ -736,7 +744,7 @@ fn vct_and(
     //  승리 오판. 수비 측이 **자기 winning threat**을 만들 수 있는 수는 반드시
     //  포함해야 함.)
     let defenses = match board.last_move {
-        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, jump_three),
+        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, attack_kind, jump_three),
         None => board.candidate_moves(),
     };
     if defenses.is_empty() {
@@ -886,6 +894,7 @@ fn vct_or_audit(
         let won = vct_and_audit(
             board,
             attacker,
+            kind,
             depth - 1,
             deadline,
             jump_three,
@@ -924,6 +933,7 @@ fn vct_or_audit(
 fn vct_and_audit(
     board: &mut Board,
     attacker: Stone,
+    attack_kind: ThreatKind,
     depth: u32,
     deadline: Option<Instant>,
     jump_three: VctJumpThreeFlags,
@@ -944,6 +954,7 @@ fn vct_and_audit(
 
     let node_history = history_json(board);
     let last_attack = board.last_move.map(move_json);
+    let last_attack_threat = threat_json(attack_kind);
     let defender = board.side_to_move;
     let (def_my, def_opp) = bb_pair(board, defender);
     let rule_set = board.effective_rule_set();
@@ -956,6 +967,7 @@ fn vct_and_audit(
             "defender": stone_json(defender),
             "history": node_history,
             "last_attack": last_attack,
+            "last_attack_threat": last_attack_threat,
             "defender_has_immediate_five": true,
             "defenses": [],
             "result": false,
@@ -965,7 +977,7 @@ fn vct_and_audit(
     }
 
     let defenses = match board.last_move {
-        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, jump_three),
+        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, attack_kind, jump_three),
         None => board.candidate_moves(),
     };
     if defenses.is_empty() {
@@ -976,6 +988,7 @@ fn vct_and_audit(
             "defender": stone_json(defender),
             "history": node_history,
             "last_attack": last_attack,
+            "last_attack_threat": last_attack_threat,
             "defender_has_immediate_five": false,
             "defenses": [],
             "result": false,
@@ -1031,6 +1044,7 @@ fn vct_and_audit(
                 "defender": stone_json(defender),
                 "history": node_history,
                 "last_attack": last_attack,
+                "last_attack_threat": last_attack_threat,
                 "defender_has_immediate_five": false,
                 "defenses": defense_results,
                 "result": false,
@@ -1046,6 +1060,7 @@ fn vct_and_audit(
         "defender": stone_json(defender),
         "history": node_history,
         "last_attack": last_attack,
+        "last_attack_threat": last_attack_threat,
         "defender_has_immediate_five": false,
         "defenses": defense_results,
         "result": true,
@@ -1120,9 +1135,12 @@ fn in_board(r: i32, c: i32) -> bool {
 fn find_defenses_with_counters(
     board: &Board,
     attack_move: Move,
+    attack_kind: ThreatKind,
     jump_three: VctJumpThreeFlags,
 ) -> Vec<Move> {
-    let mut defenses = find_defenses(board, attack_move, jump_three.attack_defense);
+    let direct_jump_three_defense = jump_three.attack_defense
+        && (!jump_three.kind_scoped_defense || attack_kind == ThreatKind::JumpThree);
+    let mut defenses = find_defenses(board, attack_move, direct_jump_three_defense);
     let mut seen = BitBoard::EMPTY;
     for &d in &defenses {
         seen.set(d);
@@ -1770,6 +1788,7 @@ mod tests {
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
+            enable_jump_three_kind_scoped_defense: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -1820,6 +1839,7 @@ mod tests {
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
+            enable_jump_three_kind_scoped_defense: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -1841,6 +1861,7 @@ mod tests {
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
+            enable_jump_three_kind_scoped_defense: false,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

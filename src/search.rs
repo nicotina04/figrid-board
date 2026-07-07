@@ -179,6 +179,7 @@ fn defensive_vct_veto_replacement(
         enable_jump_three: false,
         enable_jump_three_attack_defense: false,
         enable_jump_three_counter: false,
+        enable_jump_three_kind_scoped_defense: false,
     };
     let unsafe_sequence = opponent_vct_sequence(board, incumbent, &cfg);
     if unsafe_sequence.is_none() {
@@ -1016,6 +1017,7 @@ impl Searcher {
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
+            enable_jump_three_kind_scoped_defense: false,
         };
         if let Some(seq) = search_vct(board, &vct_cfg) {
             if let Some(&first) = seq.first() {
@@ -1265,6 +1267,7 @@ impl Searcher {
                 enable_jump_three: false,
                 enable_jump_three_attack_defense: false,
                 enable_jump_three_counter: false,
+                enable_jump_three_kind_scoped_defense: false,
             };
             if let Some(seq) = search_vct(board, &vct_cfg) {
                 if let Some(&first) = seq.first() {
@@ -1565,6 +1568,7 @@ impl Searcher {
                 enable_jump_three: false,
                 enable_jump_three_attack_defense: false,
                 enable_jump_three_counter: false,
+                enable_jump_three_kind_scoped_defense: false,
             };
             if let Some(seq) = search_vct(board, &vct_cfg) {
                 if let Some(&first) = seq.first() {

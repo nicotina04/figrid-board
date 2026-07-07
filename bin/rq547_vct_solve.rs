@@ -26,6 +26,7 @@ struct Args {
     enable_jump_three: bool,
     enable_jump_three_attack_defense: bool,
     enable_jump_three_counter: bool,
+    enable_jump_three_kind_scoped_defense: bool,
 }
 
 impl Args {
@@ -35,6 +36,10 @@ impl Args {
 
     fn jump_three_counter(&self) -> bool {
         self.enable_jump_three || self.enable_jump_three_counter
+    }
+
+    fn jump_three_kind_scoped_defense(&self) -> bool {
+        self.enable_jump_three_kind_scoped_defense
     }
 }
 
@@ -79,6 +84,7 @@ fn main() -> Result<(), String> {
             args.enable_jump_three,
             args.enable_jump_three_attack_defense,
             args.enable_jump_three_counter,
+            args.enable_jump_three_kind_scoped_defense,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -109,6 +115,7 @@ fn main() -> Result<(), String> {
         "enable_jump_three": args.enable_jump_three,
         "jump_three_attack_defense": args.jump_three_attack_defense(),
         "jump_three_counter": args.jump_three_counter(),
+        "jump_three_kind_scoped_defense": args.jump_three_kind_scoped_defense(),
         "records_scanned": records,
         "usable": usable,
         "skipped": skipped,
@@ -135,6 +142,7 @@ fn solve_record(
     enable_jump_three: bool,
     enable_jump_three_attack_defense: bool,
     enable_jump_three_counter: bool,
+    enable_jump_three_kind_scoped_defense: bool,
 ) -> Result<Value, String> {
     let class = rec
         .get("class")
@@ -165,6 +173,7 @@ fn solve_record(
         enable_jump_three,
         enable_jump_three_attack_defense,
         enable_jump_three_counter,
+        enable_jump_three_kind_scoped_defense,
     );
     let actual_move = parse_move(rec.get("actual_move").ok_or("missing actual_move")?)?;
     let after_actual_opp_vct = if board.is_empty(actual_move) {
@@ -176,6 +185,7 @@ fn solve_record(
             enable_jump_three,
             enable_jump_three_attack_defense,
             enable_jump_three_counter,
+            enable_jump_three_kind_scoped_defense,
         );
         board.undo_move();
         out
@@ -214,6 +224,7 @@ fn solve_record(
         "enable_jump_three": enable_jump_three,
         "jump_three_attack_defense": enable_jump_three || enable_jump_three_attack_defense,
         "jump_three_counter": enable_jump_three || enable_jump_three_counter,
+        "jump_three_kind_scoped_defense": enable_jump_three_kind_scoped_defense,
         "pre_vct": pre_vct,
         "after_actual_opp_vct": after_actual_opp_vct,
     }))
@@ -226,6 +237,7 @@ fn run_sweep(
     enable_jump_three: bool,
     enable_jump_three_attack_defense: bool,
     enable_jump_three_counter: bool,
+    enable_jump_three_kind_scoped_defense: bool,
 ) -> Value {
     let mut attempts = Vec::new();
     let mut first_hit: Option<Value> = None;
@@ -237,6 +249,7 @@ fn run_sweep(
             enable_jump_three,
             enable_jump_three_attack_defense,
             enable_jump_three_counter,
+            enable_jump_three_kind_scoped_defense,
         };
         let started = Instant::now();
         let should_capture_proof = include_proof && first_hit.is_none();
@@ -432,6 +445,8 @@ fn parse_args() -> Result<Args, String> {
     let mut enable_jump_three_attack_defense =
         env_flag("FIGRID_VCT_ENABLE_JUMP_THREE_ATTACK_DEFENSE");
     let mut enable_jump_three_counter = env_flag("FIGRID_VCT_ENABLE_JUMP_THREE_COUNTER");
+    let mut enable_jump_three_kind_scoped_defense =
+        env_flag("FIGRID_VCT_ENABLE_JUMP_THREE_KIND_SCOPED_DEFENSE");
 
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -449,6 +464,9 @@ fn parse_args() -> Result<Args, String> {
             "--enable-jump-three" => enable_jump_three = true,
             "--enable-jump-three-attack-defense" => enable_jump_three_attack_defense = true,
             "--enable-jump-three-counter" => enable_jump_three_counter = true,
+            "--enable-jump-three-kind-scoped-defense" => {
+                enable_jump_three_kind_scoped_defense = true
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -466,6 +484,7 @@ fn parse_args() -> Result<Args, String> {
         enable_jump_three,
         enable_jump_three_attack_defense,
         enable_jump_three_counter,
+        enable_jump_three_kind_scoped_defense,
     })
 }
 
@@ -500,6 +519,6 @@ fn env_flag(name: &str) -> bool {
 
 fn print_help() {
     eprintln!(
-        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter]"
+        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense]"
     );
 }

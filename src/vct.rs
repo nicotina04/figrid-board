@@ -429,6 +429,8 @@ pub struct VctConfig {
     pub enable_jump_three_counter: bool,
     /// RQ562 reach-control: only add direct JumpThree defenses for JumpThree OR moves.
     pub enable_jump_three_kind_scoped_defense: bool,
+    /// RQ563 scheduling: generate JumpThree attack candidates only for OR levels < K.
+    pub jump_attack_max_or_levels: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -436,6 +438,7 @@ struct VctJumpThreeFlags {
     attack_defense: bool,
     counter: bool,
     kind_scoped_defense: bool,
+    attack_max_or_levels: u32,
 }
 
 impl VctConfig {
@@ -444,6 +447,7 @@ impl VctConfig {
             attack_defense: self.enable_jump_three || self.enable_jump_three_attack_defense,
             counter: self.enable_jump_three || self.enable_jump_three_counter,
             kind_scoped_defense: self.enable_jump_three_kind_scoped_defense,
+            attack_max_or_levels: self.jump_attack_max_or_levels,
         }
     }
 }
@@ -495,6 +499,7 @@ impl Default for VctConfig {
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
             enable_jump_three_kind_scoped_defense: false,
+            jump_attack_max_or_levels: u32::MAX,
         }
     }
 }
@@ -518,6 +523,7 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
         board,
         attacker,
         cfg.max_depth,
+        0,
         deadline,
         flags,
         &mut sequence,
@@ -542,6 +548,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         board,
         attacker,
         cfg.max_depth,
+        0,
         deadline,
         flags,
         &mut sequence,
@@ -565,6 +572,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         "jump_three_attack_defense": flags.attack_defense,
         "jump_three_counter": flags.counter,
         "jump_three_kind_scoped_defense": flags.kind_scoped_defense,
+        "jump_attack_max_or_levels": flags.attack_max_or_levels,
         "sequence": if hit { Some(sequence.iter().map(|&mv| move_json(mv)).collect::<Vec<_>>()) } else { None },
         "and_nodes": audit.and_nodes,
         "terminal_event_count": audit.terminal_event_count,
@@ -603,6 +611,7 @@ fn vct_or(
     board: &mut Board,
     attacker: Stone,
     depth: u32,
+    or_level: u32,
     deadline: Option<Instant>,
     jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
@@ -635,7 +644,9 @@ fn vct_or(
     let rule_set = board.effective_rule_set();
     let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
 
-    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, jump_three.attack_defense);
+    let enable_jump_three_attack =
+        jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
+    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, enable_jump_three_attack);
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -672,6 +683,7 @@ fn vct_or(
             attacker,
             kind,
             depth - 1,
+            or_level,
             deadline,
             jump_three,
             sequence,
@@ -716,6 +728,7 @@ fn vct_and(
     attacker: Stone,
     attack_kind: ThreatKind,
     depth: u32,
+    or_level: u32,
     deadline: Option<Instant>,
     jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
@@ -762,6 +775,7 @@ fn vct_and(
             board,
             attacker,
             depth - 1,
+            or_level + 1,
             deadline,
             jump_three,
             sequence,
@@ -788,6 +802,7 @@ fn vct_or_audit(
     board: &mut Board,
     attacker: Stone,
     depth: u32,
+    or_level: u32,
     deadline: Option<Instant>,
     jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
@@ -828,7 +843,9 @@ fn vct_or_audit(
     let rule_set = board.effective_rule_set();
     let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
 
-    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, jump_three.attack_defense);
+    let enable_jump_three_attack =
+        jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
+    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, enable_jump_three_attack);
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -896,6 +913,7 @@ fn vct_or_audit(
             attacker,
             kind,
             depth - 1,
+            or_level,
             deadline,
             jump_three,
             sequence,
@@ -935,6 +953,7 @@ fn vct_and_audit(
     attacker: Stone,
     attack_kind: ThreatKind,
     depth: u32,
+    or_level: u32,
     deadline: Option<Instant>,
     jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
@@ -963,6 +982,7 @@ fn vct_and_audit(
         audit.and_nodes.push(json!({
             "node": "and",
             "depth": depth,
+            "or_level": or_level,
             "attacker": stone_json(attacker),
             "defender": stone_json(defender),
             "history": node_history,
@@ -984,6 +1004,7 @@ fn vct_and_audit(
         audit.and_nodes.push(json!({
             "node": "and",
             "depth": depth,
+            "or_level": or_level,
             "attacker": stone_json(attacker),
             "defender": stone_json(defender),
             "history": node_history,
@@ -1009,6 +1030,7 @@ fn vct_and_audit(
             board,
             attacker,
             depth - 1,
+            or_level + 1,
             deadline,
             jump_three,
             sequence,
@@ -1040,6 +1062,7 @@ fn vct_and_audit(
             audit.and_nodes.push(json!({
                 "node": "and",
                 "depth": depth,
+                "or_level": or_level,
                 "attacker": stone_json(attacker),
                 "defender": stone_json(defender),
                 "history": node_history,
@@ -1056,6 +1079,7 @@ fn vct_and_audit(
     audit.and_nodes.push(json!({
         "node": "and",
         "depth": depth,
+        "or_level": or_level,
         "attacker": stone_json(attacker),
         "defender": stone_json(defender),
         "history": node_history,
@@ -1789,6 +1813,7 @@ mod tests {
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
             enable_jump_three_kind_scoped_defense: false,
+            jump_attack_max_or_levels: u32::MAX,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -1840,6 +1865,7 @@ mod tests {
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
             enable_jump_three_kind_scoped_defense: false,
+            jump_attack_max_or_levels: u32::MAX,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -1862,6 +1888,7 @@ mod tests {
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
             enable_jump_three_kind_scoped_defense: false,
+            jump_attack_max_or_levels: u32::MAX,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

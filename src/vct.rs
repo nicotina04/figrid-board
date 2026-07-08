@@ -620,7 +620,7 @@ impl Default for VctConfig {
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
-            use_fast_classify: false,
+            use_fast_classify: true,
         }
     }
 }

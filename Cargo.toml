@@ -107,6 +107,10 @@ name = "rq558b-color-symmetry"
 path = "bin/rq558b_color_symmetry.rs"
 required-features = ["codebook-eval"]
 
+[[bin]]
+name = "rq572-classify-equivalence"
+path = "bin/rq572_classify_equivalence.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

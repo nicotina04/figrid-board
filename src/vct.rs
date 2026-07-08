@@ -311,6 +311,41 @@ pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
     classify_move_fast_with_flags(board, mv, side, false, false)
 }
 
+/// RQ572 audit hook: expose the slow rule-scan classifier with the same
+/// flags as the fast Pattern4 classifier. This is not used by search.
+pub fn classify_move_rules_with_flags_for_audit(
+    board: &Board,
+    mv: Move,
+    side: Stone,
+    enable_jump_three: bool,
+    enable_gap_four: bool,
+) -> ThreatKind {
+    debug_assert!(board.is_empty(mv), "candidate move cell must be empty");
+    let (my, opp) = bb_pair(board, side);
+    classify_move_rules_with_flags(
+        my,
+        opp,
+        mv,
+        side,
+        board.effective_rule_set(),
+        enable_jump_three,
+        enable_gap_four,
+    )
+}
+
+/// RQ572 audit hook: expose the fast Pattern4 classifier with feature flags.
+/// This is paired with `classify_move_rules_with_flags_for_audit`.
+pub fn classify_move_fast_with_flags_for_audit(
+    board: &Board,
+    mv: Move,
+    side: Stone,
+    enable_jump_three: bool,
+    enable_gap_four: bool,
+) -> ThreatKind {
+    debug_assert!(board.is_empty(mv), "candidate move cell must be empty");
+    classify_move_fast_with_flags(board, mv, side, enable_jump_three, enable_gap_four)
+}
+
 #[cfg(test)]
 fn classify_move_fast_with_jump_three(
     board: &Board,
@@ -491,6 +526,8 @@ pub struct VctConfig {
     pub jump_attack_max_or_levels: u32,
     /// RQ567 gate: broken-four (`X.XXX` / `XX.XX` / `XXX.X`) vocabulary.
     pub enable_gap_four: bool,
+    /// RQ572 gate: use Pattern4 fast classify in prover attack/counter scans.
+    pub use_fast_classify: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -500,6 +537,7 @@ struct VctJumpThreeFlags {
     kind_scoped_defense: bool,
     attack_max_or_levels: u32,
     gap_four: bool,
+    use_fast_classify: bool,
 }
 
 impl VctConfig {
@@ -510,6 +548,7 @@ impl VctConfig {
             kind_scoped_defense: self.enable_jump_three_kind_scoped_defense,
             attack_max_or_levels: self.jump_attack_max_or_levels,
             gap_four: self.enable_gap_four,
+            use_fast_classify: self.use_fast_classify,
         }
     }
 }
@@ -563,6 +602,7 @@ impl Default for VctConfig {
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
+            use_fast_classify: false,
         }
     }
 }
@@ -637,6 +677,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         "jump_three_kind_scoped_defense": flags.kind_scoped_defense,
         "jump_attack_max_or_levels": flags.attack_max_or_levels,
         "gap_four": flags.gap_four,
+        "use_fast_classify": flags.use_fast_classify,
         "sequence": if hit { Some(sequence.iter().map(|&mv| move_json(mv)).collect::<Vec<_>>()) } else { None },
         "and_nodes": audit.and_nodes,
         "terminal_event_count": audit.terminal_event_count,
@@ -711,12 +752,14 @@ fn vct_or(
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
     let attack_moves = gather_attack_moves(
+        board,
         my,
         opp,
         attacker,
         rule_set,
         enable_jump_three_attack,
         jump_three.gap_four,
+        jump_three.use_fast_classify,
     );
     if attack_moves.is_empty() {
         tt.insert(
@@ -917,12 +960,14 @@ fn vct_or_audit(
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
     let attack_moves = gather_attack_moves(
+        board,
         my,
         opp,
         attacker,
         rule_set,
         enable_jump_three_attack,
         jump_three.gap_four,
+        jump_three.use_fast_classify,
     );
     if attack_moves.is_empty() {
         tt.insert(
@@ -1171,12 +1216,14 @@ fn vct_and_audit(
 }
 
 fn gather_attack_moves(
+    board: &Board,
     my: &BitBoard,
     opp: &BitBoard,
     side: Stone,
     rule_set: RuleSet,
     enable_jump_three: bool,
     enable_gap_four: bool,
+    use_fast_classify: bool,
 ) -> Vec<(Move, ThreatKind)> {
     let mut out = Vec::new();
     let cells = my.count_ones() + opp.count_ones();
@@ -1188,15 +1235,19 @@ fn gather_attack_moves(
         if my.get(idx) || opp.get(idx) {
             continue;
         }
-        let kind = classify_move_rules_with_flags(
-            my,
-            opp,
-            idx,
-            side,
-            rule_set,
-            enable_jump_three,
-            enable_gap_four,
-        );
+        let kind = if use_fast_classify {
+            classify_move_fast_with_flags(board, idx, side, enable_jump_three, enable_gap_four)
+        } else {
+            classify_move_rules_with_flags(
+                my,
+                opp,
+                idx,
+                side,
+                rule_set,
+                enable_jump_three,
+                enable_gap_four,
+            )
+        };
         if kind.is_forcing() {
             out.push((idx, kind));
         }
@@ -1267,15 +1318,25 @@ fn find_defenses_with_counters(
         if def_my.get(idx) || def_opp.get(idx) || seen.get(idx) {
             continue;
         }
-        let kind = classify_move_rules_with_flags(
-            def_my,
-            def_opp,
-            idx,
-            board.side_to_move,
-            rule_set,
-            jump_three.counter,
-            jump_three.gap_four,
-        );
+        let kind = if jump_three.use_fast_classify {
+            classify_move_fast_with_flags(
+                board,
+                idx,
+                board.side_to_move,
+                jump_three.counter,
+                jump_three.gap_four,
+            )
+        } else {
+            classify_move_rules_with_flags(
+                def_my,
+                def_opp,
+                idx,
+                board.side_to_move,
+                rule_set,
+                jump_three.counter,
+                jump_three.gap_four,
+            )
+        };
         // Winning 위협뿐 아니라 Forcing(ClosedFour/OpenThree) 반격도 포함해야
         // 원거리 카운터 공격을 AND가 놓치지 않음.
         if kind.is_forcing() {
@@ -1752,11 +1813,13 @@ mod tests {
         board.make_move(to_idx(0, 14));
 
         let moves = gather_attack_moves(
+            &board,
             &board.black,
             &board.white,
             Stone::Black,
             board.effective_rule_set(),
             true,
+            false,
             false,
         );
         assert!(
@@ -1798,11 +1861,13 @@ mod tests {
             ThreatKind::None
         );
         let moves = gather_attack_moves(
+            &board,
             &board.black,
             &board.white,
             Stone::Black,
             board.effective_rule_set(),
             true,
+            false,
             false,
         );
         assert!(
@@ -1846,12 +1911,14 @@ mod tests {
             ThreatKind::ClosedFour
         );
         let moves = gather_attack_moves(
+            &board,
             &board.black,
             &board.white,
             Stone::Black,
             board.effective_rule_set(),
             true,
             true,
+            false,
         );
         assert!(
             moves
@@ -2059,6 +2126,7 @@ mod tests {
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
+            use_fast_classify: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -2112,6 +2180,7 @@ mod tests {
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
+            use_fast_classify: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -2136,6 +2205,7 @@ mod tests {
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
+            use_fast_classify: false,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

@@ -140,23 +140,22 @@ pub fn enumerate_patterns() -> HashMap<u32, PatternId> {
     table
 }
 
-/// 우리 NNUE에서 실제로 추적하는 mapped pattern ID 수.
-/// Top 16384 = 학습 데이터에서 99.24% 커버 + rare bucket 1개 = 16385.
-// Top-K를 4096으로 축소 — 16384에서 17:1 (params:samples) ratio 였던 것을
-// 4:1 (v13 수준)로 정상화. coverage는 99.24% → 약 97.5% (top 5K가 97.81%).
-// 거의 lossless이면서 Pattern4 weights 대부분이 학습 가능 영역에 진입.
-pub const PATTERN_TOP_K: usize = 4096;
-pub const PATTERN_RARE_ID: u16 = PATTERN_TOP_K as u16; // = 4096, "그 외" bucket
-pub const PATTERN_NUM_IDS: usize = PATTERN_TOP_K + 1; // = 4097
+/// Frequency top-K mapped pattern ids plus the RQ569 swap-closure tail.
+///
+/// The first 4096 entries preserve the original frequency order and id
+/// assignments. The last 169 entries are the missing color-swapped canonical
+/// partners, making `swap_mapped_id` an involution over all non-RARE ids.
+pub const PATTERN_TOP_K: usize = 4265;
+pub const PATTERN_RARE_ID: u16 = PATTERN_TOP_K as u16; // = 4265, rare bucket
+pub const PATTERN_NUM_IDS: usize = PATTERN_TOP_K + 1; // = 4266
 
-/// `pattern_freq_stats --dump-top-k 16384` 가 만든 binary embed.
-/// 16384 × u32 little-endian = 65 536 bytes. canonical packed value를
-/// 빈도 내림차순으로 나열.
+/// Binary embed of canonical packed values.
+/// 4265 x u32 little-endian = 17,060 bytes.
 const TOPK_BYTES: &[u8] = include_bytes!("../data/topk.bin");
 
 /// 4M 엔트리 dense lookup table. raw packed window → mapped pattern ID
-/// (u16). Top 16K canonical packed에 들어가는 packed/reflection은 0..16383
-/// 값, 그 외 realizable raw는 PATTERN_RARE_ID (16384).
+/// (u16). Swap-closed top-K canonical packed values map to
+/// `0..PATTERN_TOP_K`; other realizable raw windows map to `PATTERN_RARE_ID`.
 ///
 /// 메모리 8 MB (u16 × 4M). lookup은 단순 array index.
 /// OnceLock 으로 첫 호출 시 build (~수 초).
@@ -169,7 +168,7 @@ fn build_dense_mapped_table() -> Vec<u16> {
     let n = 1usize << 22;
     let mut t = vec![PATTERN_RARE_ID; n];
 
-    // Top 16K canonical packed → mapped ID 0..16383
+    // Swap-closed top-K canonical packed → mapped ID 0..PATTERN_TOP_K.
     let mut canonical_to_mapped: HashMap<u32, u16> = HashMap::with_capacity(PATTERN_TOP_K);
     debug_assert!(TOPK_BYTES.len() == PATTERN_TOP_K * 4);
     for (i, chunk) in TOPK_BYTES.chunks(4).enumerate() {
@@ -194,7 +193,7 @@ fn build_dense_mapped_table() -> Vec<u16> {
     t
 }
 
-/// raw packed 11-cell window → mapped pattern ID (0..16384, 16384=rare).
+/// raw packed 11-cell window → mapped pattern ID.
 /// Caller가 read_window로 만든 packed를 그대로 넘기면 O(1) lookup.
 #[inline]
 pub fn lookup_mapped_id(packed: u32) -> u16 {
@@ -215,9 +214,9 @@ pub fn empty_pattern_mapped_id() -> u16 {
 ///
 /// `line_pattern_ids` 는 black-relative storage이므로 stm == White일 때
 /// stm-perspective feature를 emit하려면 ID를 swap해야 한다. 이 lookup이
-/// O(1)로 가능하도록 16385-entry swap table을 미리 빌드.
+/// O(1)로 가능하도록 PATTERN_NUM_IDS-entry swap table을 미리 빌드.
 ///
-/// rare bucket(16384)은 swap도 rare로 매핑.
+/// rare bucket은 swap도 rare로 매핑.
 fn swap_table() -> &'static [u16; PATTERN_NUM_IDS] {
     static TABLE: OnceLock<Box<[u16; PATTERN_NUM_IDS]>> = OnceLock::new();
     TABLE.get_or_init(|| Box::new(build_swap_table()))
@@ -226,7 +225,7 @@ fn swap_table() -> &'static [u16; PATTERN_NUM_IDS] {
 fn build_swap_table() -> [u16; PATTERN_NUM_IDS] {
     let mut t = [PATTERN_RARE_ID; PATTERN_NUM_IDS];
 
-    // Top 16K canonical packed의 swap → 그 canonical의 mapped ID.
+    // Swap-closed top-K canonical packed의 swap → 그 canonical의 mapped ID.
     // 1) canonical_packed → mapped 사전 재구성.
     let mut canonical_to_mapped: HashMap<u32, u16> = HashMap::with_capacity(PATTERN_TOP_K);
     for (i, chunk) in TOPK_BYTES.chunks(4).enumerate() {
@@ -506,6 +505,28 @@ mod tests {
         let w: LineWindow = [3, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0];
         let reversed: LineWindow = std::array::from_fn(|i| w[10 - i]);
         assert_eq!(canonicalize(&w), canonicalize(&reversed));
+    }
+
+    #[test]
+    fn topk_bytes_match_pattern_constants() {
+        assert_eq!(PATTERN_TOP_K, 4265);
+        assert_eq!(PATTERN_RARE_ID, 4265);
+        assert_eq!(PATTERN_NUM_IDS, 4266);
+        assert_eq!(TOPK_BYTES.len(), PATTERN_TOP_K * 4);
+    }
+
+    #[test]
+    fn swap_table_is_closed_involution() {
+        for id in 0..PATTERN_TOP_K {
+            let swapped = swap_mapped_id(id as u16);
+            assert_ne!(swapped, PATTERN_RARE_ID, "id {id} still swaps open to RARE");
+            assert_eq!(
+                swap_mapped_id(swapped),
+                id as u16,
+                "swap must be an involution for id {id}"
+            );
+        }
+        assert_eq!(swap_mapped_id(PATTERN_RARE_ID), PATTERN_RARE_ID);
     }
 
     #[test]

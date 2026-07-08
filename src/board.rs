@@ -217,7 +217,7 @@ pub const fn zobrist_stone_key(stone: Stone, cell: usize) -> u64 {
 
 /// 4 directional 11-cell line pattern mapped IDs per cell.
 /// Pattern4 mini의 incremental state cache. 값 ∈ [0, PATTERN_NUM_IDS)
-/// (= 0..16385): top 16K mapped + rare bucket 16384. u16에 들어감.
+/// (= 0..PATTERN_NUM_IDS): swap-closed mapped ids plus rare bucket. u16에 들어감.
 ///
 /// Black-relative storage: 1=black, 2=white로 read_window. side_to_move
 /// 변경에 따라 ID 재계산 안 함 (perspective 변환은 NNUE feature 매핑

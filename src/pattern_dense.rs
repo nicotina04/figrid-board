@@ -13,7 +13,7 @@
 //!    seeded, and treated as **frozen** at inference time. Parameters
 //!    learned downstream live in noru's `dense_to_acc` weights, not here;
 //!    the embedding is a fixed random projection (Rahimi-Recht style)
-//!    that lets noru's small dense branch consume figrid's 4097-class
+//!    that lets noru's small dense branch consume figrid's mapped-id
 //!    Pattern4 vocabulary.
 //! 2. For every position the dense input vector is the *sum* of the
 //!    embeddings looked up at every (cell, direction) of the board, i.e.
@@ -73,7 +73,7 @@ impl Pattern4Embedding {
 }
 
 /// Process-wide singleton holding the frozen embedding. The first
-/// access pays the build cost (~3 ms for 4097 × 64 normal samples);
+/// access pays the build cost (a few ms for PATTERN_NUM_IDS × 64 samples);
 /// every subsequent reader sees the same table without lock contention.
 pub fn embedding() -> &'static Pattern4Embedding {
     static TABLE: OnceLock<Pattern4Embedding> = OnceLock::new();

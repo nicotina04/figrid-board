@@ -1,5 +1,16 @@
 # Changes
 
+## 0.7.4 (2026-07-08)
+* **Swap-close the Pattern4 mapped-id table for codebook evaluation.** RQ568
+  found that 169 of the original 4096 frequency-top-K Pattern4 ids mapped to
+  `RARE` after color swap, creating a codebook-only color-swap asymmetry. RQ569
+  keeps the original 4096 ids stable and appends the 169 missing swapped
+  canonical partners, so non-RARE ids now form an exact swap involution.
+* **Pattern id boundary changed:** `PATTERN_TOP_K = 4265`,
+  `PATTERN_RARE_ID = 4265`, and `PATTERN_NUM_IDS = 4266`. Old 4097-row
+  codebook artifacts are intentionally rejected by loader size checks unless
+  migrated with the RQ569 rare-row copy rule.
+
 ## 0.7.3 (2026-07-05)
 * **Fix a low-frequency root VCT false-positive proof bug.** Versions
   0.4.x through 0.7.2 could treat `FourThree` / `DoubleThree` as terminal

@@ -538,6 +538,8 @@ pub struct VctConfig {
     pub use_reach_mask: bool,
     /// RQ578 gate: use a five-only immediate-win detector instead of full classify.
     pub use_fast_immediate_five: bool,
+    /// RQ579 gate: reuse VCT-local Vec buffers across recursive nodes.
+    pub use_vct_scratch_buffers: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -551,6 +553,7 @@ struct VctJumpThreeFlags {
     use_threat_index: bool,
     use_reach_mask: bool,
     use_fast_immediate_five: bool,
+    use_vct_scratch_buffers: bool,
 }
 
 impl VctConfig {
@@ -565,6 +568,45 @@ impl VctConfig {
             use_threat_index: self.use_threat_index,
             use_reach_mask: self.use_reach_mask,
             use_fast_immediate_five: self.use_fast_immediate_five,
+            use_vct_scratch_buffers: self.use_vct_scratch_buffers,
+        }
+    }
+}
+
+#[derive(Default)]
+struct VctScratch {
+    attack_pool: Vec<Vec<(Move, ThreatKind)>>,
+    defense_pool: Vec<Vec<Move>>,
+}
+
+impl VctScratch {
+    fn take_attack(&mut self, enabled: bool) -> Vec<(Move, ThreatKind)> {
+        if enabled {
+            self.attack_pool.pop().unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn put_attack(&mut self, enabled: bool, mut buf: Vec<(Move, ThreatKind)>) {
+        if enabled {
+            buf.clear();
+            self.attack_pool.push(buf);
+        }
+    }
+
+    fn take_defense(&mut self, enabled: bool) -> Vec<Move> {
+        if enabled {
+            self.defense_pool.pop().unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn put_defense(&mut self, enabled: bool, mut buf: Vec<Move>) {
+        if enabled {
+            buf.clear();
+            self.defense_pool.push(buf);
         }
     }
 }
@@ -1073,6 +1115,7 @@ impl Default for VctConfig {
             profile: false,
             use_reach_mask: true,
             use_fast_immediate_five: false,
+            use_vct_scratch_buffers: false,
         }
     }
 }
@@ -1093,6 +1136,7 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
     let mut stats = VctSearchStats::default();
     stats.profile_enabled = cfg.profile;
     let flags = cfg.jump_three_flags();
+    let mut scratch = VctScratch::default();
     let mut threat_index = if flags.use_threat_index && flags.use_fast_classify {
         Some(VctThreatIndex::new(board))
     } else {
@@ -1110,6 +1154,7 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
         &mut sequence,
         &mut tt,
         &mut stats,
+        &mut scratch,
     );
     VctSearchResult {
         sequence: if hit { Some(sequence) } else { None },
@@ -1126,6 +1171,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
     let mut stats = VctSearchStats::default();
     stats.profile_enabled = cfg.profile;
     let flags = cfg.jump_three_flags();
+    let mut scratch = VctScratch::default();
     let mut threat_index = if flags.use_threat_index && flags.use_fast_classify {
         Some(VctThreatIndex::new(board))
     } else {
@@ -1144,6 +1190,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         &mut tt,
         &mut audit,
         &mut stats,
+        &mut scratch,
     );
     let result = VctSearchResult {
         sequence: if hit { Some(sequence.clone()) } else { None },
@@ -1215,6 +1262,7 @@ fn vct_or(
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     stats: &mut VctSearchStats,
+    scratch: &mut VctScratch,
 ) -> bool {
     stats.enter_node();
     if node_budget_exceeded(node_budget, stats) {
@@ -1293,9 +1341,12 @@ fn vct_or(
             jump_three.use_fast_classify,
             attacker_reach_mask.as_ref(),
             Some(stats),
+            scratch,
+            jump_three.use_vct_scratch_buffers,
         )
     };
     if attack_moves.is_empty() {
+        scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
         let start = profile_start(stats);
         tt.insert(
             hash,
@@ -1311,7 +1362,7 @@ fn vct_or(
         return false;
     }
 
-    for (mv, kind) in attack_moves {
+    for (mv, kind) in attack_moves.iter().copied() {
         let start = profile_start(stats);
         let terminal_win = is_vct_terminal_win(kind);
         if let Some(start) = start {
@@ -1335,6 +1386,7 @@ fn vct_or(
                 stats.profile.tt_insert_calls += 1;
                 stats.profile.tt_insert_ns += start.elapsed().as_nanos();
             }
+            scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
             return true;
         }
         if opp_has_immediate_five {
@@ -1355,10 +1407,12 @@ fn vct_or(
             sequence,
             tt,
             stats,
+            scratch,
         );
         undo_vct_move_profiled(board, threat_index, stats);
         if stats.hit_stop() {
             sequence.pop();
+            scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
             return false;
         }
         if won {
@@ -1374,6 +1428,7 @@ fn vct_or(
                 stats.profile.tt_insert_calls += 1;
                 stats.profile.tt_insert_ns += start.elapsed().as_nanos();
             }
+            scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
             return true;
         }
         sequence.pop();
@@ -1390,6 +1445,7 @@ fn vct_or(
         stats.profile.tt_insert_calls += 1;
         stats.profile.tt_insert_ns += start.elapsed().as_nanos();
     }
+    scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
     false
 }
 
@@ -1412,6 +1468,7 @@ fn vct_and(
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     stats: &mut VctSearchStats,
+    scratch: &mut VctScratch,
 ) -> bool {
     stats.enter_node();
     if node_budget_exceeded(node_budget, stats) {
@@ -1467,15 +1524,18 @@ fn vct_and(
             threat_index.as_ref(),
             defender_reach_mask.as_ref(),
             Some(stats),
+            scratch,
+            jump_three.use_vct_scratch_buffers,
         ),
         None => board.candidate_moves(),
     };
     if defenses.is_empty() {
+        scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
         return false;
     }
 
     let checkpoint = sequence.len();
-    for mv in defenses {
+    for mv in defenses.iter().copied() {
         // 각 분기 시작 시 이전 분기의 흔적 제거.
         sequence.truncate(checkpoint);
         sequence.push(mv);
@@ -1493,20 +1553,24 @@ fn vct_and(
             sequence,
             tt,
             stats,
+            scratch,
         );
         undo_vct_move_profiled(board, threat_index, stats);
         if stats.hit_stop() {
             sequence.truncate(checkpoint);
+            scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
             return false;
         }
 
         if !attacker_still_wins {
             // 이 방어로 공격 실패 → AND 실패. 수열 복원.
             sequence.truncate(checkpoint);
+            scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
             return false;
         }
         // 성공 → 다음 분기로. 마지막 분기의 수열이 최종 sequence가 됨.
     }
+    scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
     true
 }
 
@@ -1523,6 +1587,7 @@ fn vct_or_audit(
     tt: &mut TransTable,
     audit: &mut VctAuditLog,
     stats: &mut VctSearchStats,
+    scratch: &mut VctScratch,
 ) -> bool {
     stats.enter_node();
     if node_budget_exceeded(node_budget, stats) {
@@ -1603,9 +1668,12 @@ fn vct_or_audit(
             jump_three.use_fast_classify,
             attacker_reach_mask.as_ref(),
             Some(stats),
+            scratch,
+            jump_three.use_vct_scratch_buffers,
         )
     };
     if attack_moves.is_empty() {
+        scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
         let start = profile_start(stats);
         tt.insert(
             hash,
@@ -1621,7 +1689,7 @@ fn vct_or_audit(
         return false;
     }
 
-    for (mv, kind) in attack_moves {
+    for (mv, kind) in attack_moves.iter().copied() {
         let start = profile_start(stats);
         let terminal_win = is_vct_terminal_win(kind);
         if let Some(start) = start {
@@ -1666,6 +1734,7 @@ fn vct_or_audit(
                 stats.profile.tt_insert_calls += 1;
                 stats.profile.tt_insert_ns += start.elapsed().as_nanos();
             }
+            scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
             return true;
         }
         if opp_has_immediate_five {
@@ -1697,10 +1766,12 @@ fn vct_or_audit(
             tt,
             audit,
             stats,
+            scratch,
         );
         undo_vct_move_profiled(board, threat_index, stats);
         if stats.hit_stop() {
             sequence.pop();
+            scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
             return false;
         }
         if won {
@@ -1716,6 +1787,7 @@ fn vct_or_audit(
                 stats.profile.tt_insert_calls += 1;
                 stats.profile.tt_insert_ns += start.elapsed().as_nanos();
             }
+            scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
             return true;
         }
         sequence.pop();
@@ -1732,6 +1804,7 @@ fn vct_or_audit(
         stats.profile.tt_insert_calls += 1;
         stats.profile.tt_insert_ns += start.elapsed().as_nanos();
     }
+    scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
     false
 }
 
@@ -1749,6 +1822,7 @@ fn vct_and_audit(
     tt: &mut TransTable,
     audit: &mut VctAuditLog,
     stats: &mut VctSearchStats,
+    scratch: &mut VctScratch,
 ) -> bool {
     stats.enter_node();
     if node_budget_exceeded(node_budget, stats) {
@@ -1817,6 +1891,8 @@ fn vct_and_audit(
             threat_index.as_ref(),
             defender_reach_mask.as_ref(),
             Some(stats),
+            scratch,
+            jump_three.use_vct_scratch_buffers,
         ),
         None => board.candidate_moves(),
     };
@@ -1835,12 +1911,13 @@ fn vct_and_audit(
             "result": false,
             "terminal_reason": "no_defenses",
         }));
+        scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
         return false;
     }
 
     let checkpoint = sequence.len();
     let mut defense_results = Vec::with_capacity(defenses.len());
-    for mv in defenses {
+    for mv in defenses.iter().copied() {
         sequence.truncate(checkpoint);
         sequence.push(mv);
 
@@ -1859,10 +1936,12 @@ fn vct_and_audit(
             tt,
             audit,
             stats,
+            scratch,
         );
         undo_vct_move_profiled(board, threat_index, stats);
         if stats.hit_stop() {
             sequence.truncate(checkpoint);
+            scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
             return false;
         }
         let tt_after = audit.tt_hit_count;
@@ -1895,6 +1974,7 @@ fn vct_and_audit(
                 "result": false,
                 "terminal_reason": "defense_refutes",
             }));
+            scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
             return false;
         }
     }
@@ -1911,6 +1991,7 @@ fn vct_and_audit(
         "defenses": defense_results,
         "result": true,
     }));
+    scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
     true
 }
 
@@ -1925,6 +2006,8 @@ fn gather_attack_moves(
     use_fast_classify: bool,
     reach_mask: Option<&BitBoard>,
     stats: Option<&mut VctSearchStats>,
+    scratch: &mut VctScratch,
+    reuse_buffers: bool,
 ) -> Vec<(Move, ThreatKind)> {
     let profile_enabled = stats.as_ref().map(|s| s.profiling()).unwrap_or(false);
     let total_start = if profile_enabled {
@@ -1934,7 +2017,7 @@ fn gather_attack_moves(
     };
     let mut classify_ns = 0u128;
     let mut classify_calls = 0u64;
-    let mut out = Vec::new();
+    let mut out = scratch.take_attack(reuse_buffers);
     let cells = my.count_ones() + opp.count_ones();
     // 첫 수면 패스 (vct 의미 없음).
     if cells == 0 {
@@ -2135,11 +2218,7 @@ pub fn has_immediate_five_reference_for_audit(
 }
 
 #[doc(hidden)]
-pub fn has_immediate_five_fast_for_audit(
-    board: &Board,
-    side: Stone,
-    use_reach_mask: bool,
-) -> bool {
+pub fn has_immediate_five_fast_for_audit(board: &Board, side: Stone, use_reach_mask: bool) -> bool {
     let (my, opp) = bb_pair(board, side);
     let reach_mask = use_reach_mask.then(|| reach_mask_for_stones(my));
     has_immediate_five_direction_scan(
@@ -2169,6 +2248,8 @@ fn find_defenses_with_counters(
     threat_index: Option<&VctThreatIndex>,
     reach_mask: Option<&BitBoard>,
     stats: Option<&mut VctSearchStats>,
+    scratch: &mut VctScratch,
+    reuse_buffers: bool,
 ) -> Vec<Move> {
     let profile_enabled = stats.as_ref().map(|s| s.profiling()).unwrap_or(false);
     let total_start = if profile_enabled {
@@ -2183,12 +2264,14 @@ fn find_defenses_with_counters(
     } else {
         None
     };
-    let mut defenses = find_defenses(
+    let direct_defenses = find_defenses(
         board,
         attack_move,
         direct_jump_three_defense,
         jump_three.gap_four,
     );
+    let mut defenses = scratch.take_defense(reuse_buffers);
+    defenses.extend(direct_defenses);
     let direct_ns = elapsed_ns(direct_start);
     let mut seen = BitBoard::EMPTY;
     for &d in &defenses {
@@ -2754,6 +2837,7 @@ mod tests {
         board.make_move(to_idx(7, 6));
         board.make_move(to_idx(0, 14));
 
+        let mut scratch = VctScratch::default();
         let moves = gather_attack_moves(
             &board,
             &board.black,
@@ -2765,6 +2849,8 @@ mod tests {
             false,
             None,
             None,
+            &mut scratch,
+            false,
         );
         assert!(
             moves
@@ -2804,6 +2890,7 @@ mod tests {
             classify_move_fast(&board, rapfi, Stone::Black),
             ThreatKind::None
         );
+        let mut scratch = VctScratch::default();
         let moves = gather_attack_moves(
             &board,
             &board.black,
@@ -2815,6 +2902,8 @@ mod tests {
             false,
             None,
             None,
+            &mut scratch,
+            false,
         );
         assert!(
             moves
@@ -2856,6 +2945,7 @@ mod tests {
             classify_move_fast_with_flags(&board, rapfi, Stone::Black, true, true),
             ThreatKind::ClosedFour
         );
+        let mut scratch = VctScratch::default();
         let moves = gather_attack_moves(
             &board,
             &board.black,
@@ -2867,6 +2957,8 @@ mod tests {
             false,
             None,
             None,
+            &mut scratch,
+            false,
         );
         assert!(
             moves
@@ -3103,6 +3195,7 @@ mod tests {
             profile: false,
             use_reach_mask: false,
             use_fast_immediate_five: false,
+            use_vct_scratch_buffers: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -3162,6 +3255,7 @@ mod tests {
             profile: false,
             use_reach_mask: false,
             use_fast_immediate_five: false,
+            use_vct_scratch_buffers: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -3192,6 +3286,7 @@ mod tests {
             profile: false,
             use_reach_mask: false,
             use_fast_immediate_five: false,
+            use_vct_scratch_buffers: false,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

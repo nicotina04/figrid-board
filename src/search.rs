@@ -188,6 +188,7 @@ fn defensive_vct_veto_replacement(
         profile: false,
         use_reach_mask: true,
         use_fast_immediate_five: false,
+        use_vct_scratch_buffers: false,
     };
     let unsafe_sequence = opponent_vct_sequence(board, incumbent, &cfg);
     if unsafe_sequence.is_none() {
@@ -1037,6 +1038,7 @@ impl Searcher {
             profile: false,
             use_reach_mask: true,
             use_fast_immediate_five: false,
+            use_vct_scratch_buffers: false,
         };
         if let Some(seq) = search_vct(board, &vct_cfg) {
             if let Some(&first) = seq.first() {
@@ -1295,6 +1297,7 @@ impl Searcher {
                 profile: false,
                 use_reach_mask: true,
                 use_fast_immediate_five: false,
+                use_vct_scratch_buffers: false,
             };
             if let Some(seq) = search_vct(board, &vct_cfg) {
                 if let Some(&first) = seq.first() {
@@ -1604,6 +1607,7 @@ impl Searcher {
                 profile: false,
                 use_reach_mask: true,
                 use_fast_immediate_five: false,
+                use_vct_scratch_buffers: false,
             };
             if let Some(seq) = search_vct(board, &vct_cfg) {
                 if let Some(&first) = seq.first() {

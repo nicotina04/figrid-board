@@ -30,6 +30,7 @@ struct Args {
     jump_attack_max_or_levels: u32,
     enable_gap_four: bool,
     use_fast_classify: bool,
+    node_budget: Option<u64>,
 }
 
 impl Args {
@@ -91,6 +92,7 @@ fn main() -> Result<(), String> {
             args.jump_attack_max_or_levels,
             args.enable_gap_four,
             args.use_fast_classify,
+            args.node_budget,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -125,6 +127,7 @@ fn main() -> Result<(), String> {
         "jump_attack_max_or_levels": args.jump_attack_max_or_levels,
         "enable_gap_four": args.enable_gap_four,
         "use_fast_classify": args.use_fast_classify,
+        "node_budget": args.node_budget,
         "records_scanned": records,
         "usable": usable,
         "skipped": skipped,
@@ -155,6 +158,7 @@ fn solve_record(
     jump_attack_max_or_levels: u32,
     enable_gap_four: bool,
     use_fast_classify: bool,
+    node_budget: Option<u64>,
 ) -> Result<Value, String> {
     let class = rec
         .get("class")
@@ -189,6 +193,7 @@ fn solve_record(
         jump_attack_max_or_levels,
         enable_gap_four,
         use_fast_classify,
+        node_budget,
     );
     let actual_move = parse_move(rec.get("actual_move").ok_or("missing actual_move")?)?;
     let after_actual_opp_vct = if board.is_empty(actual_move) {
@@ -204,6 +209,7 @@ fn solve_record(
             jump_attack_max_or_levels,
             enable_gap_four,
             use_fast_classify,
+            node_budget,
         );
         board.undo_move();
         out
@@ -246,6 +252,7 @@ fn solve_record(
         "jump_attack_max_or_levels": jump_attack_max_or_levels,
         "enable_gap_four": enable_gap_four,
         "use_fast_classify": use_fast_classify,
+        "node_budget": node_budget,
         "pre_vct": pre_vct,
         "after_actual_opp_vct": after_actual_opp_vct,
     }))
@@ -262,6 +269,7 @@ fn run_sweep(
     jump_attack_max_or_levels: u32,
     enable_gap_four: bool,
     use_fast_classify: bool,
+    node_budget: Option<u64>,
 ) -> Value {
     let mut attempts = Vec::new();
     let mut first_hit: Option<Value> = None;
@@ -269,7 +277,12 @@ fn run_sweep(
         let mut b = board.clone();
         let cfg_obj = VctConfig {
             max_depth: cfg.depth,
-            time_budget: Some(Duration::from_millis(cfg.budget_ms)),
+            time_budget: if cfg.budget_ms == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(cfg.budget_ms))
+            },
+            node_budget,
             enable_jump_three,
             enable_jump_three_attack_defense,
             enable_jump_three_counter,
@@ -280,7 +293,7 @@ fn run_sweep(
         };
         let started = Instant::now();
         let should_capture_proof = include_proof && first_hit.is_none();
-        let (seq, proof, nodes, deadline_hits, termination_reason) = if should_capture_proof {
+        let (seq, proof, nodes, deadline_hits, node_budget_hits, termination_reason) = if should_capture_proof {
             let proof_json = search_vct_audit_json(&mut b, &cfg_obj);
             let seq = proof_json
                 .get("sequence")
@@ -294,6 +307,10 @@ fn run_sweep(
             let nodes = proof_json.get("nodes").and_then(Value::as_u64).unwrap_or(0);
             let deadline_hits = proof_json
                 .get("deadline_hits")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let node_budget_hits = proof_json
+                .get("node_budget_hits")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let termination_reason = proof_json
@@ -310,7 +327,7 @@ fn run_sweep(
             } else {
                 None
             };
-            (seq, proof, nodes, deadline_hits, termination_reason)
+            (seq, proof, nodes, deadline_hits, node_budget_hits, termination_reason)
         } else {
             let result = search_vct_with_stats(&mut b, &cfg_obj);
             let termination_reason = result.termination_reason().to_string();
@@ -319,6 +336,7 @@ fn run_sweep(
                 None,
                 result.stats.nodes,
                 result.stats.deadline_hits,
+                result.stats.node_budget_hits,
                 termination_reason,
             )
         };
@@ -334,6 +352,7 @@ fn run_sweep(
             "elapsed_ms": elapsed_ms,
             "nodes": nodes,
             "deadline_hits": deadline_hits,
+            "node_budget_hits": node_budget_hits,
             "termination_reason": termination_reason,
             "hit": hit,
             "sequence_len": seq.as_ref().map(|s| s.len()).unwrap_or(0),
@@ -478,6 +497,7 @@ fn parse_args() -> Result<Args, String> {
         env_u32("FIGRID_VCT_JUMP_ATTACK_MAX_OR_LEVELS").unwrap_or(u32::MAX);
     let mut enable_gap_four = env_flag("FIGRID_VCT_ENABLE_GAP_FOUR");
     let mut use_fast_classify = env_flag("FIGRID_VCT_USE_FAST_CLASSIFY");
+    let mut node_budget = env_u64("FIGRID_VCT_NODE_BUDGET");
 
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -505,6 +525,13 @@ fn parse_args() -> Result<Args, String> {
             }
             "--enable-gap-four" => enable_gap_four = true,
             "--use-fast-classify" => use_fast_classify = true,
+            "--node-budget" => {
+                node_budget = Some(
+                    next_arg(&mut it, &arg)?
+                        .parse()
+                        .map_err(|e| format!("invalid --node-budget: {e}"))?,
+                )
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -526,6 +553,7 @@ fn parse_args() -> Result<Args, String> {
         jump_attack_max_or_levels,
         enable_gap_four,
         use_fast_classify,
+        node_budget,
     })
 }
 
@@ -562,8 +590,12 @@ fn env_u32(name: &str) -> Option<u32> {
     env::var(name).ok()?.parse().ok()
 }
 
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
 fn print_help() {
     eprintln!(
-        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K] [--enable-gap-four] [--use-fast-classify]"
+        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K] [--enable-gap-four] [--use-fast-classify] [--node-budget N]"
     );
 }

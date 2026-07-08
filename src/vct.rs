@@ -514,6 +514,8 @@ pub struct VctConfig {
     pub max_depth: u32,
     /// 전체 시간 예산. 초과 시 None 반환.
     pub time_budget: Option<Duration>,
+    /// RQ573 deterministic semantic gate: stop after this many entered nodes.
+    pub node_budget: Option<u64>,
     /// RQ560 compatibility gate. When true, enables all JumpThree sub-flags.
     pub enable_jump_three: bool,
     /// RQ561 factor: attack JumpThree candidates plus matching gap/completion defenses.
@@ -557,6 +559,7 @@ impl VctConfig {
 pub struct VctSearchStats {
     pub nodes: u64,
     pub deadline_hits: u64,
+    pub node_budget_hits: u64,
 }
 
 impl VctSearchStats {
@@ -568,8 +571,20 @@ impl VctSearchStats {
         self.deadline_hits += 1;
     }
 
+    fn mark_node_budget(&mut self) {
+        self.node_budget_hits += 1;
+    }
+
     pub fn hit_deadline(&self) -> bool {
         self.deadline_hits > 0
+    }
+
+    pub fn hit_node_budget(&self) -> bool {
+        self.node_budget_hits > 0
+    }
+
+    pub fn hit_stop(&self) -> bool {
+        self.hit_deadline() || self.hit_node_budget()
     }
 }
 
@@ -583,6 +598,8 @@ impl VctSearchResult {
     pub fn termination_reason(&self) -> &'static str {
         if self.sequence.is_some() {
             "proved"
+        } else if self.stats.hit_node_budget() {
+            "node_budget"
         } else if self.stats.hit_deadline() {
             "deadline"
         } else {
@@ -596,6 +613,7 @@ impl Default for VctConfig {
         Self {
             max_depth: 16,
             time_budget: Some(Duration::from_millis(500)),
+            node_budget: None,
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
@@ -628,6 +646,7 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
         cfg.max_depth,
         0,
         deadline,
+        cfg.node_budget,
         flags,
         &mut sequence,
         &mut tt,
@@ -653,6 +672,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         cfg.max_depth,
         0,
         deadline,
+        cfg.node_budget,
         flags,
         &mut sequence,
         &mut tt,
@@ -669,9 +689,11 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         "attacker": stone_json(attacker),
         "max_depth": cfg.max_depth,
         "time_budget_ms": cfg.time_budget.map(|d| d.as_millis() as u64),
+        "node_budget": cfg.node_budget,
         "termination_reason": result.termination_reason(),
         "nodes": result.stats.nodes,
         "deadline_hits": result.stats.deadline_hits,
+        "node_budget_hits": result.stats.node_budget_hits,
         "jump_three_attack_defense": flags.attack_defense,
         "jump_three_counter": flags.counter,
         "jump_three_kind_scoped_defense": flags.kind_scoped_defense,
@@ -718,12 +740,17 @@ fn vct_or(
     depth: u32,
     or_level: u32,
     deadline: Option<Instant>,
+    node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     stats: &mut VctSearchStats,
 ) -> bool {
     stats.enter_node();
+    if node_budget_exceeded(node_budget, stats) {
+        stats.mark_node_budget();
+        return false;
+    }
     if depth == 0 {
         return false;
     }
@@ -799,13 +826,14 @@ fn vct_or(
             depth - 1,
             or_level,
             deadline,
+            node_budget,
             jump_three,
             sequence,
             tt,
             stats,
         );
         board.undo_move();
-        if stats.hit_deadline() {
+        if stats.hit_stop() {
             sequence.pop();
             return false;
         }
@@ -844,12 +872,17 @@ fn vct_and(
     depth: u32,
     or_level: u32,
     deadline: Option<Instant>,
+    node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     stats: &mut VctSearchStats,
 ) -> bool {
     stats.enter_node();
+    if node_budget_exceeded(node_budget, stats) {
+        stats.mark_node_budget();
+        return false;
+    }
     if depth == 0 {
         return false;
     }
@@ -891,13 +924,14 @@ fn vct_and(
             depth - 1,
             or_level + 1,
             deadline,
+            node_budget,
             jump_three,
             sequence,
             tt,
             stats,
         );
         board.undo_move();
-        if stats.hit_deadline() {
+        if stats.hit_stop() {
             sequence.truncate(checkpoint);
             return false;
         }
@@ -918,6 +952,7 @@ fn vct_or_audit(
     depth: u32,
     or_level: u32,
     deadline: Option<Instant>,
+    node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
@@ -925,6 +960,10 @@ fn vct_or_audit(
     stats: &mut VctSearchStats,
 ) -> bool {
     stats.enter_node();
+    if node_budget_exceeded(node_budget, stats) {
+        stats.mark_node_budget();
+        return false;
+    }
     if depth == 0 {
         return false;
     }
@@ -1038,6 +1077,7 @@ fn vct_or_audit(
             depth - 1,
             or_level,
             deadline,
+            node_budget,
             jump_three,
             sequence,
             tt,
@@ -1045,7 +1085,7 @@ fn vct_or_audit(
             stats,
         );
         board.undo_move();
-        if stats.hit_deadline() {
+        if stats.hit_stop() {
             sequence.pop();
             return false;
         }
@@ -1078,6 +1118,7 @@ fn vct_and_audit(
     depth: u32,
     or_level: u32,
     deadline: Option<Instant>,
+    node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
@@ -1085,6 +1126,10 @@ fn vct_and_audit(
     stats: &mut VctSearchStats,
 ) -> bool {
     stats.enter_node();
+    if node_budget_exceeded(node_budget, stats) {
+        stats.mark_node_budget();
+        return false;
+    }
     if depth == 0 {
         return false;
     }
@@ -1155,6 +1200,7 @@ fn vct_and_audit(
             depth - 1,
             or_level + 1,
             deadline,
+            node_budget,
             jump_three,
             sequence,
             tt,
@@ -1162,7 +1208,7 @@ fn vct_and_audit(
             stats,
         );
         board.undo_move();
-        if stats.hit_deadline() {
+        if stats.hit_stop() {
             sequence.truncate(checkpoint);
             return false;
         }
@@ -1484,6 +1530,11 @@ fn bb_pair(board: &Board, side: Stone) -> (&BitBoard, &BitBoard) {
         Stone::Black => (&board.black, &board.white),
         Stone::White => (&board.white, &board.black),
     }
+}
+
+
+fn node_budget_exceeded(node_budget: Option<u64>, stats: &VctSearchStats) -> bool {
+    node_budget.is_some_and(|limit| stats.nodes > limit)
 }
 
 fn timed_out(deadline: Option<Instant>) -> bool {
@@ -2120,6 +2171,7 @@ mod tests {
         let cfg = VctConfig {
             max_depth: 8,
             time_budget: Some(Duration::from_millis(100)),
+            node_budget: None,
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
@@ -2174,6 +2226,7 @@ mod tests {
         let cfg = VctConfig {
             max_depth: 8,
             time_budget: Some(Duration::from_millis(300)),
+            node_budget: None,
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
@@ -2199,6 +2252,7 @@ mod tests {
         let cfg = VctConfig {
             max_depth: 8,
             time_budget: Some(Duration::from_millis(500)),
+            node_budget: None,
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,

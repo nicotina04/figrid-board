@@ -176,6 +176,7 @@ fn defensive_vct_veto_replacement(
     let cfg = VctConfig {
         max_depth: ROOT_DEFENSIVE_VCT_DEPTH,
         time_budget: Some(budget),
+        node_budget: None,
         enable_jump_three: false,
         enable_jump_three_attack_defense: false,
         enable_jump_three_counter: false,
@@ -1020,6 +1021,7 @@ impl Searcher {
         let vct_cfg = VctConfig {
             max_depth: ROOT_VCT_DEPTH,
             time_budget: Some(vct_budget),
+            node_budget: None,
             enable_jump_three: false,
             enable_jump_three_attack_defense: false,
             enable_jump_three_counter: false,
@@ -1273,6 +1275,7 @@ impl Searcher {
             let vct_cfg = VctConfig {
                 max_depth: ROOT_VCT_DEPTH,
                 time_budget: Some(vct_budget),
+                node_budget: None,
                 enable_jump_three: false,
                 enable_jump_three_attack_defense: false,
                 enable_jump_three_counter: false,
@@ -1577,6 +1580,7 @@ impl Searcher {
             let vct_cfg = VctConfig {
                 max_depth: ROOT_VCT_DEPTH,
                 time_budget: Some(vct_budget),
+                node_budget: None,
                 enable_jump_three: false,
                 enable_jump_three_attack_defense: false,
                 enable_jump_three_counter: false,

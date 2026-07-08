@@ -119,6 +119,10 @@ path = "bin/rq574_threat_index_check.rs"
 name = "rq576-reach-mask-check"
 path = "bin/rq576_reach_mask_check.rs"
 
+[[bin]]
+name = "rq578-immediate-five-check"
+path = "bin/rq578_immediate_five_check.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

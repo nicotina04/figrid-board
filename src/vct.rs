@@ -536,6 +536,8 @@ pub struct VctConfig {
     pub profile: bool,
     /// RQ576 gate: lazily skip cells that cannot form a forcing threat.
     pub use_reach_mask: bool,
+    /// RQ578 gate: use a five-only immediate-win detector instead of full classify.
+    pub use_fast_immediate_five: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -548,6 +550,7 @@ struct VctJumpThreeFlags {
     use_fast_classify: bool,
     use_threat_index: bool,
     use_reach_mask: bool,
+    use_fast_immediate_five: bool,
 }
 
 impl VctConfig {
@@ -561,6 +564,7 @@ impl VctConfig {
             use_fast_classify: self.use_fast_classify,
             use_threat_index: self.use_threat_index,
             use_reach_mask: self.use_reach_mask,
+            use_fast_immediate_five: self.use_fast_immediate_five,
         }
     }
 }
@@ -1068,6 +1072,7 @@ impl Default for VctConfig {
             use_threat_index: false,
             profile: false,
             use_reach_mask: true,
+            use_fast_immediate_five: false,
         }
     }
 }
@@ -1258,12 +1263,13 @@ fn vct_or(
     let opp_has_immediate_five = if let Some(index) = threat_index.as_ref() {
         index.has_kind(attacker.opponent(), false, false, ThreatKind::Five)
     } else {
-        has_immediate_five(
+        has_immediate_five_query(
             opp,
             my,
             attacker.opponent(),
             rule_set,
             opponent_reach_mask.as_ref(),
+            jump_three.use_fast_immediate_five,
         )
     };
     if let Some(start) = start {
@@ -1431,12 +1437,13 @@ fn vct_and(
     let defender_has_immediate_five = if let Some(index) = threat_index.as_ref() {
         index.has_kind(board.side_to_move, false, false, ThreatKind::Five)
     } else {
-        has_immediate_five(
+        has_immediate_five_query(
             def_my,
             def_opp,
             board.side_to_move,
             rule_set,
             defender_reach_mask.as_ref(),
+            jump_three.use_fast_immediate_five,
         )
     };
     if let Some(start) = start {
@@ -1570,12 +1577,13 @@ fn vct_or_audit(
     let opp_has_immediate_five = if let Some(index) = threat_index.as_ref() {
         index.has_kind(attacker.opponent(), false, false, ThreatKind::Five)
     } else {
-        has_immediate_five(
+        has_immediate_five_query(
             opp,
             my,
             attacker.opponent(),
             rule_set,
             opponent_reach_mask.as_ref(),
+            jump_three.use_fast_immediate_five,
         )
     };
 
@@ -1769,12 +1777,13 @@ fn vct_and_audit(
     let defender_has_immediate_five = if let Some(index) = threat_index.as_ref() {
         index.has_kind(defender, false, false, ThreatKind::Five)
     } else {
-        has_immediate_five(
+        has_immediate_five_query(
             def_my,
             def_opp,
             defender,
             rule_set,
             defender_reach_mask.as_ref(),
+            jump_three.use_fast_immediate_five,
         )
     };
     if let Some(start) = start {
@@ -2025,6 +2034,121 @@ fn has_immediate_five(
         }
     }
     false
+}
+
+fn has_immediate_five_query(
+    my: &BitBoard,
+    opp: &BitBoard,
+    side: Stone,
+    rule_set: RuleSet,
+    reach_mask: Option<&BitBoard>,
+    use_fast_immediate_five: bool,
+) -> bool {
+    if use_fast_immediate_five {
+        has_immediate_five_direction_scan(my, opp, side, rule_set, reach_mask)
+    } else {
+        has_immediate_five(my, opp, side, rule_set, reach_mask)
+    }
+}
+
+fn has_immediate_five_direction_scan(
+    my: &BitBoard,
+    opp: &BitBoard,
+    side: Stone,
+    rule_set: RuleSet,
+    reach_mask: Option<&BitBoard>,
+) -> bool {
+    for idx in 0..NUM_CELLS {
+        if my.get(idx) || opp.get(idx) {
+            continue;
+        }
+        if reach_mask.is_some_and(|mask| !mask.get(idx)) {
+            continue;
+        }
+        if completes_five_at(my, opp, idx, side, rule_set) {
+            return true;
+        }
+    }
+    false
+}
+
+fn completes_five_at(
+    my: &BitBoard,
+    opp: &BitBoard,
+    mv: Move,
+    side: Stone,
+    rule_set: RuleSet,
+) -> bool {
+    let row = (mv / BOARD_SIZE) as i32;
+    let col = (mv % BOARD_SIZE) as i32;
+    for &(dr, dc) in &DIR {
+        let (front_count, front_open) = count_line_side(my, opp, row, col, dr, dc);
+        let (back_count, back_open) = count_line_side(my, opp, row, col, -dr, -dc);
+        let count = 1 + front_count + back_count;
+        let open_ends = front_open as u32 + back_open as u32;
+        if rule_set.line_wins(side, count, open_ends) {
+            return true;
+        }
+    }
+    false
+}
+
+fn count_line_side(
+    my: &BitBoard,
+    opp: &BitBoard,
+    row: i32,
+    col: i32,
+    dr: i32,
+    dc: i32,
+) -> (u32, bool) {
+    let mut count = 0u32;
+    let mut r = row + dr;
+    let mut c = col + dc;
+    while in_board(r, c) {
+        let idx = r as usize * BOARD_SIZE + c as usize;
+        if my.get(idx) {
+            count += 1;
+            r += dr;
+            c += dc;
+            continue;
+        }
+        return (count, !opp.get(idx));
+    }
+    (count, false)
+}
+
+#[doc(hidden)]
+pub fn has_immediate_five_reference_for_audit(
+    board: &Board,
+    side: Stone,
+    use_reach_mask: bool,
+) -> bool {
+    let (my, opp) = bb_pair(board, side);
+    let reach_mask = use_reach_mask.then(|| reach_mask_for_stones(my));
+    has_immediate_five(
+        my,
+        opp,
+        side,
+        board.effective_rule_set(),
+        reach_mask.as_ref(),
+    )
+}
+
+#[doc(hidden)]
+pub fn has_immediate_five_fast_for_audit(
+    board: &Board,
+    side: Stone,
+    use_reach_mask: bool,
+) -> bool {
+    let (my, opp) = bb_pair(board, side);
+    let reach_mask = use_reach_mask.then(|| reach_mask_for_stones(my));
+    has_immediate_five_direction_scan(
+        my,
+        opp,
+        side,
+        board.effective_rule_set(),
+        reach_mask.as_ref(),
+    )
 }
 
 #[inline]
@@ -2978,6 +3102,7 @@ mod tests {
             use_threat_index: false,
             profile: false,
             use_reach_mask: false,
+            use_fast_immediate_five: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -3036,6 +3161,7 @@ mod tests {
             use_threat_index: false,
             profile: false,
             use_reach_mask: false,
+            use_fast_immediate_five: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -3065,6 +3191,7 @@ mod tests {
             use_threat_index: false,
             profile: false,
             use_reach_mask: false,
+            use_fast_immediate_five: false,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

@@ -85,10 +85,12 @@ path = "bin/rq423_feature_dump.rs"
 [[bin]]
 name = "rq544-eval-scale"
 path = "bin/rq544_eval_scale.rs"
+required-features = ["codebook-eval"]
 
 [[bin]]
 name = "rq545-stratified-bce"
 path = "bin/rq545_stratified_bce.rs"
+required-features = ["codebook-eval"]
 
 [[bin]]
 name = "rq547-vct-solve"
@@ -97,10 +99,12 @@ path = "bin/rq547_vct_solve.rs"
 [[bin]]
 name = "rq554-quant-kernel-check"
 path = "bin/rq554_quant_kernel_check.rs"
+required-features = ["codebook-eval"]
 
 [[bin]]
 name = "rq558b-color-symmetry"
 path = "bin/rq558b_color_symmetry.rs"
+required-features = ["codebook-eval"]
 
 [profile.release]
 opt-level = 3

@@ -86,9 +86,25 @@ fn pbrain_fixed_depth() -> bool {
 }
 
 #[cfg(feature = "codebook-eval")]
+const EMBEDDED_CODEBOOK_JSON: &[u8] =
+    include_bytes!("../models/gomoku_codebook_v1_swapclosed.json");
+
+#[cfg(feature = "codebook-eval")]
 enum CodebookRuntimeWeights {
     Float(CodebookWeights),
     Quantized(QuantizedCodebookWeights),
+}
+
+#[cfg(feature = "codebook-eval")]
+fn env_bool_default(raw: &str, default: bool) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return default;
+    }
+    !(trimmed == "0"
+        || trimmed.eq_ignore_ascii_case("false")
+        || trimmed.eq_ignore_ascii_case("off")
+        || trimmed.eq_ignore_ascii_case("no"))
 }
 
 #[cfg(feature = "codebook-eval")]
@@ -97,34 +113,48 @@ fn codebook_quantized_enabled() -> bool {
     *VALUE.get_or_init(|| {
         std::env::var("FIGRID_CODEBOOK_QUANT")
             .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_QUANT"))
-            .map(|raw| {
-                let trimmed = raw.trim();
-                !(trimmed == "0"
-                    || trimmed.eq_ignore_ascii_case("false")
-                    || trimmed.eq_ignore_ascii_case("off")
-                    || trimmed.eq_ignore_ascii_case("no"))
-            })
-            .unwrap_or(false)
+            .map(|raw| env_bool_default(&raw, true))
+            .unwrap_or(true)
+    })
+}
+
+#[cfg(feature = "codebook-eval")]
+fn codebook_eval_enabled() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("FIGRID_CODEBOOK_EVAL")
+            .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL"))
+            .map(|raw| env_bool_default(&raw, true))
+            .unwrap_or(true)
     })
 }
 
 #[cfg(feature = "codebook-eval")]
 fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
-    let path = std::env::var("FIGRID_CODEBOOK_WEIGHTS")
-        .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_MODEL"))
-        .unwrap_or_default();
-    let trimmed = path.trim();
-    if trimmed.is_empty()
-        || trimmed == "0"
-        || trimmed.eq_ignore_ascii_case("off")
-        || trimmed.eq_ignore_ascii_case("false")
-    {
+    if !codebook_eval_enabled() {
         return Ok(None);
     }
-    let bytes = std::fs::read(trimmed)
-        .map_err(|e| format!("failed to read codebook weights from `{trimmed}`: {e}"))?;
+
+    let configured_path = std::env::var("FIGRID_CODEBOOK_WEIGHTS")
+        .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_MODEL"))
+        .ok();
+    let bytes = match configured_path.as_deref().map(str::trim) {
+        Some("") => return Ok(None),
+        Some("0") => return Ok(None),
+        Some(path)
+            if path.eq_ignore_ascii_case("off")
+                || path.eq_ignore_ascii_case("false")
+                || path.eq_ignore_ascii_case("no") =>
+        {
+            return Ok(None);
+        }
+        Some(path) => std::fs::read(path)
+            .map_err(|e| format!("failed to read codebook weights from `{path}`: {e}"))?,
+        None => EMBEDDED_CODEBOOK_JSON.to_vec(),
+    };
+
     let weights = CodebookWeights::from_json_bytes(&bytes)
-        .map_err(|e| format!("failed to parse codebook weights `{trimmed}`: {e}"))?;
+        .map_err(|e| format!("failed to parse codebook weights: {e}"))?;
     if codebook_quantized_enabled() {
         Ok(Some(CodebookRuntimeWeights::Quantized(
             weights.quantize_i16_s32_s64(),

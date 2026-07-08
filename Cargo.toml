@@ -1,6 +1,6 @@
 [package]
 name = "figrid-board"
-version = "0.7.4"
+version = "0.8.0"
 authors = [
     "nicotina04 <devherdson@gmail.com>",
     "wuwbobo2021 <wuwbobo@outlook.com>",
@@ -39,8 +39,9 @@ embed-weights = ["dep:flate2"]
 # parts. The Gomocup submission build should turn this on; library users on
 # stable Rust should leave it off.
 avx512 = ["noru/avx512"]
-# Experimental codebook evaluator used by the Relation-Factor UE research
-# line. Disabled by default; runtime promotion requires separate gates.
+# Codebook(no-MP) evaluator promoted by RQ570 as the 0.8 pbrain deployment
+# eval path. Optional for library users; pbrain builds with this feature load the
+# embedded swap-closed codebook and use the quantized kernel by default.
 codebook-eval = []
 
 [dependencies]

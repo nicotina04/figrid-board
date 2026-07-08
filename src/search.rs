@@ -226,6 +226,9 @@ fn defensive_vct_veto_replacement(
 }
 
 #[cfg(feature = "codebook-eval")]
+const DEFAULT_CODEBOOK_EVAL_SCALE: f32 = 15.720162;
+
+#[cfg(feature = "codebook-eval")]
 fn codebook_eval_scale() -> f32 {
     static VALUE: OnceLock<f32> = OnceLock::new();
     *VALUE.get_or_init(|| {
@@ -233,7 +236,7 @@ fn codebook_eval_scale() -> f32 {
             .ok()
             .and_then(|raw| raw.trim().parse::<f32>().ok())
             .filter(|scale| scale.is_finite() && *scale > 0.0)
-            .unwrap_or(400.0)
+            .unwrap_or(DEFAULT_CODEBOOK_EVAL_SCALE)
     })
 }
 

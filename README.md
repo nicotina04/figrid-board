@@ -31,7 +31,7 @@
 - Optional VCF / VCT tactical search at the search root.
 - Rule support: Freestyle and Standard (exact-five). Renju and Caro currently rejected at the protocol layer.
 - Optional `avx512` cargo feature: opportunistic ~2× evaluation speedup on AVX-512 hardware, with automatic AVX-2 runtime fallback. Requires Rust ≥ 1.89; off by default so library users on older toolchains and crates.io itself can build.
-- Optional `embed-weights` feature: bake the NNUE weights into the binary at build time, producing a single self-contained executable suitable for tournament submission.
+- Optional `embed-weights` feature: bake the flat NNUE weights into the binary at build time. For the 0.8 deployment evaluator, also enable `codebook-eval`; that embeds the swap-closed codebook model and uses the quantized codebook evaluator by default.
 
 ## Quick start
 
@@ -40,18 +40,18 @@
 Build the engine binary:
 
 ```
-RUSTFLAGS="-C target-cpu=native" cargo build --release --bin pbrain-figrid --features embed-weights
+RUSTFLAGS="-C target-cpu=native" cargo build --release --bin pbrain-figrid --features embed-weights,codebook-eval
 ```
 
-Add `target/release/pbrain-figrid` (or `.exe` on Windows) to Piskvork as an AI player. The `embed-weights` feature bundles the NNUE weights into the executable so you do not have to ship them separately.
+Add `target/release/pbrain-figrid` (or `.exe` on Windows) to Piskvork as an AI player. With `embed-weights,codebook-eval`, the flat NNUE ordering weights and the quantized codebook evaluator are both available without external model files.
 
-If you build without `embed-weights`, set `FIGRID_WEIGHTS=path/to/weights.bin` or place the file at `./models/` so the binary can locate it at startup.
+If you build without `embed-weights`, set `FIGRID_WEIGHTS=path/to/weights.bin` or place the file at `./models/` so the binary can locate the flat ordering weights at startup. To force the old flat evaluator in a `codebook-eval` build, set `FIGRID_CODEBOOK_EVAL=off` or `FIGRID_CODEBOOK_WEIGHTS=off`.
 
 ### Use as a library
 
 ```toml
 [dependencies]
-figrid-board = "0.7"
+figrid-board = "0.8"
 ```
 
 ```rust
@@ -78,7 +78,7 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 ```
 RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v3" \
     cargo build --release --target x86_64-pc-windows-gnu \
-    --bin pbrain-figrid --features embed-weights
+    --bin pbrain-figrid --features embed-weights,codebook-eval
 ```
 
 For an AVX-512-capable second submission entry, additionally enable the `avx512` cargo feature (requires Rust ≥ 1.89 on the build host); GomocupJudge picks the fastest compatible binary on each match machine:
@@ -86,7 +86,7 @@ For an AVX-512-capable second submission entry, additionally enable the `avx512`
 ```
 RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v4" \
     cargo build --release --target x86_64-pc-windows-gnu \
-    --bin pbrain-figrid --features embed-weights,avx512
+    --bin pbrain-figrid --features embed-weights,codebook-eval,avx512
 ```
 
 ## Roadmap

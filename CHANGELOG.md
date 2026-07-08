@@ -1,5 +1,18 @@
 # Changes
 
+## 0.8.0 (2026-07-08)
+* **Promote the swap-closed quantized codebook evaluator to the pbrain default
+  when built with `codebook-eval`.** The `pbrain-figrid` adapter now embeds
+  `models/gomoku_codebook_v1_swapclosed.json`, quantizes it on startup, and
+  uses it as the leaf evaluator without requiring `FIGRID_CODEBOOK_WEIGHTS`.
+* **Deployment evidence:** RQ570 compared the 0.8 package candidate against the
+  v52-lineage flat evaluator under the same 0.7.4+ search package: sanity 30g
+  codebook `20/30`, primary 100g codebook `63/100` vs flat `37/100`, errors
+  `0`, exact two-sided sign-test `p=0.0120`. The white-side defensive split also
+  improved (`18/50` vs flat `5/50`).
+* **Flat fallback remains available** for audits and downstream users: build
+  without `codebook-eval`, or set `FIGRID_CODEBOOK_EVAL=off` (or
+  `FIGRID_CODEBOOK_WEIGHTS=off`) at runtime.
 ## 0.7.4 (2026-07-08)
 * **Swap-close the Pattern4 mapped-id table for codebook evaluation.** RQ568
   found that 169 of the original 4096 frequency-top-K Pattern4 ids mapped to

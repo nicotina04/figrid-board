@@ -115,6 +115,10 @@ path = "bin/rq572_classify_equivalence.rs"
 name = "rq574-threat-index-check"
 path = "bin/rq574_threat_index_check.rs"
 
+[[bin]]
+name = "rq576-reach-mask-check"
+path = "bin/rq576_reach_mask_check.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

@@ -32,6 +32,7 @@ struct Args {
     use_fast_classify: bool,
     use_threat_index: bool,
     profile: bool,
+    use_reach_mask: bool,
     node_budget: Option<u64>,
 }
 
@@ -96,6 +97,7 @@ fn main() -> Result<(), String> {
             args.use_fast_classify,
             args.use_threat_index,
             args.profile,
+            args.use_reach_mask,
             args.node_budget,
         ) {
             Ok(v) => v,
@@ -133,6 +135,7 @@ fn main() -> Result<(), String> {
         "use_fast_classify": args.use_fast_classify,
         "use_threat_index": args.use_threat_index,
         "profile": args.profile,
+        "use_reach_mask": args.use_reach_mask,
         "node_budget": args.node_budget,
         "records_scanned": records,
         "usable": usable,
@@ -166,6 +169,7 @@ fn solve_record(
     use_fast_classify: bool,
     use_threat_index: bool,
     profile: bool,
+    use_reach_mask: bool,
     node_budget: Option<u64>,
 ) -> Result<Value, String> {
     let class = rec
@@ -203,6 +207,7 @@ fn solve_record(
         use_fast_classify,
         use_threat_index,
         profile,
+        use_reach_mask,
         node_budget,
     );
     let actual_move = parse_move(rec.get("actual_move").ok_or("missing actual_move")?)?;
@@ -221,6 +226,7 @@ fn solve_record(
             use_fast_classify,
             use_threat_index,
             profile,
+            use_reach_mask,
             node_budget,
         );
         board.undo_move();
@@ -266,6 +272,7 @@ fn solve_record(
         "use_fast_classify": use_fast_classify,
         "use_threat_index": use_threat_index,
         "profile": profile,
+        "use_reach_mask": use_reach_mask,
         "node_budget": node_budget,
         "pre_vct": pre_vct,
         "after_actual_opp_vct": after_actual_opp_vct,
@@ -285,6 +292,7 @@ fn run_sweep(
     use_fast_classify: bool,
     use_threat_index: bool,
     profile: bool,
+    use_reach_mask: bool,
     node_budget: Option<u64>,
 ) -> Value {
     let mut attempts = Vec::new();
@@ -308,6 +316,7 @@ fn run_sweep(
             use_fast_classify,
             use_threat_index,
             profile,
+            use_reach_mask,
         };
         let started = Instant::now();
         let should_capture_proof = include_proof && first_hit.is_none();
@@ -539,6 +548,10 @@ fn parse_args() -> Result<Args, String> {
     }
     let mut use_threat_index = env_flag("FIGRID_VCT_USE_THREAT_INDEX");
     let mut profile = env_flag("FIGRID_VCT_PROFILE");
+    let mut use_reach_mask = !env_flag("FIGRID_VCT_NO_REACH_MASK");
+    if env_flag("FIGRID_VCT_USE_REACH_MASK") {
+        use_reach_mask = true;
+    }
     let mut node_budget = env_u64("FIGRID_VCT_NODE_BUDGET");
 
     let mut it = env::args().skip(1);
@@ -570,6 +583,8 @@ fn parse_args() -> Result<Args, String> {
             "--use-slow-classify" => use_fast_classify = false,
             "--use-threat-index" => use_threat_index = true,
             "--profile" => profile = true,
+            "--use-reach-mask" => use_reach_mask = true,
+            "--no-reach-mask" => use_reach_mask = false,
             "--node-budget" => {
                 node_budget = Some(
                     next_arg(&mut it, &arg)?
@@ -600,6 +615,7 @@ fn parse_args() -> Result<Args, String> {
         use_fast_classify,
         use_threat_index,
         profile,
+        use_reach_mask,
         node_budget,
     })
 }
@@ -643,6 +659,6 @@ fn env_u64(name: &str) -> Option<u64> {
 
 fn print_help() {
     eprintln!(
-        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K] [--enable-gap-four] [--use-fast-classify|--use-slow-classify] [--use-threat-index] [--profile] [--node-budget N]"
+        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K] [--enable-gap-four] [--use-fast-classify|--use-slow-classify] [--use-threat-index] [--profile] [--use-reach-mask|--no-reach-mask] [--node-budget N]"
     );
 }

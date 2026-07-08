@@ -111,6 +111,10 @@ required-features = ["codebook-eval"]
 name = "rq572-classify-equivalence"
 path = "bin/rq572_classify_equivalence.rs"
 
+[[bin]]
+name = "rq574-threat-index-check"
+path = "bin/rq574_threat_index_check.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

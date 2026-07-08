@@ -530,6 +530,8 @@ pub struct VctConfig {
     pub enable_gap_four: bool,
     /// RQ572 gate: use Pattern4 fast classify in prover attack/counter scans.
     pub use_fast_classify: bool,
+    /// RQ574 gate: use a VCT-local incremental threat index.
+    pub use_threat_index: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -540,6 +542,7 @@ struct VctJumpThreeFlags {
     attack_max_or_levels: u32,
     gap_four: bool,
     use_fast_classify: bool,
+    use_threat_index: bool,
 }
 
 impl VctConfig {
@@ -551,8 +554,273 @@ impl VctConfig {
             attack_max_or_levels: self.jump_attack_max_or_levels,
             gap_four: self.enable_gap_four,
             use_fast_classify: self.use_fast_classify,
+            use_threat_index: self.use_threat_index,
         }
     }
+}
+
+const THREAT_INDEX_FLAG_COMBOS: usize = 4;
+const THREAT_INDEX_SIDES: usize = 2;
+
+#[derive(Clone)]
+struct VctThreatIndex {
+    cell_kinds: Box<[[[u8; NUM_CELLS]; THREAT_INDEX_FLAG_COMBOS]; THREAT_INDEX_SIDES]>,
+    bits: [[[BitBoard; THREAT_KIND_COUNT]; THREAT_INDEX_FLAG_COMBOS]; THREAT_INDEX_SIDES],
+}
+
+impl VctThreatIndex {
+    fn new(board: &Board) -> Self {
+        let mut index = Self {
+            cell_kinds: Box::new(
+                [[[ThreatKind::None as u8; NUM_CELLS]; THREAT_INDEX_FLAG_COMBOS];
+                    THREAT_INDEX_SIDES],
+            ),
+            bits: [[[BitBoard::EMPTY; THREAT_KIND_COUNT]; THREAT_INDEX_FLAG_COMBOS];
+                THREAT_INDEX_SIDES],
+        };
+        for cell in 0..NUM_CELLS {
+            index.recompute_cell(board, cell);
+        }
+        index
+    }
+
+    fn attack_moves(
+        &self,
+        side: Stone,
+        enable_jump_three: bool,
+        enable_gap_four: bool,
+    ) -> Vec<(Move, ThreatKind)> {
+        let side_idx = threat_index_side(side);
+        let flags_idx = threat_index_flags(enable_jump_three, enable_gap_four);
+        let mut out = Vec::new();
+        for &kind in &THREAT_PRIORITY_ORDER {
+            let bits = self.bits[side_idx][flags_idx][kind as usize];
+            for mv in bits.iter_ones() {
+                out.push((mv, kind));
+            }
+        }
+        out
+    }
+
+    fn forcing_moves_in_cell_order(
+        &self,
+        side: Stone,
+        enable_jump_three: bool,
+        enable_gap_four: bool,
+    ) -> Vec<Move> {
+        let side_idx = threat_index_side(side);
+        let flags_idx = threat_index_flags(enable_jump_three, enable_gap_four);
+        let mut out = Vec::new();
+        for cell in 0..NUM_CELLS {
+            let kind = threat_kind_from_index(self.cell_kinds[side_idx][flags_idx][cell]);
+            if kind.is_forcing() {
+                out.push(cell);
+            }
+        }
+        out
+    }
+
+    fn has_kind(
+        &self,
+        side: Stone,
+        enable_jump_three: bool,
+        enable_gap_four: bool,
+        kind: ThreatKind,
+    ) -> bool {
+        self.bits[threat_index_side(side)][threat_index_flags(enable_jump_three, enable_gap_four)]
+            [kind as usize]
+            .count_ones()
+            > 0
+    }
+
+    fn clear_cell(&mut self, cell: usize) {
+        for side_idx in 0..THREAT_INDEX_SIDES {
+            for flags_idx in 0..THREAT_INDEX_FLAG_COMBOS {
+                let kind_idx = self.cell_kinds[side_idx][flags_idx][cell] as usize;
+                if kind_idx != ThreatKind::None as usize {
+                    self.bits[side_idx][flags_idx][kind_idx].clear(cell);
+                    self.cell_kinds[side_idx][flags_idx][cell] = ThreatKind::None as u8;
+                }
+            }
+        }
+    }
+
+    fn recompute_cell(&mut self, board: &Board, cell: usize) {
+        self.clear_cell(cell);
+        if !board.is_empty(cell) {
+            return;
+        }
+        for &side in &[Stone::Black, Stone::White] {
+            let side_idx = threat_index_side(side);
+            for flags_idx in 0..THREAT_INDEX_FLAG_COMBOS {
+                let (enable_jump_three, enable_gap_four) = threat_index_combo_flags(flags_idx);
+                let kind = classify_move_fast_with_flags(
+                    board,
+                    cell,
+                    side,
+                    enable_jump_three,
+                    enable_gap_four,
+                );
+                self.cell_kinds[side_idx][flags_idx][cell] = kind as u8;
+                if kind != ThreatKind::None {
+                    self.bits[side_idx][flags_idx][kind as usize].set(cell);
+                }
+            }
+        }
+    }
+
+    fn clear_cells(&mut self, cells: &[usize]) {
+        for &cell in cells {
+            self.clear_cell(cell);
+        }
+    }
+
+    fn recompute_cells(&mut self, board: &Board, cells: &[usize]) {
+        for &cell in cells {
+            self.recompute_cell(board, cell);
+        }
+    }
+
+    fn matches_rebuild(&self, board: &Board) -> bool {
+        let rebuilt = VctThreatIndex::new(board);
+        self.cell_kinds == rebuilt.cell_kinds && self.bits == rebuilt.bits
+    }
+
+    #[cfg(test)]
+    fn assert_matches_rebuild(&self, board: &Board) {
+        assert!(
+            self.matches_rebuild(board),
+            "threat-index mismatch against rebuild"
+        );
+    }
+}
+
+const THREAT_PRIORITY_ORDER: [ThreatKind; THREAT_KIND_COUNT - 1] = [
+    ThreatKind::Five,
+    ThreatKind::OpenFour,
+    ThreatKind::DoubleFour,
+    ThreatKind::FourThree,
+    ThreatKind::DoubleThree,
+    ThreatKind::ClosedFour,
+    ThreatKind::OpenThree,
+    ThreatKind::JumpThree,
+];
+
+#[inline]
+fn threat_index_side(side: Stone) -> usize {
+    match side {
+        Stone::Black => 0,
+        Stone::White => 1,
+    }
+}
+
+#[inline]
+fn threat_index_flags(enable_jump_three: bool, enable_gap_four: bool) -> usize {
+    (enable_jump_three as usize) | ((enable_gap_four as usize) << 1)
+}
+
+#[inline]
+fn threat_index_combo_flags(flags_idx: usize) -> (bool, bool) {
+    ((flags_idx & 1) != 0, (flags_idx & 2) != 0)
+}
+
+fn threat_kind_from_index(kind: u8) -> ThreatKind {
+    match kind as usize {
+        x if x == ThreatKind::Five as usize => ThreatKind::Five,
+        x if x == ThreatKind::OpenFour as usize => ThreatKind::OpenFour,
+        x if x == ThreatKind::ClosedFour as usize => ThreatKind::ClosedFour,
+        x if x == ThreatKind::OpenThree as usize => ThreatKind::OpenThree,
+        x if x == ThreatKind::DoubleThree as usize => ThreatKind::DoubleThree,
+        x if x == ThreatKind::FourThree as usize => ThreatKind::FourThree,
+        x if x == ThreatKind::DoubleFour as usize => ThreatKind::DoubleFour,
+        x if x == ThreatKind::JumpThree as usize => ThreatKind::JumpThree,
+        _ => ThreatKind::None,
+    }
+}
+
+fn line_pattern_dirty_cells(mv: Move) -> Vec<usize> {
+    let mut seen = [false; NUM_CELLS];
+    let mut out = Vec::with_capacity(44);
+    let row = (mv / BOARD_SIZE) as i32;
+    let col = (mv % BOARD_SIZE) as i32;
+    for &(dr, dc) in &DIR {
+        for offset in -5i32..=5 {
+            let r = row + dr * offset;
+            let c = col + dc * offset;
+            if r < 0 || r >= BOARD_SIZE as i32 || c < 0 || c >= BOARD_SIZE as i32 {
+                continue;
+            }
+            let cell = (r as usize) * BOARD_SIZE + c as usize;
+            if !seen[cell] {
+                seen[cell] = true;
+                out.push(cell);
+            }
+        }
+    }
+    out
+}
+
+fn make_vct_move(board: &mut Board, threat_index: &mut Option<VctThreatIndex>, mv: Move) {
+    if let Some(index) = threat_index {
+        let dirty = line_pattern_dirty_cells(mv);
+        index.clear_cells(&dirty);
+        board.make_move(mv);
+        index.recompute_cells(board, &dirty);
+    } else {
+        board.make_move(mv);
+    }
+}
+
+fn undo_vct_move(board: &mut Board, threat_index: &mut Option<VctThreatIndex>) {
+    if let Some(index) = threat_index {
+        if let Some(mv) = board.last_move {
+            let dirty = line_pattern_dirty_cells(mv);
+            index.clear_cells(&dirty);
+            board.undo_move();
+            index.recompute_cells(board, &dirty);
+        } else {
+            board.undo_move();
+        }
+    } else {
+        board.undo_move();
+    }
+}
+
+#[doc(hidden)]
+pub fn vct_threat_index_transition_check_for_audit(
+    moves: &[Move],
+) -> Result<(usize, usize), String> {
+    let mut board = Board::new();
+    let mut threat_index = Some(VctThreatIndex::new(&board));
+    let mut transitions = 0usize;
+
+    for &mv in moves {
+        if mv >= NUM_CELLS {
+            return Err(format!("move out of board: {mv}"));
+        }
+        if !board.is_empty(mv) {
+            return Err(format!("occupied move at ply {transitions}: {mv}"));
+        }
+        make_vct_move(&mut board, &mut threat_index, mv);
+        transitions += 1;
+        if !threat_index.as_ref().unwrap().matches_rebuild(&board) {
+            return Err(format!(
+                "index mismatch after make ply {transitions} move {mv}"
+            ));
+        }
+    }
+
+    let mut undos = 0usize;
+    while board.last_move.is_some() {
+        let ply_before = board.move_count;
+        undo_vct_move(&mut board, &mut threat_index);
+        undos += 1;
+        if !threat_index.as_ref().unwrap().matches_rebuild(&board) {
+            return Err(format!("index mismatch after undo from ply {ply_before}"));
+        }
+    }
+
+    Ok((transitions, undos))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -621,6 +889,7 @@ impl Default for VctConfig {
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
             use_fast_classify: true,
+            use_threat_index: false,
         }
     }
 }
@@ -640,6 +909,11 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
     let mut tt: TransTable = HashMap::with_capacity(65536);
     let mut stats = VctSearchStats::default();
     let flags = cfg.jump_three_flags();
+    let mut threat_index = if flags.use_threat_index && flags.use_fast_classify {
+        Some(VctThreatIndex::new(board))
+    } else {
+        None
+    };
     let hit = vct_or(
         board,
         attacker,
@@ -648,6 +922,7 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
         deadline,
         cfg.node_budget,
         flags,
+        &mut threat_index,
         &mut sequence,
         &mut tt,
         &mut stats,
@@ -666,6 +941,11 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
     let mut audit = VctAuditLog::default();
     let mut stats = VctSearchStats::default();
     let flags = cfg.jump_three_flags();
+    let mut threat_index = if flags.use_threat_index && flags.use_fast_classify {
+        Some(VctThreatIndex::new(board))
+    } else {
+        None
+    };
     let hit = vct_or_audit(
         board,
         attacker,
@@ -674,6 +954,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         deadline,
         cfg.node_budget,
         flags,
+        &mut threat_index,
         &mut sequence,
         &mut tt,
         &mut audit,
@@ -700,6 +981,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         "jump_attack_max_or_levels": flags.attack_max_or_levels,
         "gap_four": flags.gap_four,
         "use_fast_classify": flags.use_fast_classify,
+        "use_threat_index": flags.use_threat_index && flags.use_fast_classify,
         "sequence": if hit { Some(sequence.iter().map(|&mv| move_json(mv)).collect::<Vec<_>>()) } else { None },
         "and_nodes": audit.and_nodes,
         "terminal_event_count": audit.terminal_event_count,
@@ -742,6 +1024,7 @@ fn vct_or(
     deadline: Option<Instant>,
     node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
+    threat_index: &mut Option<VctThreatIndex>,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     stats: &mut VctSearchStats,
@@ -774,20 +1057,28 @@ fn vct_or(
 
     let (my, opp) = bb_pair(board, attacker);
     let rule_set = board.effective_rule_set();
-    let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
+    let opp_has_immediate_five = if let Some(index) = threat_index.as_ref() {
+        index.has_kind(attacker.opponent(), false, false, ThreatKind::Five)
+    } else {
+        has_immediate_five(opp, my, attacker.opponent(), rule_set)
+    };
 
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
-    let attack_moves = gather_attack_moves(
-        board,
-        my,
-        opp,
-        attacker,
-        rule_set,
-        enable_jump_three_attack,
-        jump_three.gap_four,
-        jump_three.use_fast_classify,
-    );
+    let attack_moves = if let Some(index) = threat_index.as_ref() {
+        index.attack_moves(attacker, enable_jump_three_attack, jump_three.gap_four)
+    } else {
+        gather_attack_moves(
+            board,
+            my,
+            opp,
+            attacker,
+            rule_set,
+            enable_jump_three_attack,
+            jump_three.gap_four,
+            jump_three.use_fast_classify,
+        )
+    };
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -818,7 +1109,7 @@ fn vct_or(
             continue;
         }
         sequence.push(mv);
-        board.make_move(mv);
+        make_vct_move(board, threat_index, mv);
         let won = vct_and(
             board,
             attacker,
@@ -828,11 +1119,12 @@ fn vct_or(
             deadline,
             node_budget,
             jump_three,
+            threat_index,
             sequence,
             tt,
             stats,
         );
-        board.undo_move();
+        undo_vct_move(board, threat_index);
         if stats.hit_stop() {
             sequence.pop();
             return false;
@@ -874,6 +1166,7 @@ fn vct_and(
     deadline: Option<Instant>,
     node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
+    threat_index: &mut Option<VctThreatIndex>,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     stats: &mut VctSearchStats,
@@ -895,7 +1188,12 @@ fn vct_and(
     // 수비 측이 자기 턴에 즉시 5목을 완성할 수 있으면 공격 VCT는 실패.
     let (def_my, def_opp) = bb_pair(board, board.side_to_move);
     let rule_set = board.effective_rule_set();
-    if has_immediate_five(def_my, def_opp, board.side_to_move, rule_set) {
+    let defender_has_immediate_five = if let Some(index) = threat_index.as_ref() {
+        index.has_kind(board.side_to_move, false, false, ThreatKind::Five)
+    } else {
+        has_immediate_five(def_my, def_opp, board.side_to_move, rule_set)
+    };
+    if defender_has_immediate_five {
         return false;
     }
 
@@ -904,7 +1202,13 @@ fn vct_and(
     //  승리 오판. 수비 측이 **자기 winning threat**을 만들 수 있는 수는 반드시
     //  포함해야 함.)
     let defenses = match board.last_move {
-        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, attack_kind, jump_three),
+        Some(attack_mv) => find_defenses_with_counters(
+            board,
+            attack_mv,
+            attack_kind,
+            jump_three,
+            threat_index.as_ref(),
+        ),
         None => board.candidate_moves(),
     };
     if defenses.is_empty() {
@@ -917,7 +1221,7 @@ fn vct_and(
         sequence.truncate(checkpoint);
         sequence.push(mv);
 
-        board.make_move(mv);
+        make_vct_move(board, threat_index, mv);
         let attacker_still_wins = vct_or(
             board,
             attacker,
@@ -926,11 +1230,12 @@ fn vct_and(
             deadline,
             node_budget,
             jump_three,
+            threat_index,
             sequence,
             tt,
             stats,
         );
-        board.undo_move();
+        undo_vct_move(board, threat_index);
         if stats.hit_stop() {
             sequence.truncate(checkpoint);
             return false;
@@ -954,6 +1259,7 @@ fn vct_or_audit(
     deadline: Option<Instant>,
     node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
+    threat_index: &mut Option<VctThreatIndex>,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     audit: &mut VctAuditLog,
@@ -994,20 +1300,28 @@ fn vct_or_audit(
 
     let (my, opp) = bb_pair(board, attacker);
     let rule_set = board.effective_rule_set();
-    let opp_has_immediate_five = has_immediate_five(opp, my, attacker.opponent(), rule_set);
+    let opp_has_immediate_five = if let Some(index) = threat_index.as_ref() {
+        index.has_kind(attacker.opponent(), false, false, ThreatKind::Five)
+    } else {
+        has_immediate_five(opp, my, attacker.opponent(), rule_set)
+    };
 
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
-    let attack_moves = gather_attack_moves(
-        board,
-        my,
-        opp,
-        attacker,
-        rule_set,
-        enable_jump_three_attack,
-        jump_three.gap_four,
-        jump_three.use_fast_classify,
-    );
+    let attack_moves = if let Some(index) = threat_index.as_ref() {
+        index.attack_moves(attacker, enable_jump_three_attack, jump_three.gap_four)
+    } else {
+        gather_attack_moves(
+            board,
+            my,
+            opp,
+            attacker,
+            rule_set,
+            enable_jump_three_attack,
+            jump_three.gap_four,
+            jump_three.use_fast_classify,
+        )
+    };
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -1069,7 +1383,7 @@ fn vct_or_audit(
             continue;
         }
         sequence.push(mv);
-        board.make_move(mv);
+        make_vct_move(board, threat_index, mv);
         let won = vct_and_audit(
             board,
             attacker,
@@ -1079,12 +1393,13 @@ fn vct_or_audit(
             deadline,
             node_budget,
             jump_three,
+            threat_index,
             sequence,
             tt,
             audit,
             stats,
         );
-        board.undo_move();
+        undo_vct_move(board, threat_index);
         if stats.hit_stop() {
             sequence.pop();
             return false;
@@ -1120,6 +1435,7 @@ fn vct_and_audit(
     deadline: Option<Instant>,
     node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
+    threat_index: &mut Option<VctThreatIndex>,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
     audit: &mut VctAuditLog,
@@ -1145,7 +1461,11 @@ fn vct_and_audit(
     let defender = board.side_to_move;
     let (def_my, def_opp) = bb_pair(board, defender);
     let rule_set = board.effective_rule_set();
-    let defender_has_immediate_five = has_immediate_five(def_my, def_opp, defender, rule_set);
+    let defender_has_immediate_five = if let Some(index) = threat_index.as_ref() {
+        index.has_kind(defender, false, false, ThreatKind::Five)
+    } else {
+        has_immediate_five(def_my, def_opp, defender, rule_set)
+    };
     if defender_has_immediate_five {
         audit.and_nodes.push(json!({
             "node": "and",
@@ -1165,7 +1485,13 @@ fn vct_and_audit(
     }
 
     let defenses = match board.last_move {
-        Some(attack_mv) => find_defenses_with_counters(board, attack_mv, attack_kind, jump_three),
+        Some(attack_mv) => find_defenses_with_counters(
+            board,
+            attack_mv,
+            attack_kind,
+            jump_three,
+            threat_index.as_ref(),
+        ),
         None => board.candidate_moves(),
     };
     if defenses.is_empty() {
@@ -1193,7 +1519,7 @@ fn vct_and_audit(
         sequence.push(mv);
 
         let tt_before = audit.tt_hit_count;
-        board.make_move(mv);
+        make_vct_move(board, threat_index, mv);
         let attacker_still_wins = vct_or_audit(
             board,
             attacker,
@@ -1202,12 +1528,13 @@ fn vct_and_audit(
             deadline,
             node_budget,
             jump_three,
+            threat_index,
             sequence,
             tt,
             audit,
             stats,
         );
-        board.undo_move();
+        undo_vct_move(board, threat_index);
         if stats.hit_stop() {
             sequence.truncate(checkpoint);
             return false;
@@ -1344,6 +1671,7 @@ fn find_defenses_with_counters(
     attack_move: Move,
     attack_kind: ThreatKind,
     jump_three: VctJumpThreeFlags,
+    threat_index: Option<&VctThreatIndex>,
 ) -> Vec<Move> {
     let direct_jump_three_defense = jump_three.attack_defense
         && (!jump_three.kind_scoped_defense || attack_kind == ThreatKind::JumpThree);
@@ -1360,6 +1688,19 @@ fn find_defenses_with_counters(
     // 수비자(현재 side_to_move) 관점에서 자기 winning threat 만드는 수들.
     let (def_my, def_opp) = bb_pair(board, board.side_to_move);
     let rule_set = board.effective_rule_set();
+    if let Some(index) = threat_index {
+        for idx in index.forcing_moves_in_cell_order(
+            board.side_to_move,
+            jump_three.counter,
+            jump_three.gap_four,
+        ) {
+            if !seen.get(idx) {
+                seen.set(idx);
+                defenses.push(idx);
+            }
+        }
+        return defenses;
+    }
     for idx in 0..NUM_CELLS {
         if def_my.get(idx) || def_opp.get(idx) || seen.get(idx) {
             continue;
@@ -1531,7 +1872,6 @@ fn bb_pair(board: &Board, side: Stone) -> (&BitBoard, &BitBoard) {
         Stone::White => (&board.white, &board.black),
     }
 }
-
 
 fn node_budget_exceeded(node_budget: Option<u64>, stats: &VctSearchStats) -> bool {
     node_budget.is_some_and(|limit| stats.nodes > limit)
@@ -2011,6 +2351,29 @@ mod tests {
     /// Standard 규칙(exact5)의 핵심: 6목(overline)을 만드는 수는 승리가 아니다.
     /// Gomocup 2026 Standard 리그 탈락의 직접 원인이었던 회귀를 가드한다.
     #[test]
+    fn rq574_threat_index_make_undo_matches_rebuild() {
+        let initial = Board::new();
+        VctThreatIndex::new(&initial).assert_matches_rebuild(&initial);
+        let moves = [
+            to_idx(7, 7),
+            to_idx(8, 7),
+            to_idx(7, 6),
+            to_idx(8, 6),
+            to_idx(7, 5),
+            to_idx(8, 5),
+            to_idx(7, 4),
+            to_idx(5, 5),
+            to_idx(6, 6),
+            to_idx(9, 5),
+            to_idx(5, 7),
+            to_idx(10, 4),
+        ];
+        let (makes, undos) = vct_threat_index_transition_check_for_audit(&moves).unwrap();
+        assert_eq!(makes, moves.len());
+        assert_eq!(undos, moves.len());
+    }
+
+    #[test]
     fn classify_move_exact5_overline_not_five() {
         let mut board = Board::new();
         // 흑 가로 (7,2)(7,3)(7,4)(7,5)(7,7). (7,6)에 두면 2~7 = 6목.
@@ -2179,6 +2542,7 @@ mod tests {
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
             use_fast_classify: false,
+            use_threat_index: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -2234,6 +2598,7 @@ mod tests {
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
             use_fast_classify: false,
+            use_threat_index: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -2260,6 +2625,7 @@ mod tests {
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
             use_fast_classify: false,
+            use_threat_index: false,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

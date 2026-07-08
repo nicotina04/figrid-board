@@ -1,5 +1,5 @@
-﻿use figrid_board::vct::{
-    classify_move_fast_with_flags_for_audit, classify_move_rules_with_flags_for_audit, ThreatKind,
+use figrid_board::vct::{
+    ThreatKind, classify_move_fast_with_flags_for_audit, classify_move_rules_with_flags_for_audit,
 };
 use figrid_board::{BOARD_SIZE, Board, DIR, Move, NUM_CELLS, Stone, to_idx, to_rc};
 use serde_json::{Value, json};
@@ -16,10 +16,26 @@ struct FlagCombo {
 }
 
 const FLAG_COMBOS: [FlagCombo; 4] = [
-    FlagCombo { name: "off_off", jump: false, gap_four: false },
-    FlagCombo { name: "jump_on", jump: true, gap_four: false },
-    FlagCombo { name: "gap_four_on", jump: false, gap_four: true },
-    FlagCombo { name: "both_on", jump: true, gap_four: true },
+    FlagCombo {
+        name: "off_off",
+        jump: false,
+        gap_four: false,
+    },
+    FlagCombo {
+        name: "jump_on",
+        jump: true,
+        gap_four: false,
+    },
+    FlagCombo {
+        name: "gap_four_on",
+        jump: false,
+        gap_four: true,
+    },
+    FlagCombo {
+        name: "both_on",
+        jump: true,
+        gap_four: true,
+    },
 ];
 
 struct Args {
@@ -107,7 +123,8 @@ fn sweep_position_jsonl(
 ) -> Result<(), String> {
     let file = File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
     for (line_no, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|e| format!("failed to read {}:{}: {e}", path.display(), line_no + 1))?;
+        let line =
+            line.map_err(|e| format!("failed to read {}:{}: {e}", path.display(), line_no + 1))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -118,7 +135,13 @@ fn sweep_position_jsonl(
         let history = rec
             .get("position_history")
             .and_then(Value::as_array)
-            .ok_or_else(|| format!("missing position_history in {}:{}", path.display(), line_no + 1))?;
+            .ok_or_else(|| {
+                format!(
+                    "missing position_history in {}:{}",
+                    path.display(),
+                    line_no + 1
+                )
+            })?;
         let board = board_from_history(history)?;
         let label = json!({
             "source": "positions_jsonl",
@@ -186,7 +209,8 @@ fn load_trace_games(path: &PathBuf, stats: &mut Stats) -> Result<Vec<TraceGame>,
     let file = File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
     let mut games = Vec::new();
     for (line_no, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|e| format!("failed to read {}:{}: {e}", path.display(), line_no + 1))?;
+        let line =
+            line.map_err(|e| format!("failed to read {}:{}: {e}", path.display(), line_no + 1))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -299,9 +323,17 @@ fn directional_windows(board: &Board, mv: Move, side: Stone) -> Value {
             if idx == mv {
                 s.push('M');
             } else if board.black.get(idx) {
-                s.push(if matches!(side, Stone::Black) { 'X' } else { 'O' });
+                s.push(if matches!(side, Stone::Black) {
+                    'X'
+                } else {
+                    'O'
+                });
             } else if board.white.get(idx) {
-                s.push(if matches!(side, Stone::White) { 'X' } else { 'O' });
+                s.push(if matches!(side, Stone::White) {
+                    'X'
+                } else {
+                    'O'
+                });
             } else {
                 s.push('.');
             }

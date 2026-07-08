@@ -184,6 +184,7 @@ fn defensive_vct_veto_replacement(
         jump_attack_max_or_levels: u32::MAX,
         enable_gap_four: false,
         use_fast_classify: true,
+        use_threat_index: false,
     };
     let unsafe_sequence = opponent_vct_sequence(board, incumbent, &cfg);
     if unsafe_sequence.is_none() {
@@ -1029,6 +1030,7 @@ impl Searcher {
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
             use_fast_classify: true,
+            use_threat_index: false,
         };
         if let Some(seq) = search_vct(board, &vct_cfg) {
             if let Some(&first) = seq.first() {
@@ -1283,6 +1285,7 @@ impl Searcher {
                 jump_attack_max_or_levels: u32::MAX,
                 enable_gap_four: false,
                 use_fast_classify: true,
+                use_threat_index: false,
             };
             if let Some(seq) = search_vct(board, &vct_cfg) {
                 if let Some(&first) = seq.first() {
@@ -1588,6 +1591,7 @@ impl Searcher {
                 jump_attack_max_or_levels: u32::MAX,
                 enable_gap_four: false,
                 use_fast_classify: true,
+                use_threat_index: false,
             };
             if let Some(seq) = search_vct(board, &vct_cfg) {
                 if let Some(&first) = seq.first() {

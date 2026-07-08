@@ -31,6 +31,7 @@ struct Args {
     enable_gap_four: bool,
     use_fast_classify: bool,
     use_threat_index: bool,
+    profile: bool,
     node_budget: Option<u64>,
 }
 
@@ -94,6 +95,7 @@ fn main() -> Result<(), String> {
             args.enable_gap_four,
             args.use_fast_classify,
             args.use_threat_index,
+            args.profile,
             args.node_budget,
         ) {
             Ok(v) => v,
@@ -130,6 +132,7 @@ fn main() -> Result<(), String> {
         "enable_gap_four": args.enable_gap_four,
         "use_fast_classify": args.use_fast_classify,
         "use_threat_index": args.use_threat_index,
+        "profile": args.profile,
         "node_budget": args.node_budget,
         "records_scanned": records,
         "usable": usable,
@@ -162,6 +165,7 @@ fn solve_record(
     enable_gap_four: bool,
     use_fast_classify: bool,
     use_threat_index: bool,
+    profile: bool,
     node_budget: Option<u64>,
 ) -> Result<Value, String> {
     let class = rec
@@ -198,6 +202,7 @@ fn solve_record(
         enable_gap_four,
         use_fast_classify,
         use_threat_index,
+        profile,
         node_budget,
     );
     let actual_move = parse_move(rec.get("actual_move").ok_or("missing actual_move")?)?;
@@ -215,6 +220,7 @@ fn solve_record(
             enable_gap_four,
             use_fast_classify,
             use_threat_index,
+            profile,
             node_budget,
         );
         board.undo_move();
@@ -259,6 +265,7 @@ fn solve_record(
         "enable_gap_four": enable_gap_four,
         "use_fast_classify": use_fast_classify,
         "use_threat_index": use_threat_index,
+        "profile": profile,
         "node_budget": node_budget,
         "pre_vct": pre_vct,
         "after_actual_opp_vct": after_actual_opp_vct,
@@ -277,6 +284,7 @@ fn run_sweep(
     enable_gap_four: bool,
     use_fast_classify: bool,
     use_threat_index: bool,
+    profile: bool,
     node_budget: Option<u64>,
 ) -> Value {
     let mut attempts = Vec::new();
@@ -299,10 +307,11 @@ fn run_sweep(
             enable_gap_four,
             use_fast_classify,
             use_threat_index,
+            profile,
         };
         let started = Instant::now();
         let should_capture_proof = include_proof && first_hit.is_none();
-        let (seq, proof, nodes, deadline_hits, node_budget_hits, termination_reason) =
+        let (seq, proof, nodes, deadline_hits, node_budget_hits, termination_reason, profile_json) =
             if should_capture_proof {
                 let proof_json = search_vct_audit_json(&mut b, &cfg_obj);
                 let seq = proof_json
@@ -328,6 +337,7 @@ fn run_sweep(
                     .and_then(Value::as_str)
                     .unwrap_or(if seq.is_some() { "proved" } else { "exhausted" })
                     .to_string();
+                let profile_json = proof_json.get("profile").cloned().unwrap_or(Value::Null);
                 let proof = if proof_json
                     .get("hit")
                     .and_then(Value::as_bool)
@@ -344,10 +354,16 @@ fn run_sweep(
                     deadline_hits,
                     node_budget_hits,
                     termination_reason,
+                    profile_json,
                 )
             } else {
                 let result = search_vct_with_stats(&mut b, &cfg_obj);
                 let termination_reason = result.termination_reason().to_string();
+                let profile_json = if profile {
+                    result.stats.profile.to_json()
+                } else {
+                    Value::Null
+                };
                 (
                     result.sequence,
                     None,
@@ -355,6 +371,7 @@ fn run_sweep(
                     result.stats.deadline_hits,
                     result.stats.node_budget_hits,
                     termination_reason,
+                    profile_json,
                 )
             };
         let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -375,6 +392,9 @@ fn run_sweep(
             "sequence_len": seq.as_ref().map(|s| s.len()).unwrap_or(0),
             "sequence": seq_json,
         });
+        if !profile_json.is_null() {
+            attempt["profile"] = profile_json;
+        }
         if let Some(proof) = proof {
             attempt["proof"] = proof;
         }
@@ -518,6 +538,7 @@ fn parse_args() -> Result<Args, String> {
         use_fast_classify = true;
     }
     let mut use_threat_index = env_flag("FIGRID_VCT_USE_THREAT_INDEX");
+    let mut profile = env_flag("FIGRID_VCT_PROFILE");
     let mut node_budget = env_u64("FIGRID_VCT_NODE_BUDGET");
 
     let mut it = env::args().skip(1);
@@ -548,6 +569,7 @@ fn parse_args() -> Result<Args, String> {
             "--use-fast-classify" => use_fast_classify = true,
             "--use-slow-classify" => use_fast_classify = false,
             "--use-threat-index" => use_threat_index = true,
+            "--profile" => profile = true,
             "--node-budget" => {
                 node_budget = Some(
                     next_arg(&mut it, &arg)?
@@ -577,6 +599,7 @@ fn parse_args() -> Result<Args, String> {
         enable_gap_four,
         use_fast_classify,
         use_threat_index,
+        profile,
         node_budget,
     })
 }
@@ -620,6 +643,6 @@ fn env_u64(name: &str) -> Option<u64> {
 
 fn print_help() {
     eprintln!(
-        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K] [--enable-gap-four] [--use-fast-classify|--use-slow-classify] [--use-threat-index] [--node-budget N]"
+        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K] [--enable-gap-four] [--use-fast-classify|--use-slow-classify] [--use-threat-index] [--profile] [--node-budget N]"
     );
 }

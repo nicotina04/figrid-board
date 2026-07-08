@@ -532,6 +532,8 @@ pub struct VctConfig {
     pub use_fast_classify: bool,
     /// RQ574 gate: use a VCT-local incremental threat index.
     pub use_threat_index: bool,
+    /// RQ575 gate: collect prover timing counters. Measurement only.
+    pub profile: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -786,6 +788,33 @@ fn undo_vct_move(board: &mut Board, threat_index: &mut Option<VctThreatIndex>) {
     }
 }
 
+fn make_vct_move_profiled(
+    board: &mut Board,
+    threat_index: &mut Option<VctThreatIndex>,
+    mv: Move,
+    stats: &mut VctSearchStats,
+) {
+    let start = profile_start(stats);
+    make_vct_move(board, threat_index, mv);
+    if let Some(start) = start {
+        stats.profile.make_move_calls += 1;
+        stats.profile.make_move_ns += start.elapsed().as_nanos();
+    }
+}
+
+fn undo_vct_move_profiled(
+    board: &mut Board,
+    threat_index: &mut Option<VctThreatIndex>,
+    stats: &mut VctSearchStats,
+) {
+    let start = profile_start(stats);
+    undo_vct_move(board, threat_index);
+    if let Some(start) = start {
+        stats.profile.undo_move_calls += 1;
+        stats.profile.undo_move_ns += start.elapsed().as_nanos();
+    }
+}
+
 #[doc(hidden)]
 pub fn vct_threat_index_transition_check_for_audit(
     moves: &[Move],
@@ -824,10 +853,103 @@ pub fn vct_threat_index_transition_check_for_audit(
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct VctProfileStats {
+    pub make_move_calls: u64,
+    pub make_move_ns: u128,
+    pub undo_move_calls: u64,
+    pub undo_move_ns: u128,
+    pub gather_calls: u64,
+    pub gather_total_ns: u128,
+    pub gather_classify_calls: u64,
+    pub gather_classify_ns: u128,
+    pub gather_sort_ns: u128,
+    pub gather_len_sum: u64,
+    pub gather_len_max: u64,
+    pub gather_len_buckets: [u64; 17],
+    pub find_defenses_calls: u64,
+    pub find_defenses_total_ns: u128,
+    pub find_defenses_direct_ns: u128,
+    pub find_defenses_counter_scan_ns: u128,
+    pub find_defenses_counter_classify_calls: u64,
+    pub find_defenses_counter_classify_ns: u128,
+    pub tt_hash_calls: u64,
+    pub tt_hash_ns: u128,
+    pub tt_get_calls: u64,
+    pub tt_get_ns: u128,
+    pub tt_insert_calls: u64,
+    pub tt_insert_ns: u128,
+    pub immediate_five_calls: u64,
+    pub immediate_five_ns: u128,
+    pub terminal_check_calls: u64,
+    pub terminal_check_ns: u128,
+}
+
+impl VctProfileStats {
+    fn record_gather_len(&mut self, len: usize) {
+        self.gather_len_sum += len as u64;
+        self.gather_len_max = self.gather_len_max.max(len as u64);
+        let bucket = len.min(self.gather_len_buckets.len() - 1);
+        self.gather_len_buckets[bucket] += 1;
+    }
+
+    fn known_ns(&self) -> u128 {
+        self.make_move_ns
+            + self.undo_move_ns
+            + self.gather_total_ns
+            + self.find_defenses_total_ns
+            + self.tt_hash_ns
+            + self.tt_get_ns
+            + self.tt_insert_ns
+            + self.immediate_five_ns
+            + self.terminal_check_ns
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "make_move": {"calls": self.make_move_calls, "ns": self.make_move_ns},
+            "undo_move": {"calls": self.undo_move_calls, "ns": self.undo_move_ns},
+            "gather_attack_moves": {
+                "calls": self.gather_calls,
+                "ns": self.gather_total_ns,
+                "classify_calls": self.gather_classify_calls,
+                "classify_ns": self.gather_classify_ns,
+                "sort_ns": self.gather_sort_ns,
+                "other_ns": self.gather_total_ns.saturating_sub(self.gather_classify_ns + self.gather_sort_ns),
+                "len_sum": self.gather_len_sum,
+                "len_max": self.gather_len_max,
+                "len_buckets_0_15_plus": self.gather_len_buckets,
+            },
+            "find_defenses_with_counters": {
+                "calls": self.find_defenses_calls,
+                "ns": self.find_defenses_total_ns,
+                "direct_ns": self.find_defenses_direct_ns,
+                "counter_scan_ns": self.find_defenses_counter_scan_ns,
+                "counter_classify_calls": self.find_defenses_counter_classify_calls,
+                "counter_classify_ns": self.find_defenses_counter_classify_ns,
+                "other_ns": self.find_defenses_total_ns.saturating_sub(self.find_defenses_direct_ns + self.find_defenses_counter_scan_ns),
+            },
+            "tt": {
+                "hash_calls": self.tt_hash_calls,
+                "hash_ns": self.tt_hash_ns,
+                "get_calls": self.tt_get_calls,
+                "get_ns": self.tt_get_ns,
+                "insert_calls": self.tt_insert_calls,
+                "insert_ns": self.tt_insert_ns,
+            },
+            "immediate_five": {"calls": self.immediate_five_calls, "ns": self.immediate_five_ns},
+            "terminal_check": {"calls": self.terminal_check_calls, "ns": self.terminal_check_ns},
+            "known_ns": self.known_ns(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct VctSearchStats {
     pub nodes: u64,
     pub deadline_hits: u64,
     pub node_budget_hits: u64,
+    pub profile: VctProfileStats,
+    profile_enabled: bool,
 }
 
 impl VctSearchStats {
@@ -854,6 +976,25 @@ impl VctSearchStats {
     pub fn hit_stop(&self) -> bool {
         self.hit_deadline() || self.hit_node_budget()
     }
+
+    #[inline]
+    fn profiling(&self) -> bool {
+        self.profile_enabled
+    }
+}
+
+#[inline]
+fn profile_start(stats: &VctSearchStats) -> Option<Instant> {
+    if stats.profiling() {
+        Some(Instant::now())
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn elapsed_ns(start: Option<Instant>) -> u128 {
+    start.map(|s| s.elapsed().as_nanos()).unwrap_or(0)
 }
 
 #[derive(Clone, Debug)]
@@ -890,6 +1031,7 @@ impl Default for VctConfig {
             enable_gap_four: false,
             use_fast_classify: true,
             use_threat_index: false,
+            profile: false,
         }
     }
 }
@@ -908,6 +1050,7 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
     let mut sequence = Vec::with_capacity(cfg.max_depth as usize * 2);
     let mut tt: TransTable = HashMap::with_capacity(65536);
     let mut stats = VctSearchStats::default();
+    stats.profile_enabled = cfg.profile;
     let flags = cfg.jump_three_flags();
     let mut threat_index = if flags.use_threat_index && flags.use_fast_classify {
         Some(VctThreatIndex::new(board))
@@ -940,6 +1083,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
     let mut tt: TransTable = HashMap::with_capacity(65536);
     let mut audit = VctAuditLog::default();
     let mut stats = VctSearchStats::default();
+    stats.profile_enabled = cfg.profile;
     let flags = cfg.jump_three_flags();
     let mut threat_index = if flags.use_threat_index && flags.use_fast_classify {
         Some(VctThreatIndex::new(board))
@@ -982,6 +1126,8 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         "gap_four": flags.gap_four,
         "use_fast_classify": flags.use_fast_classify,
         "use_threat_index": flags.use_threat_index && flags.use_fast_classify,
+        "profile_enabled": cfg.profile,
+        "profile": result.stats.profile.to_json(),
         "sequence": if hit { Some(sequence.iter().map(|&mv| move_json(mv)).collect::<Vec<_>>()) } else { None },
         "and_nodes": audit.and_nodes,
         "terminal_event_count": audit.terminal_event_count,
@@ -1044,8 +1190,19 @@ fn vct_or(
     debug_assert_eq!(board.side_to_move, attacker);
 
     // TT 조회 — 같은 깊이 이상으로 탐색된 결과가 있으면 재사용.
+    let start = profile_start(stats);
     let hash = zobrist_hash(board);
-    if let Some(entry) = tt.get(&hash) {
+    if let Some(start) = start {
+        stats.profile.tt_hash_calls += 1;
+        stats.profile.tt_hash_ns += start.elapsed().as_nanos();
+    }
+    let start = profile_start(stats);
+    let tt_entry = tt.get(&hash).copied();
+    if let Some(start) = start {
+        stats.profile.tt_get_calls += 1;
+        stats.profile.tt_get_ns += start.elapsed().as_nanos();
+    }
+    if let Some(entry) = tt_entry {
         if entry.depth >= depth {
             // RQ550: positive proof reuse can hide an unverified defender
             // branch. Keep only negative cutoffs and re-search wins.
@@ -1057,11 +1214,16 @@ fn vct_or(
 
     let (my, opp) = bb_pair(board, attacker);
     let rule_set = board.effective_rule_set();
+    let start = profile_start(stats);
     let opp_has_immediate_five = if let Some(index) = threat_index.as_ref() {
         index.has_kind(attacker.opponent(), false, false, ThreatKind::Five)
     } else {
         has_immediate_five(opp, my, attacker.opponent(), rule_set)
     };
+    if let Some(start) = start {
+        stats.profile.immediate_five_calls += 1;
+        stats.profile.immediate_five_ns += start.elapsed().as_nanos();
+    }
 
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
@@ -1077,9 +1239,11 @@ fn vct_or(
             enable_jump_three_attack,
             jump_three.gap_four,
             jump_three.use_fast_classify,
+            Some(stats),
         )
     };
     if attack_moves.is_empty() {
+        let start = profile_start(stats);
         tt.insert(
             hash,
             TtEntry {
@@ -1087,15 +1251,26 @@ fn vct_or(
                 result: TtResult::Fails,
             },
         );
+        if let Some(start) = start {
+            stats.profile.tt_insert_calls += 1;
+            stats.profile.tt_insert_ns += start.elapsed().as_nanos();
+        }
         return false;
     }
 
     for (mv, kind) in attack_moves {
-        if is_vct_terminal_win(kind) {
+        let start = profile_start(stats);
+        let terminal_win = is_vct_terminal_win(kind);
+        if let Some(start) = start {
+            stats.profile.terminal_check_calls += 1;
+            stats.profile.terminal_check_ns += start.elapsed().as_nanos();
+        }
+        if terminal_win {
             if opp_has_immediate_five && kind != ThreatKind::Five {
                 continue;
             }
             sequence.push(mv);
+            let start = profile_start(stats);
             tt.insert(
                 hash,
                 TtEntry {
@@ -1103,13 +1278,17 @@ fn vct_or(
                     result: TtResult::AttackerWins,
                 },
             );
+            if let Some(start) = start {
+                stats.profile.tt_insert_calls += 1;
+                stats.profile.tt_insert_ns += start.elapsed().as_nanos();
+            }
             return true;
         }
         if opp_has_immediate_five {
             continue;
         }
         sequence.push(mv);
-        make_vct_move(board, threat_index, mv);
+        make_vct_move_profiled(board, threat_index, mv, stats);
         let won = vct_and(
             board,
             attacker,
@@ -1124,12 +1303,13 @@ fn vct_or(
             tt,
             stats,
         );
-        undo_vct_move(board, threat_index);
+        undo_vct_move_profiled(board, threat_index, stats);
         if stats.hit_stop() {
             sequence.pop();
             return false;
         }
         if won {
+            let start = profile_start(stats);
             tt.insert(
                 hash,
                 TtEntry {
@@ -1137,10 +1317,15 @@ fn vct_or(
                     result: TtResult::AttackerWins,
                 },
             );
+            if let Some(start) = start {
+                stats.profile.tt_insert_calls += 1;
+                stats.profile.tt_insert_ns += start.elapsed().as_nanos();
+            }
             return true;
         }
         sequence.pop();
     }
+    let start = profile_start(stats);
     tt.insert(
         hash,
         TtEntry {
@@ -1148,6 +1333,10 @@ fn vct_or(
             result: TtResult::Fails,
         },
     );
+    if let Some(start) = start {
+        stats.profile.tt_insert_calls += 1;
+        stats.profile.tt_insert_ns += start.elapsed().as_nanos();
+    }
     false
 }
 
@@ -1188,11 +1377,16 @@ fn vct_and(
     // 수비 측이 자기 턴에 즉시 5목을 완성할 수 있으면 공격 VCT는 실패.
     let (def_my, def_opp) = bb_pair(board, board.side_to_move);
     let rule_set = board.effective_rule_set();
+    let start = profile_start(stats);
     let defender_has_immediate_five = if let Some(index) = threat_index.as_ref() {
         index.has_kind(board.side_to_move, false, false, ThreatKind::Five)
     } else {
         has_immediate_five(def_my, def_opp, board.side_to_move, rule_set)
     };
+    if let Some(start) = start {
+        stats.profile.immediate_five_calls += 1;
+        stats.profile.immediate_five_ns += start.elapsed().as_nanos();
+    }
     if defender_has_immediate_five {
         return false;
     }
@@ -1208,6 +1402,7 @@ fn vct_and(
             attack_kind,
             jump_three,
             threat_index.as_ref(),
+            Some(stats),
         ),
         None => board.candidate_moves(),
     };
@@ -1221,7 +1416,7 @@ fn vct_and(
         sequence.truncate(checkpoint);
         sequence.push(mv);
 
-        make_vct_move(board, threat_index, mv);
+        make_vct_move_profiled(board, threat_index, mv, stats);
         let attacker_still_wins = vct_or(
             board,
             attacker,
@@ -1235,7 +1430,7 @@ fn vct_and(
             tt,
             stats,
         );
-        undo_vct_move(board, threat_index);
+        undo_vct_move_profiled(board, threat_index, stats);
         if stats.hit_stop() {
             sequence.truncate(checkpoint);
             return false;
@@ -1279,8 +1474,19 @@ fn vct_or_audit(
     }
     debug_assert_eq!(board.side_to_move, attacker);
 
+    let start = profile_start(stats);
     let hash = zobrist_hash(board);
-    if let Some(entry) = tt.get(&hash) {
+    if let Some(start) = start {
+        stats.profile.tt_hash_calls += 1;
+        stats.profile.tt_hash_ns += start.elapsed().as_nanos();
+    }
+    let start = profile_start(stats);
+    let tt_entry = tt.get(&hash).copied();
+    if let Some(start) = start {
+        stats.profile.tt_get_calls += 1;
+        stats.profile.tt_get_ns += start.elapsed().as_nanos();
+    }
+    if let Some(entry) = tt_entry {
         if entry.depth >= depth {
             audit.tt_hit_count += 1;
             audit.tt_hit_events.push(json!({
@@ -1320,9 +1526,11 @@ fn vct_or_audit(
             enable_jump_three_attack,
             jump_three.gap_four,
             jump_three.use_fast_classify,
+            Some(stats),
         )
     };
     if attack_moves.is_empty() {
+        let start = profile_start(stats);
         tt.insert(
             hash,
             TtEntry {
@@ -1330,11 +1538,21 @@ fn vct_or_audit(
                 result: TtResult::Fails,
             },
         );
+        if let Some(start) = start {
+            stats.profile.tt_insert_calls += 1;
+            stats.profile.tt_insert_ns += start.elapsed().as_nanos();
+        }
         return false;
     }
 
     for (mv, kind) in attack_moves {
-        if is_vct_terminal_win(kind) {
+        let start = profile_start(stats);
+        let terminal_win = is_vct_terminal_win(kind);
+        if let Some(start) = start {
+            stats.profile.terminal_check_calls += 1;
+            stats.profile.terminal_check_ns += start.elapsed().as_nanos();
+        }
+        if terminal_win {
             if opp_has_immediate_five && kind != ThreatKind::Five {
                 audit.record_terminal(
                     "winning_attack_skipped_opp_immediate_five",
@@ -1360,6 +1578,7 @@ fn vct_or_audit(
                     "opp_has_immediate_five": opp_has_immediate_five,
                 }),
             );
+            let start = profile_start(stats);
             tt.insert(
                 hash,
                 TtEntry {
@@ -1367,6 +1586,10 @@ fn vct_or_audit(
                     result: TtResult::AttackerWins,
                 },
             );
+            if let Some(start) = start {
+                stats.profile.tt_insert_calls += 1;
+                stats.profile.tt_insert_ns += start.elapsed().as_nanos();
+            }
             return true;
         }
         if opp_has_immediate_five {
@@ -1383,7 +1606,7 @@ fn vct_or_audit(
             continue;
         }
         sequence.push(mv);
-        make_vct_move(board, threat_index, mv);
+        make_vct_move_profiled(board, threat_index, mv, stats);
         let won = vct_and_audit(
             board,
             attacker,
@@ -1399,12 +1622,13 @@ fn vct_or_audit(
             audit,
             stats,
         );
-        undo_vct_move(board, threat_index);
+        undo_vct_move_profiled(board, threat_index, stats);
         if stats.hit_stop() {
             sequence.pop();
             return false;
         }
         if won {
+            let start = profile_start(stats);
             tt.insert(
                 hash,
                 TtEntry {
@@ -1412,10 +1636,15 @@ fn vct_or_audit(
                     result: TtResult::AttackerWins,
                 },
             );
+            if let Some(start) = start {
+                stats.profile.tt_insert_calls += 1;
+                stats.profile.tt_insert_ns += start.elapsed().as_nanos();
+            }
             return true;
         }
         sequence.pop();
     }
+    let start = profile_start(stats);
     tt.insert(
         hash,
         TtEntry {
@@ -1423,6 +1652,10 @@ fn vct_or_audit(
             result: TtResult::Fails,
         },
     );
+    if let Some(start) = start {
+        stats.profile.tt_insert_calls += 1;
+        stats.profile.tt_insert_ns += start.elapsed().as_nanos();
+    }
     false
 }
 
@@ -1461,11 +1694,16 @@ fn vct_and_audit(
     let defender = board.side_to_move;
     let (def_my, def_opp) = bb_pair(board, defender);
     let rule_set = board.effective_rule_set();
+    let start = profile_start(stats);
     let defender_has_immediate_five = if let Some(index) = threat_index.as_ref() {
         index.has_kind(defender, false, false, ThreatKind::Five)
     } else {
         has_immediate_five(def_my, def_opp, defender, rule_set)
     };
+    if let Some(start) = start {
+        stats.profile.immediate_five_calls += 1;
+        stats.profile.immediate_five_ns += start.elapsed().as_nanos();
+    }
     if defender_has_immediate_five {
         audit.and_nodes.push(json!({
             "node": "and",
@@ -1491,6 +1729,7 @@ fn vct_and_audit(
             attack_kind,
             jump_three,
             threat_index.as_ref(),
+            Some(stats),
         ),
         None => board.candidate_moves(),
     };
@@ -1519,7 +1758,7 @@ fn vct_and_audit(
         sequence.push(mv);
 
         let tt_before = audit.tt_hit_count;
-        make_vct_move(board, threat_index, mv);
+        make_vct_move_profiled(board, threat_index, mv, stats);
         let attacker_still_wins = vct_or_audit(
             board,
             attacker,
@@ -1534,7 +1773,7 @@ fn vct_and_audit(
             audit,
             stats,
         );
-        undo_vct_move(board, threat_index);
+        undo_vct_move_profiled(board, threat_index, stats);
         if stats.hit_stop() {
             sequence.truncate(checkpoint);
             return false;
@@ -1597,17 +1836,38 @@ fn gather_attack_moves(
     enable_jump_three: bool,
     enable_gap_four: bool,
     use_fast_classify: bool,
+    stats: Option<&mut VctSearchStats>,
 ) -> Vec<(Move, ThreatKind)> {
+    let profile_enabled = stats.as_ref().map(|s| s.profiling()).unwrap_or(false);
+    let total_start = if profile_enabled {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let mut classify_ns = 0u128;
+    let mut classify_calls = 0u64;
     let mut out = Vec::new();
     let cells = my.count_ones() + opp.count_ones();
     // 첫 수면 패스 (vct 의미 없음).
     if cells == 0 {
+        if let Some(stats) = stats {
+            if let Some(start) = total_start {
+                stats.profile.gather_calls += 1;
+                stats.profile.gather_total_ns += start.elapsed().as_nanos();
+                stats.profile.record_gather_len(0);
+            }
+        }
         return out;
     }
     for idx in 0..(BOARD_SIZE * BOARD_SIZE) {
         if my.get(idx) || opp.get(idx) {
             continue;
         }
+        let classify_start = if profile_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let kind = if use_fast_classify {
             classify_move_fast_with_flags(board, idx, side, enable_jump_three, enable_gap_four)
         } else {
@@ -1621,12 +1881,32 @@ fn gather_attack_moves(
                 enable_gap_four,
             )
         };
+        if let Some(start) = classify_start {
+            classify_calls += 1;
+            classify_ns += start.elapsed().as_nanos();
+        }
         if kind.is_forcing() {
             out.push((idx, kind));
         }
     }
     // 승리 위협을 먼저 시도.
+    let sort_start = if profile_enabled {
+        Some(Instant::now())
+    } else {
+        None
+    };
     out.sort_by_key(|(_, k)| threat_priority(*k));
+    let sort_ns = elapsed_ns(sort_start);
+    if let Some(stats) = stats {
+        if let Some(start) = total_start {
+            stats.profile.gather_calls += 1;
+            stats.profile.gather_total_ns += start.elapsed().as_nanos();
+            stats.profile.gather_classify_calls += classify_calls;
+            stats.profile.gather_classify_ns += classify_ns;
+            stats.profile.gather_sort_ns += sort_ns;
+            stats.profile.record_gather_len(out.len());
+        }
+    }
     out
 }
 
@@ -1672,15 +1952,28 @@ fn find_defenses_with_counters(
     attack_kind: ThreatKind,
     jump_three: VctJumpThreeFlags,
     threat_index: Option<&VctThreatIndex>,
+    stats: Option<&mut VctSearchStats>,
 ) -> Vec<Move> {
+    let profile_enabled = stats.as_ref().map(|s| s.profiling()).unwrap_or(false);
+    let total_start = if profile_enabled {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let direct_jump_three_defense = jump_three.attack_defense
         && (!jump_three.kind_scoped_defense || attack_kind == ThreatKind::JumpThree);
+    let direct_start = if profile_enabled {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let mut defenses = find_defenses(
         board,
         attack_move,
         direct_jump_three_defense,
         jump_three.gap_four,
     );
+    let direct_ns = elapsed_ns(direct_start);
     let mut seen = BitBoard::EMPTY;
     for &d in &defenses {
         seen.set(d);
@@ -1688,6 +1981,13 @@ fn find_defenses_with_counters(
     // 수비자(현재 side_to_move) 관점에서 자기 winning threat 만드는 수들.
     let (def_my, def_opp) = bb_pair(board, board.side_to_move);
     let rule_set = board.effective_rule_set();
+    let counter_start = if profile_enabled {
+        Some(Instant::now())
+    } else {
+        None
+    };
+    let mut counter_classify_calls = 0u64;
+    let mut counter_classify_ns = 0u128;
     if let Some(index) = threat_index {
         for idx in index.forcing_moves_in_cell_order(
             board.side_to_move,
@@ -1699,12 +1999,26 @@ fn find_defenses_with_counters(
                 defenses.push(idx);
             }
         }
+        let counter_scan_ns = elapsed_ns(counter_start);
+        if let Some(stats) = stats {
+            if let Some(start) = total_start {
+                stats.profile.find_defenses_calls += 1;
+                stats.profile.find_defenses_total_ns += start.elapsed().as_nanos();
+                stats.profile.find_defenses_direct_ns += direct_ns;
+                stats.profile.find_defenses_counter_scan_ns += counter_scan_ns;
+            }
+        }
         return defenses;
     }
     for idx in 0..NUM_CELLS {
         if def_my.get(idx) || def_opp.get(idx) || seen.get(idx) {
             continue;
         }
+        let classify_start = if profile_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let kind = if jump_three.use_fast_classify {
             classify_move_fast_with_flags(
                 board,
@@ -1726,9 +2040,24 @@ fn find_defenses_with_counters(
         };
         // Winning 위협뿐 아니라 Forcing(ClosedFour/OpenThree) 반격도 포함해야
         // 원거리 카운터 공격을 AND가 놓치지 않음.
+        if let Some(start) = classify_start {
+            counter_classify_calls += 1;
+            counter_classify_ns += start.elapsed().as_nanos();
+        }
         if kind.is_forcing() {
             seen.set(idx);
             defenses.push(idx);
+        }
+    }
+    let counter_scan_ns = elapsed_ns(counter_start);
+    if let Some(stats) = stats {
+        if let Some(start) = total_start {
+            stats.profile.find_defenses_calls += 1;
+            stats.profile.find_defenses_total_ns += start.elapsed().as_nanos();
+            stats.profile.find_defenses_direct_ns += direct_ns;
+            stats.profile.find_defenses_counter_scan_ns += counter_scan_ns;
+            stats.profile.find_defenses_counter_classify_calls += counter_classify_calls;
+            stats.profile.find_defenses_counter_classify_ns += counter_classify_ns;
         }
     }
     defenses
@@ -2212,6 +2541,7 @@ mod tests {
             true,
             false,
             false,
+            None,
         );
         assert!(
             moves
@@ -2260,6 +2590,7 @@ mod tests {
             true,
             false,
             false,
+            None,
         );
         assert!(
             moves
@@ -2310,6 +2641,7 @@ mod tests {
             true,
             true,
             false,
+            None,
         );
         assert!(
             moves
@@ -2543,6 +2875,7 @@ mod tests {
             enable_gap_four: false,
             use_fast_classify: false,
             use_threat_index: false,
+            profile: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -2599,6 +2932,7 @@ mod tests {
             enable_gap_four: false,
             use_fast_classify: false,
             use_threat_index: false,
+            profile: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -2626,6 +2960,7 @@ mod tests {
             enable_gap_four: false,
             use_fast_classify: false,
             use_threat_index: false,
+            profile: false,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

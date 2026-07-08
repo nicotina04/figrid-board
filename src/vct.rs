@@ -22,7 +22,8 @@ use crate::board::{BOARD_SIZE, BitBoard, Board, Move, NUM_CELLS, RuleSet, Stone}
 use crate::heuristic::{DIR, scan_line};
 use crate::pattern_table::{
     PATTERN_RARE_ID, WindowThreat, pattern_threat_after_my_play, pattern_threat_after_my_play_caro,
-    pattern_threat_after_my_play_exact5, read_window, swap_mapped_id, window_has_jump_three,
+    pattern_threat_after_my_play_exact5, read_window, swap_mapped_id, visit_gap_four_gaps,
+    window_has_gap_four, window_has_jump_three,
 };
 use noru::trainer::SimpleRng;
 use serde_json::{Value, json};
@@ -184,9 +185,10 @@ pub fn classify_move_rules(
     side: Stone,
     rule_set: RuleSet,
 ) -> ThreatKind {
-    classify_move_rules_with_jump_three(my_bb, opp_bb, mv, side, rule_set, false)
+    classify_move_rules_with_flags(my_bb, opp_bb, mv, side, rule_set, false, false)
 }
 
+#[cfg(test)]
 fn classify_move_rules_with_jump_three(
     my_bb: &BitBoard,
     opp_bb: &BitBoard,
@@ -194,6 +196,18 @@ fn classify_move_rules_with_jump_three(
     side: Stone,
     rule_set: RuleSet,
     enable_jump_three: bool,
+) -> ThreatKind {
+    classify_move_rules_with_flags(my_bb, opp_bb, mv, side, rule_set, enable_jump_three, false)
+}
+
+fn classify_move_rules_with_flags(
+    my_bb: &BitBoard,
+    opp_bb: &BitBoard,
+    mv: Move,
+    side: Stone,
+    rule_set: RuleSet,
+    enable_jump_three: bool,
+    enable_gap_four: bool,
 ) -> ThreatKind {
     let row = (mv / BOARD_SIZE) as i32;
     let col = (mv % BOARD_SIZE) as i32;
@@ -211,7 +225,21 @@ fn classify_move_rules_with_jump_three(
     for &(dr, dc) in &DIR {
         let info = scan_line(&my_tmp, opp_bb, row, col, dr, dc);
         let open_ends = info.open_front as u32 + info.open_back as u32;
-        match classify_line(info.count, open_ends, rule_set, side) {
+        let mut line_threat = classify_line(info.count, open_ends, rule_set, side);
+        let mut window = None;
+        if enable_gap_four
+            && !matches!(
+                line_threat,
+                LineThreat::Five | LineThreat::OpenFour | LineThreat::ClosedFour
+            )
+        {
+            let w = read_window(&my_tmp, opp_bb, row, col, dr, dc);
+            if window_has_gap_four(&w) {
+                line_threat = LineThreat::ClosedFour;
+            }
+            window = Some(w);
+        }
+        match line_threat {
             LineThreat::Five => fives += 1,
             LineThreat::OpenFour => {
                 open_fours += 1;
@@ -224,8 +252,13 @@ fn classify_move_rules_with_jump_three(
             LineThreat::OpenThree => open_threes += 1,
             _ => {}
         }
-        if enable_jump_three {
-            let w = read_window(&my_tmp, opp_bb, row, col, dr, dc);
+        if enable_jump_three
+            && !matches!(
+                line_threat,
+                LineThreat::Five | LineThreat::OpenFour | LineThreat::ClosedFour
+            )
+        {
+            let w = window.unwrap_or_else(|| read_window(&my_tmp, opp_bb, row, col, dr, dc));
             if window_has_jump_three(&w) {
                 jump_threes += 1;
             }
@@ -275,14 +308,25 @@ fn classify_move_rules_with_jump_three(
 /// per-node cost, so the actual nodes-per-second uplift is measured rather
 /// than assumed.
 pub fn classify_move_fast(board: &Board, mv: Move, side: Stone) -> ThreatKind {
-    classify_move_fast_with_jump_three(board, mv, side, false)
+    classify_move_fast_with_flags(board, mv, side, false, false)
 }
 
+#[cfg(test)]
 fn classify_move_fast_with_jump_three(
     board: &Board,
     mv: Move,
     side: Stone,
     enable_jump_three: bool,
+) -> ThreatKind {
+    classify_move_fast_with_flags(board, mv, side, enable_jump_three, false)
+}
+
+fn classify_move_fast_with_flags(
+    board: &Board,
+    mv: Move,
+    side: Stone,
+    enable_jump_three: bool,
+    enable_gap_four: bool,
 ) -> ThreatKind {
     let row = (mv / BOARD_SIZE) as i32;
     let col = (mv % BOARD_SIZE) as i32;
@@ -311,7 +355,7 @@ fn classify_move_fast_with_jump_three(
             swap_mapped_id(pid_black)
         };
 
-        let threat = if pid_my == PATTERN_RARE_ID {
+        let mut threat = if pid_my == PATTERN_RARE_ID {
             // Slow path: read the actual window and classify directly.
             let mut w = read_window(mine, opp, row, col, dr, dc);
             // Anchor (index 5) must be empty for the use case. Set anchor=mine.
@@ -353,6 +397,7 @@ fn classify_move_fast_with_jump_three(
                     (4, 1) => WindowThreat::ClosedFour,
                     (3, 2) => WindowThreat::OpenThree,
                     (3, 1) => WindowThreat::ClosedThree,
+                    _ if enable_gap_four && window_has_gap_four(&w) => WindowThreat::ClosedFour,
                     _ if enable_jump_three && window_has_jump_three(&w) => WindowThreat::JumpThree,
                     (2, 2) => WindowThreat::OpenTwo,
                     _ => WindowThreat::None,
@@ -368,6 +413,19 @@ fn classify_move_fast_with_jump_three(
                 _ => pattern_threat_after_my_play(pid_my),
             }
         };
+        if enable_gap_four
+            && !matches!(
+                threat,
+                WindowThreat::Five | WindowThreat::OpenFour | WindowThreat::ClosedFour
+            )
+        {
+            let mut w = read_window(mine, opp, row, col, dr, dc);
+            debug_assert_eq!(w[5], 0, "candidate move cell must be empty");
+            w[5] = 1;
+            if window_has_gap_four(&w) {
+                threat = WindowThreat::ClosedFour;
+            }
+        }
 
         match threat {
             WindowThreat::Five => fives += 1,
@@ -431,6 +489,8 @@ pub struct VctConfig {
     pub enable_jump_three_kind_scoped_defense: bool,
     /// RQ563 scheduling: generate JumpThree attack candidates only for OR levels < K.
     pub jump_attack_max_or_levels: u32,
+    /// RQ567 gate: broken-four (`X.XXX` / `XX.XX` / `XXX.X`) vocabulary.
+    pub enable_gap_four: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -439,6 +499,7 @@ struct VctJumpThreeFlags {
     counter: bool,
     kind_scoped_defense: bool,
     attack_max_or_levels: u32,
+    gap_four: bool,
 }
 
 impl VctConfig {
@@ -448,6 +509,7 @@ impl VctConfig {
             counter: self.enable_jump_three || self.enable_jump_three_counter,
             kind_scoped_defense: self.enable_jump_three_kind_scoped_defense,
             attack_max_or_levels: self.jump_attack_max_or_levels,
+            gap_four: self.enable_gap_four,
         }
     }
 }
@@ -500,6 +562,7 @@ impl Default for VctConfig {
             enable_jump_three_counter: false,
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
+            enable_gap_four: false,
         }
     }
 }
@@ -573,6 +636,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         "jump_three_counter": flags.counter,
         "jump_three_kind_scoped_defense": flags.kind_scoped_defense,
         "jump_attack_max_or_levels": flags.attack_max_or_levels,
+        "gap_four": flags.gap_four,
         "sequence": if hit { Some(sequence.iter().map(|&mv| move_json(mv)).collect::<Vec<_>>()) } else { None },
         "and_nodes": audit.and_nodes,
         "terminal_event_count": audit.terminal_event_count,
@@ -646,7 +710,14 @@ fn vct_or(
 
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
-    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, enable_jump_three_attack);
+    let attack_moves = gather_attack_moves(
+        my,
+        opp,
+        attacker,
+        rule_set,
+        enable_jump_three_attack,
+        jump_three.gap_four,
+    );
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -845,7 +916,14 @@ fn vct_or_audit(
 
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
-    let attack_moves = gather_attack_moves(my, opp, attacker, rule_set, enable_jump_three_attack);
+    let attack_moves = gather_attack_moves(
+        my,
+        opp,
+        attacker,
+        rule_set,
+        enable_jump_three_attack,
+        jump_three.gap_four,
+    );
     if attack_moves.is_empty() {
         tt.insert(
             hash,
@@ -1098,6 +1176,7 @@ fn gather_attack_moves(
     side: Stone,
     rule_set: RuleSet,
     enable_jump_three: bool,
+    enable_gap_four: bool,
 ) -> Vec<(Move, ThreatKind)> {
     let mut out = Vec::new();
     let cells = my.count_ones() + opp.count_ones();
@@ -1109,8 +1188,15 @@ fn gather_attack_moves(
         if my.get(idx) || opp.get(idx) {
             continue;
         }
-        let kind =
-            classify_move_rules_with_jump_three(my, opp, idx, side, rule_set, enable_jump_three);
+        let kind = classify_move_rules_with_flags(
+            my,
+            opp,
+            idx,
+            side,
+            rule_set,
+            enable_jump_three,
+            enable_gap_four,
+        );
         if kind.is_forcing() {
             out.push((idx, kind));
         }
@@ -1164,7 +1250,12 @@ fn find_defenses_with_counters(
 ) -> Vec<Move> {
     let direct_jump_three_defense = jump_three.attack_defense
         && (!jump_three.kind_scoped_defense || attack_kind == ThreatKind::JumpThree);
-    let mut defenses = find_defenses(board, attack_move, direct_jump_three_defense);
+    let mut defenses = find_defenses(
+        board,
+        attack_move,
+        direct_jump_three_defense,
+        jump_three.gap_four,
+    );
     let mut seen = BitBoard::EMPTY;
     for &d in &defenses {
         seen.set(d);
@@ -1176,13 +1267,14 @@ fn find_defenses_with_counters(
         if def_my.get(idx) || def_opp.get(idx) || seen.get(idx) {
             continue;
         }
-        let kind = classify_move_rules_with_jump_three(
+        let kind = classify_move_rules_with_flags(
             def_my,
             def_opp,
             idx,
             board.side_to_move,
             rule_set,
             jump_three.counter,
+            jump_three.gap_four,
         );
         // Winning 위협뿐 아니라 Forcing(ClosedFour/OpenThree) 반격도 포함해야
         // 원거리 카운터 공격을 AND가 놓치지 않음.
@@ -1200,7 +1292,12 @@ fn find_defenses_with_counters(
 /// 위협을 막을 수 있는 모든 수를 포함하도록 의도된 conservative 범위.
 /// 기존 candidate_moves(40~60개) 대비 보통 5~20개로 축소되어 AND 노드 브랜칭
 /// 팩터 대폭 감소.
-fn find_defenses(board: &Board, attack_move: Move, enable_jump_three: bool) -> Vec<Move> {
+fn find_defenses(
+    board: &Board,
+    attack_move: Move,
+    enable_jump_three: bool,
+    enable_gap_four: bool,
+) -> Vec<Move> {
     let row = (attack_move / BOARD_SIZE) as i32;
     let col = (attack_move % BOARD_SIZE) as i32;
     let mut seen = BitBoard::EMPTY;
@@ -1245,6 +1342,9 @@ fn find_defenses(board: &Board, attack_move: Move, enable_jump_three: bool) -> V
     if enable_jump_three {
         append_jump_three_defenses(board, attack_move, &mut seen, &mut out);
     }
+    if enable_gap_four {
+        append_gap_four_defenses(board, attack_move, &mut seen, &mut out);
+    }
 
     out
 }
@@ -1287,6 +1387,34 @@ fn append_jump_three_defenses(
                 }
             }
         }
+    }
+}
+
+fn append_gap_four_defenses(
+    board: &Board,
+    attack_move: Move,
+    seen: &mut BitBoard,
+    out: &mut Vec<Move>,
+) {
+    let row = (attack_move / BOARD_SIZE) as i32;
+    let col = (attack_move % BOARD_SIZE) as i32;
+    let attacker = board.side_to_move.opponent();
+    let (my, opp) = bb_pair(board, attacker);
+
+    for &(dr, dc) in &DIR {
+        let w = read_window(my, opp, row, col, dr, dc);
+        visit_gap_four_gaps(&w, |off| {
+            let nr = row + dr * off;
+            let nc = col + dc * off;
+            if !in_board(nr, nc) {
+                return;
+            }
+            let idx = (nr as usize) * BOARD_SIZE + nc as usize;
+            if board.is_empty(idx) && !seen.get(idx) {
+                seen.set(idx);
+                out.push(idx);
+            }
+        });
     }
 }
 
@@ -1557,6 +1685,64 @@ mod tests {
         );
     }
 
+    fn board_with_black_stones(stones: &[(usize, usize)]) -> Board {
+        let fillers = [(0, 0), (0, 14), (14, 0), (14, 14), (1, 0), (1, 14)];
+        let mut board = Board::new();
+        for (i, &(row, col)) in stones.iter().enumerate() {
+            board.make_move(to_idx(row, col));
+            board.make_move(to_idx(fillers[i].0, fillers[i].1));
+        }
+        board
+    }
+
+    #[test]
+    fn rq567_gap_four_flag_on_off_preserves_legacy_classification() {
+        let cases = [
+            // X.XXX: move is the left stone, gap at +1.
+            (&[(7, 5), (7, 6), (7, 7)][..], to_idx(7, 3)),
+            // XX.XX: move is the second stone, gap at +1.
+            (&[(7, 3), (7, 6), (7, 7)][..], to_idx(7, 4)),
+            // XXX.X: move is the third stone, gap at +1.
+            (&[(7, 3), (7, 4), (7, 7)][..], to_idx(7, 5)),
+        ];
+        for (stones, mv) in cases {
+            let board = board_with_black_stones(stones);
+            let legacy = classify_move(&board.black, &board.white, mv, false);
+            assert_eq!(
+                classify_move_rules_with_flags(
+                    &board.black,
+                    &board.white,
+                    mv,
+                    Stone::Black,
+                    board.effective_rule_set(),
+                    false,
+                    false,
+                ),
+                legacy,
+                "gap-four flag off must preserve legacy classification"
+            );
+            assert_ne!(legacy, ThreatKind::ClosedFour);
+            assert_eq!(
+                classify_move_rules_with_flags(
+                    &board.black,
+                    &board.white,
+                    mv,
+                    Stone::Black,
+                    board.effective_rule_set(),
+                    false,
+                    true,
+                ),
+                ThreatKind::ClosedFour
+            );
+            assert_eq!(
+                classify_move_fast_with_flags(&board, mv, Stone::Black, false, true),
+                ThreatKind::ClosedFour
+            );
+        }
+        assert!(!ThreatKind::ClosedFour.is_winning());
+        assert!(!is_vct_terminal_win(ThreatKind::ClosedFour));
+    }
+
     #[test]
     fn test_jump_three_is_attack_candidate() {
         let mut board = Board::new();
@@ -1571,6 +1757,7 @@ mod tests {
             Stone::Black,
             board.effective_rule_set(),
             true,
+            false,
         );
         assert!(
             moves
@@ -1616,6 +1803,7 @@ mod tests {
             Stone::Black,
             board.effective_rule_set(),
             true,
+            false,
         );
         assert!(
             moves
@@ -1623,6 +1811,62 @@ mod tests {
                 .any(|&(mv, kind)| mv == rapfi && kind == ThreatKind::JumpThree),
             "g90 rapfi move (9,3) must be a JumpThree attack candidate: {:?}",
             moves
+        );
+    }
+
+    #[test]
+    fn rq567_g58_gap_four_attack_candidate() {
+        let mut board = Board::new();
+        for mv in [
+            to_idx(7, 7),
+            to_idx(6, 8),
+            to_idx(8, 9),
+            to_idx(11, 10),
+            to_idx(8, 8),
+            to_idx(8, 7),
+            to_idx(9, 9),
+            to_idx(10, 10),
+            to_idx(7, 9),
+            to_idx(10, 9),
+            to_idx(9, 8),
+            to_idx(9, 10),
+            to_idx(8, 10),
+            to_idx(10, 8),
+        ] {
+            board.make_move(mv);
+        }
+
+        let rapfi = to_idx(5, 9);
+        assert_ne!(
+            classify_move_fast(&board, rapfi, Stone::Black),
+            ThreatKind::ClosedFour
+        );
+        assert_eq!(
+            classify_move_fast_with_flags(&board, rapfi, Stone::Black, true, true),
+            ThreatKind::ClosedFour
+        );
+        let moves = gather_attack_moves(
+            &board.black,
+            &board.white,
+            Stone::Black,
+            board.effective_rule_set(),
+            true,
+            true,
+        );
+        assert!(
+            moves
+                .iter()
+                .any(|&(mv, kind)| mv == rapfi && kind == ThreatKind::ClosedFour),
+            "g58 rapfi move (9,5) must enter attack candidates as gap-four ClosedFour: {:?}",
+            moves
+        );
+
+        board.make_move(rapfi);
+        let defenses = find_defenses(&board, rapfi, false, true);
+        assert!(
+            defenses.contains(&to_idx(6, 9)),
+            "gap-four defense set must include the gap cell (9,6); got {:?}",
+            defenses
         );
     }
 
@@ -1635,7 +1879,7 @@ mod tests {
         board.make_move(to_idx(0, 14));
         board.make_move(to_idx(7, 3));
 
-        let defenses = find_defenses(&board, to_idx(7, 3), true);
+        let defenses = find_defenses(&board, to_idx(7, 3), true, false);
         for expected in [to_idx(7, 2), to_idx(7, 4), to_idx(7, 7)] {
             assert!(
                 defenses.contains(&expected),
@@ -1814,6 +2058,7 @@ mod tests {
             enable_jump_three_counter: false,
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
+            enable_gap_four: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT should exist, got {:?}", seq);
@@ -1866,6 +2111,7 @@ mod tests {
             enable_jump_three_counter: false,
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
+            enable_gap_four: false,
         };
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_some(), "should find mate via open-three chain");
@@ -1889,6 +2135,7 @@ mod tests {
             enable_jump_three_counter: false,
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
+            enable_gap_four: false,
         };
         let s1 = search_vct(&mut board, &cfg);
         let s2 = search_vct(&mut board, &cfg);

@@ -28,6 +28,7 @@ struct Args {
     enable_jump_three_counter: bool,
     enable_jump_three_kind_scoped_defense: bool,
     jump_attack_max_or_levels: u32,
+    enable_gap_four: bool,
 }
 
 impl Args {
@@ -87,6 +88,7 @@ fn main() -> Result<(), String> {
             args.enable_jump_three_counter,
             args.enable_jump_three_kind_scoped_defense,
             args.jump_attack_max_or_levels,
+            args.enable_gap_four,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -119,6 +121,7 @@ fn main() -> Result<(), String> {
         "jump_three_counter": args.jump_three_counter(),
         "jump_three_kind_scoped_defense": args.jump_three_kind_scoped_defense(),
         "jump_attack_max_or_levels": args.jump_attack_max_or_levels,
+        "enable_gap_four": args.enable_gap_four,
         "records_scanned": records,
         "usable": usable,
         "skipped": skipped,
@@ -147,6 +150,7 @@ fn solve_record(
     enable_jump_three_counter: bool,
     enable_jump_three_kind_scoped_defense: bool,
     jump_attack_max_or_levels: u32,
+    enable_gap_four: bool,
 ) -> Result<Value, String> {
     let class = rec
         .get("class")
@@ -179,6 +183,7 @@ fn solve_record(
         enable_jump_three_counter,
         enable_jump_three_kind_scoped_defense,
         jump_attack_max_or_levels,
+        enable_gap_four,
     );
     let actual_move = parse_move(rec.get("actual_move").ok_or("missing actual_move")?)?;
     let after_actual_opp_vct = if board.is_empty(actual_move) {
@@ -192,6 +197,7 @@ fn solve_record(
             enable_jump_three_counter,
             enable_jump_three_kind_scoped_defense,
             jump_attack_max_or_levels,
+            enable_gap_four,
         );
         board.undo_move();
         out
@@ -232,6 +238,7 @@ fn solve_record(
         "jump_three_counter": enable_jump_three || enable_jump_three_counter,
         "jump_three_kind_scoped_defense": enable_jump_three_kind_scoped_defense,
         "jump_attack_max_or_levels": jump_attack_max_or_levels,
+        "enable_gap_four": enable_gap_four,
         "pre_vct": pre_vct,
         "after_actual_opp_vct": after_actual_opp_vct,
     }))
@@ -246,6 +253,7 @@ fn run_sweep(
     enable_jump_three_counter: bool,
     enable_jump_three_kind_scoped_defense: bool,
     jump_attack_max_or_levels: u32,
+    enable_gap_four: bool,
 ) -> Value {
     let mut attempts = Vec::new();
     let mut first_hit: Option<Value> = None;
@@ -259,6 +267,7 @@ fn run_sweep(
             enable_jump_three_counter,
             enable_jump_three_kind_scoped_defense,
             jump_attack_max_or_levels,
+            enable_gap_four,
         };
         let started = Instant::now();
         let should_capture_proof = include_proof && first_hit.is_none();
@@ -458,6 +467,7 @@ fn parse_args() -> Result<Args, String> {
         env_flag("FIGRID_VCT_ENABLE_JUMP_THREE_KIND_SCOPED_DEFENSE");
     let mut jump_attack_max_or_levels =
         env_u32("FIGRID_VCT_JUMP_ATTACK_MAX_OR_LEVELS").unwrap_or(u32::MAX);
+    let mut enable_gap_four = env_flag("FIGRID_VCT_ENABLE_GAP_FOUR");
 
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -483,6 +493,7 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("invalid --jump-attack-max-or-levels: {e}"))?
             }
+            "--enable-gap-four" => enable_gap_four = true,
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -502,6 +513,7 @@ fn parse_args() -> Result<Args, String> {
         enable_jump_three_counter,
         enable_jump_three_kind_scoped_defense,
         jump_attack_max_or_levels,
+        enable_gap_four,
     })
 }
 
@@ -540,6 +552,6 @@ fn env_u32(name: &str) -> Option<u32> {
 
 fn print_help() {
     eprintln!(
-        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K]"
+        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K] [--enable-gap-four]"
     );
 }

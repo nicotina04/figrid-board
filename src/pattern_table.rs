@@ -350,6 +350,33 @@ pub(crate) fn window_has_jump_three(w: &LineWindow) -> bool {
     false
 }
 
+pub(crate) fn window_has_gap_four(w: &LineWindow) -> bool {
+    let mut found = false;
+    visit_gap_four_gaps(w, |_| found = true);
+    found
+}
+
+pub(crate) fn visit_gap_four_gaps(w: &LineWindow, mut visit: impl FnMut(i32)) {
+    // Broken-four shapes produced by the anchor move: X.XXX / XX.XX /
+    // XXX.X. The segment must include the anchor (index 5); this keeps
+    // pre-existing broken fours elsewhere in the 11-cell window out.
+    const PATTERNS: [[u8; 5]; 3] = [[1, 0, 1, 1, 1], [1, 1, 0, 1, 1], [1, 1, 1, 0, 1]];
+    for start in 0..=6 {
+        if !(start <= 5 && 5 < start + 5) {
+            continue;
+        }
+        for pat in PATTERNS {
+            if (0..5).all(|i| w[start + i] == pat[i]) {
+                let gap_idx = pat
+                    .iter()
+                    .position(|&cell| cell == 0)
+                    .expect("gap-four pattern has one gap");
+                visit((start + gap_idx) as i32 - 5);
+            }
+        }
+    }
+}
+
 /// O(1) lookup of the `LineThreat` produced when `mine` plays at an empty
 /// anchor cell, given the current `mapped pattern ID` for the surrounding
 /// 11-cell window. Top-K canonical IDs are precomputed; the `RARE` bucket

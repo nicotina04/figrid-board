@@ -29,6 +29,7 @@ struct Args {
     enable_jump_three_kind_scoped_defense: bool,
     jump_attack_max_or_levels: u32,
     enable_gap_four: bool,
+    gap_four_attack_max_or_levels: u32,
     use_fast_classify: bool,
     use_threat_index: bool,
     profile: bool,
@@ -96,6 +97,7 @@ fn main() -> Result<(), String> {
             args.enable_jump_three_kind_scoped_defense,
             args.jump_attack_max_or_levels,
             args.enable_gap_four,
+            args.gap_four_attack_max_or_levels,
             args.use_fast_classify,
             args.use_threat_index,
             args.profile,
@@ -136,6 +138,7 @@ fn main() -> Result<(), String> {
         "jump_three_kind_scoped_defense": args.jump_three_kind_scoped_defense(),
         "jump_attack_max_or_levels": args.jump_attack_max_or_levels,
         "enable_gap_four": args.enable_gap_four,
+        "gap_four_attack_max_or_levels": args.gap_four_attack_max_or_levels,
         "use_fast_classify": args.use_fast_classify,
         "use_threat_index": args.use_threat_index,
         "profile": args.profile,
@@ -172,6 +175,7 @@ fn solve_record(
     enable_jump_three_kind_scoped_defense: bool,
     jump_attack_max_or_levels: u32,
     enable_gap_four: bool,
+    gap_four_attack_max_or_levels: u32,
     use_fast_classify: bool,
     use_threat_index: bool,
     profile: bool,
@@ -212,6 +216,7 @@ fn solve_record(
         enable_jump_three_kind_scoped_defense,
         jump_attack_max_or_levels,
         enable_gap_four,
+        gap_four_attack_max_or_levels,
         use_fast_classify,
         use_threat_index,
         profile,
@@ -233,6 +238,7 @@ fn solve_record(
             enable_jump_three_kind_scoped_defense,
             jump_attack_max_or_levels,
             enable_gap_four,
+            gap_four_attack_max_or_levels,
             use_fast_classify,
             use_threat_index,
             profile,
@@ -281,6 +287,7 @@ fn solve_record(
         "jump_three_kind_scoped_defense": enable_jump_three_kind_scoped_defense,
         "jump_attack_max_or_levels": jump_attack_max_or_levels,
         "enable_gap_four": enable_gap_four,
+        "gap_four_attack_max_or_levels": gap_four_attack_max_or_levels,
         "use_fast_classify": use_fast_classify,
         "use_threat_index": use_threat_index,
         "profile": profile,
@@ -303,6 +310,7 @@ fn run_sweep(
     enable_jump_three_kind_scoped_defense: bool,
     jump_attack_max_or_levels: u32,
     enable_gap_four: bool,
+    gap_four_attack_max_or_levels: u32,
     use_fast_classify: bool,
     use_threat_index: bool,
     profile: bool,
@@ -329,6 +337,7 @@ fn run_sweep(
             enable_jump_three_kind_scoped_defense,
             jump_attack_max_or_levels,
             enable_gap_four,
+            gap_four_attack_max_or_levels,
             use_fast_classify,
             use_threat_index,
             profile,
@@ -560,6 +569,8 @@ fn parse_args() -> Result<Args, String> {
     let mut jump_attack_max_or_levels =
         env_u32("FIGRID_VCT_JUMP_ATTACK_MAX_OR_LEVELS").unwrap_or(u32::MAX);
     let mut enable_gap_four = env_flag("FIGRID_VCT_ENABLE_GAP_FOUR");
+    let mut gap_four_attack_max_or_levels =
+        env_u32("FIGRID_VCT_GAP_FOUR_ATTACK_MAX_OR_LEVELS").unwrap_or(u32::MAX);
     let mut use_fast_classify = !env_flag("FIGRID_VCT_USE_SLOW_CLASSIFY");
     if env_flag("FIGRID_VCT_USE_FAST_CLASSIFY") {
         use_fast_classify = true;
@@ -602,6 +613,11 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("invalid --jump-attack-max-or-levels: {e}"))?
             }
             "--enable-gap-four" => enable_gap_four = true,
+            "--gap-four-attack-max-or-levels" => {
+                gap_four_attack_max_or_levels = next_arg(&mut it, &arg)?
+                    .parse()
+                    .map_err(|e| format!("invalid --gap-four-attack-max-or-levels: {e}"))?
+            }
             "--use-fast-classify" => use_fast_classify = true,
             "--use-slow-classify" => use_fast_classify = false,
             "--use-threat-index" => use_threat_index = true,
@@ -643,6 +659,7 @@ fn parse_args() -> Result<Args, String> {
         enable_jump_three_kind_scoped_defense,
         jump_attack_max_or_levels,
         enable_gap_four,
+        gap_four_attack_max_or_levels,
         use_fast_classify,
         use_threat_index,
         profile,
@@ -692,6 +709,6 @@ fn env_u64(name: &str) -> Option<u64> {
 
 fn print_help() {
     eprintln!(
-        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K] [--enable-gap-four] [--use-fast-classify|--use-slow-classify] [--use-threat-index] [--profile] [--use-reach-mask|--no-reach-mask] [--use-fast-immediate-five|--no-fast-immediate-five] [--use-vct-scratch-buffers|--no-vct-scratch-buffers|--use-stage0-bundle] [--node-budget N]"
+        "Usage: rq547-vct-solve --positions-jsonl FILE --out-json FILE --out-jsonl FILE [--configs 14:250,14:500,18:1000,22:2000] [--max-positions N] [--include-proof] [--enable-jump-three] [--enable-jump-three-attack-defense] [--enable-jump-three-counter] [--enable-jump-three-kind-scoped-defense] [--jump-attack-max-or-levels K] [--enable-gap-four] [--gap-four-attack-max-or-levels K] [--use-fast-classify|--use-slow-classify] [--use-threat-index] [--profile] [--use-reach-mask|--no-reach-mask] [--use-fast-immediate-five|--no-fast-immediate-five] [--use-vct-scratch-buffers|--no-vct-scratch-buffers|--use-stage0-bundle] [--node-budget N]"
     );
 }

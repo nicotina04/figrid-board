@@ -528,6 +528,8 @@ pub struct VctConfig {
     pub jump_attack_max_or_levels: u32,
     /// RQ567 gate: broken-four (`X.XXX` / `XX.XX` / `XXX.X`) vocabulary.
     pub enable_gap_four: bool,
+    /// RQ581 scheduling: generate gap-four attack candidates only for OR levels < K.
+    pub gap_four_attack_max_or_levels: u32,
     /// RQ572 gate: use Pattern4 fast classify in prover attack/counter scans.
     pub use_fast_classify: bool,
     /// RQ574 gate: use a VCT-local incremental threat index.
@@ -549,6 +551,7 @@ struct VctJumpThreeFlags {
     kind_scoped_defense: bool,
     attack_max_or_levels: u32,
     gap_four: bool,
+    gap_four_attack_max_or_levels: u32,
     use_fast_classify: bool,
     use_threat_index: bool,
     use_reach_mask: bool,
@@ -564,6 +567,7 @@ impl VctConfig {
             kind_scoped_defense: self.enable_jump_three_kind_scoped_defense,
             attack_max_or_levels: self.jump_attack_max_or_levels,
             gap_four: self.enable_gap_four,
+            gap_four_attack_max_or_levels: self.gap_four_attack_max_or_levels,
             use_fast_classify: self.use_fast_classify,
             use_threat_index: self.use_threat_index,
             use_reach_mask: self.use_reach_mask,
@@ -571,6 +575,11 @@ impl VctConfig {
             use_vct_scratch_buffers: self.use_vct_scratch_buffers,
         }
     }
+}
+
+#[inline]
+fn gap_four_attack_enabled(flags: &VctJumpThreeFlags, or_level: u32) -> bool {
+    flags.gap_four && or_level < flags.gap_four_attack_max_or_levels
 }
 
 #[derive(Default)]
@@ -1110,6 +1119,7 @@ impl Default for VctConfig {
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
+            gap_four_attack_max_or_levels: u32::MAX,
             use_fast_classify: true,
             use_threat_index: false,
             profile: false,
@@ -1212,6 +1222,7 @@ pub fn search_vct_audit_json(board: &mut Board, cfg: &VctConfig) -> Value {
         "jump_three_kind_scoped_defense": flags.kind_scoped_defense,
         "jump_attack_max_or_levels": flags.attack_max_or_levels,
         "gap_four": flags.gap_four,
+        "gap_four_attack_max_or_levels": flags.gap_four_attack_max_or_levels,
         "use_fast_classify": flags.use_fast_classify,
         "use_threat_index": flags.use_threat_index && flags.use_fast_classify,
         "profile_enabled": cfg.profile,
@@ -1327,8 +1338,9 @@ fn vct_or(
 
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
+    let enable_gap_four_attack = gap_four_attack_enabled(&jump_three, or_level);
     let attack_moves = if let Some(index) = threat_index.as_ref() {
-        index.attack_moves(attacker, enable_jump_three_attack, jump_three.gap_four)
+        index.attack_moves(attacker, enable_jump_three_attack, enable_gap_four_attack)
     } else {
         gather_attack_moves(
             board,
@@ -1337,7 +1349,7 @@ fn vct_or(
             attacker,
             rule_set,
             enable_jump_three_attack,
-            jump_three.gap_four,
+            enable_gap_four_attack,
             jump_three.use_fast_classify,
             attacker_reach_mask.as_ref(),
             Some(stats),
@@ -1654,8 +1666,9 @@ fn vct_or_audit(
 
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
+    let enable_gap_four_attack = gap_four_attack_enabled(&jump_three, or_level);
     let attack_moves = if let Some(index) = threat_index.as_ref() {
-        index.attack_moves(attacker, enable_jump_three_attack, jump_three.gap_four)
+        index.attack_moves(attacker, enable_jump_three_attack, enable_gap_four_attack)
     } else {
         gather_attack_moves(
             board,
@@ -1664,7 +1677,7 @@ fn vct_or_audit(
             attacker,
             rule_set,
             enable_jump_three_attack,
-            jump_three.gap_four,
+            enable_gap_four_attack,
             jump_three.use_fast_classify,
             attacker_reach_mask.as_ref(),
             Some(stats),
@@ -2978,6 +2991,25 @@ mod tests {
     }
 
     #[test]
+    fn rq581_gap_four_attack_schedule_is_or_level_scoped() {
+        let flags = VctJumpThreeFlags {
+            gap_four: true,
+            gap_four_attack_max_or_levels: 1,
+            ..VctJumpThreeFlags::default()
+        };
+        assert!(gap_four_attack_enabled(&flags, 0));
+        assert!(!gap_four_attack_enabled(&flags, 1));
+        assert!(!gap_four_attack_enabled(&flags, 2));
+
+        let disabled = VctJumpThreeFlags {
+            gap_four: false,
+            gap_four_attack_max_or_levels: 1,
+            ..VctJumpThreeFlags::default()
+        };
+        assert!(!gap_four_attack_enabled(&disabled, 0));
+    }
+
+    #[test]
     fn test_jump_three_defenses_include_gap_and_completion_cells() {
         let mut board = Board::new();
         board.make_move(to_idx(7, 5));
@@ -3190,6 +3222,7 @@ mod tests {
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
+            gap_four_attack_max_or_levels: u32::MAX,
             use_fast_classify: false,
             use_threat_index: false,
             profile: false,
@@ -3250,6 +3283,7 @@ mod tests {
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
+            gap_four_attack_max_or_levels: u32::MAX,
             use_fast_classify: false,
             use_threat_index: false,
             profile: false,
@@ -3281,6 +3315,7 @@ mod tests {
             enable_jump_three_kind_scoped_defense: false,
             jump_attack_max_or_levels: u32::MAX,
             enable_gap_four: false,
+            gap_four_attack_max_or_levels: u32::MAX,
             use_fast_classify: false,
             use_threat_index: false,
             profile: false,

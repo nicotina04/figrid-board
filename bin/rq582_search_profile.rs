@@ -318,6 +318,27 @@ fn main() -> Result<(), String> {
                         other => return Err(format!("unknown eval arm `{other}`")),
                     };
                     let elapsed_ms = started.elapsed().as_millis();
+                    let shape_stats = searcher.search_shape_stats();
+                    let completed_nodes = result.nodes;
+                    let actual_visited_nodes = shape_stats
+                        .main_nodes
+                        .saturating_add(shape_stats.qsearch_nodes);
+                    let elapsed_s = elapsed_ms as f64 / 1000.0;
+                    let completed_nps = if elapsed_s > 0.0 {
+                        completed_nodes as f64 / elapsed_s
+                    } else {
+                        0.0
+                    };
+                    let actual_visited_nps = if elapsed_s > 0.0 {
+                        actual_visited_nodes as f64 / elapsed_s
+                    } else {
+                        0.0
+                    };
+                    let completion_ratio = if actual_visited_nodes > 0 {
+                        completed_nodes as f64 / actual_visited_nodes as f64
+                    } else {
+                        0.0
+                    };
                     let best_move = result.best_move.map(|m| {
                         let (row, col) = to_rc(m);
                         json!({"x": col, "y": row})
@@ -341,9 +362,14 @@ fn main() -> Result<(), String> {
                         "score": result.score,
                         "searched_depth": result.depth,
                         "nodes": result.nodes,
+                        "completed_nodes": completed_nodes,
+                        "actual_visited_nodes": actual_visited_nodes,
+                        "completed_nps": completed_nps,
+                        "actual_visited_nps": actual_visited_nps,
+                        "completion_ratio": completion_ratio,
                         "node_limit_hit": searcher.node_limit_hit(),
                         "profile": profile_json(searcher.search_profile()),
-                        "shape": shape_json(searcher.search_shape_stats()),
+                        "shape": shape_json(shape_stats),
                         "move_picker": move_picker_json(searcher.move_picker_stats()),
                     });
                     writeln!(out, "{row}").map_err(|e| format!("failed to write output: {e}"))?;

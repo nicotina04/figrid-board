@@ -356,7 +356,7 @@ fn classify_move_fast_with_jump_three(
     classify_move_fast_with_flags(board, mv, side, enable_jump_three, false)
 }
 
-fn classify_move_fast_with_flags(
+pub(crate) fn classify_move_fast_with_flags(
     board: &Board,
     mv: Move,
     side: Stone,

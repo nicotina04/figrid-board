@@ -26,6 +26,7 @@ pub(crate) mod relation_lite;
 #[doc(hidden)]
 pub mod rq423_root_accept;
 pub mod search;
+pub mod threat_field;
 pub mod transposition;
 pub mod vct;
 
@@ -39,6 +40,7 @@ pub use eval::{IncrementalEval, evaluate};
 pub use features::GOMOKU_NNUE_CONFIG;
 pub use heuristic::{DIR, LineInfo, scan_line};
 pub use search::{SearchProfileSnapshot, SearchResult, Searcher};
+pub use threat_field::IncrementalThreatField;
 pub use vct::{
     VctConfig, VctSearchResult, VctSearchStats, search_vct, search_vct_audit_json,
     search_vct_with_stats,

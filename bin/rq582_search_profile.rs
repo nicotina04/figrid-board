@@ -17,6 +17,7 @@ struct Args {
     depth: u32,
     time_ms: Option<u64>,
     eval: String,
+    use_threat_field: bool,
 }
 
 impl Args {
@@ -28,6 +29,7 @@ impl Args {
         let mut depth = 20u32;
         let mut time_ms = None;
         let mut eval = "flat".to_string();
+        let mut use_threat_field = false;
 
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -64,6 +66,8 @@ impl Args {
                     );
                 }
                 "--eval" => eval = it.next().ok_or("--eval requires a value")?,
+                "--use-threat-field" => use_threat_field = true,
+                "--no-threat-field" => use_threat_field = false,
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument `{other}`\n{}", usage())),
             }
@@ -81,6 +85,7 @@ impl Args {
             depth,
             time_ms,
             eval,
+            use_threat_field,
         })
     }
 }
@@ -88,7 +93,7 @@ impl Args {
 fn usage() -> String {
     "usage: rq582-search-profile --input games.jsonl [--output out.jsonl] \
      [--eval flat|codebook-quant] [--depth N] [--time-ms MS] [--limit N] \
-     [--sample-every N]\n\
+     [--sample-every N] [--use-threat-field|--no-threat-field]\n\
      Set NORU_SEARCH_PROFILE=1 to record profile buckets."
         .to_string()
 }
@@ -215,6 +220,7 @@ fn main() -> Result<(), String> {
                 if seen_engine_positions % args.sample_every == 0 {
                     let mut search_board = board.clone();
                     let mut searcher = Searcher::new();
+                    searcher.set_use_threat_field(args.use_threat_field);
                     let started = Instant::now();
                     let result = match args.eval.as_str() {
                         "flat" => searcher.search(
@@ -246,6 +252,7 @@ fn main() -> Result<(), String> {
                         "eval": args.eval,
                         "depth": args.depth,
                         "time_ms_limit": args.time_ms,
+                        "use_threat_field": args.use_threat_field,
                         "elapsed_ms": elapsed_ms,
                         "best_move": best_move,
                         "score": result.score,

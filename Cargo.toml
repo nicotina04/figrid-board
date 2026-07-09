@@ -124,6 +124,10 @@ name = "rq578-immediate-five-check"
 path = "bin/rq578_immediate_five_check.rs"
 
 [[bin]]
+name = "rq587-threat-field-check"
+path = "bin/rq587_threat_field_check.rs"
+
+[[bin]]
 name = "rq582-search-profile"
 path = "bin/rq582_search_profile.rs"
 required-features = ["codebook-eval"]

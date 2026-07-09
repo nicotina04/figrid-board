@@ -6,6 +6,7 @@ use std::fmt;
 
 pub const BOARD_SIZE: usize = 15;
 pub const NUM_CELLS: usize = BOARD_SIZE * BOARD_SIZE; // 225
+pub const LINE_PATTERN_FRONTIER_MAX: usize = 41;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stone {
@@ -426,12 +427,30 @@ impl Board {
         }
     }
 
-    /// `mv` 주변 4방향 각 ±5 cell (총 ~30~44 cell-dir 쌍)의 11-cell window
-    /// pattern ID를 다시 lookup해 cache 갱신. 보드 경계로 일부 잘림.
-    /// black-relative — read_window의 첫 인자 = black, 둘째 = white.
+    /// Unique cells touched by the same 4-direction +/-5 frontier used for
+    /// incremental `line_pattern_ids` maintenance. The maximum is 41
+    /// (center + 10 cells in each of four directions).
+    pub fn line_pattern_dirty_cells(
+        mv: Move,
+        out: &mut [usize; LINE_PATTERN_FRONTIER_MAX],
+    ) -> usize {
+        let mut seen = [false; NUM_CELLS];
+        let mut len = 0usize;
+        Self::for_line_pattern_frontier(mv, |cell, _dir_idx| {
+            if !seen[cell] {
+                seen[cell] = true;
+                debug_assert!(len < LINE_PATTERN_FRONTIER_MAX);
+                out[len] = cell;
+                len += 1;
+            }
+        });
+        len
+    }
+
     #[inline]
-    fn update_line_patterns_around(&mut self, mv: Move) {
+    fn for_line_pattern_frontier(mut mv: Move, mut f: impl FnMut(usize, usize)) {
         const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+        debug_assert!(mv < NUM_CELLS);
         let row = (mv / BOARD_SIZE) as i32;
         let col = (mv % BOARD_SIZE) as i32;
         for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
@@ -441,13 +460,26 @@ impl Board {
                 if r < 0 || r >= BOARD_SIZE as i32 || c < 0 || c >= BOARD_SIZE as i32 {
                     continue;
                 }
-                let cell = (r as usize) * BOARD_SIZE + c as usize;
-                let w = crate::pattern_table::read_window(&self.black, &self.white, r, c, dr, dc);
-                let packed = crate::pattern_table::pack_window(&w);
-                self.line_pattern_ids[cell][dir_idx] =
-                    crate::pattern_table::lookup_mapped_id(packed);
+                mv = (r as usize) * BOARD_SIZE + c as usize;
+                f(mv, dir_idx);
             }
         }
+    }
+
+    /// `mv` 주변 4방향 각 ±5 cell (총 ~30~44 cell-dir 쌍)의 11-cell window
+    /// pattern ID를 다시 lookup해 cache 갱신. 보드 경계로 일부 잘림.
+    /// black-relative — read_window의 첫 인자 = black, 둘째 = white.
+    #[inline]
+    fn update_line_patterns_around(&mut self, mv: Move) {
+        const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+        Self::for_line_pattern_frontier(mv, |cell, dir_idx| {
+            let (dr, dc) = DIRS[dir_idx];
+            let r = (cell / BOARD_SIZE) as i32;
+            let c = (cell % BOARD_SIZE) as i32;
+            let w = crate::pattern_table::read_window(&self.black, &self.white, r, c, dr, dc);
+            let packed = crate::pattern_table::pack_window(&w);
+            self.line_pattern_ids[cell][dir_idx] = crate::pattern_table::lookup_mapped_id(packed);
+        });
     }
 
     /// Return whether the stone at `mv` completes a winning line under the active rule.

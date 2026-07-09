@@ -12,6 +12,7 @@ use crate::codebook_eval::{
 };
 use crate::eval::IncrementalEval;
 use crate::heuristic::{DIR, scan_line};
+use crate::threat_field::IncrementalThreatField;
 use crate::transposition::{Bound, TranspositionTable, TtStats};
 use crate::vct::{THREAT_KIND_COUNT, ThreatKind, VctConfig, classify_move_fast, search_vct};
 use noru::network::NnueWeights;
@@ -81,6 +82,11 @@ fn root_defensive_vct_veto_enabled() -> bool {
 fn search_profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("NORU_SEARCH_PROFILE", false))
+}
+
+fn threat_field_enabled_by_env() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("NORU_USE_THREAT_FIELD", false))
 }
 
 fn root_defensive_vct_budget(time_limit: Option<Duration>) -> Duration {
@@ -1164,6 +1170,8 @@ pub struct Searcher {
     /// search ???遺얘턁??????????????????⑤벡瑜??????耀붾굝????????iterative deepening ???????롮쾸?椰???iteration?????    /// ?????????대첐??iteration??PV/cutoff ???遺얘턁?????????????????ル탛????????耀붾굝???????????
     tt: TranspositionTable,
     profile: SearchProfile,
+    use_threat_field: bool,
+    threat_field: Option<IncrementalThreatField>,
 }
 
 impl Searcher {
@@ -1181,6 +1189,8 @@ impl Searcher {
             node_limit_hit: false,
             tt: TranspositionTable::new(TT_BUCKET_BITS),
             profile: SearchProfile::default(),
+            use_threat_field: threat_field_enabled_by_env(),
+            threat_field: None,
         }
     }
 
@@ -1209,6 +1219,18 @@ impl Searcher {
         self.profile.snapshot()
     }
 
+    pub fn set_use_threat_field(&mut self, enabled: bool) {
+        self.use_threat_field = enabled;
+        if !enabled {
+            self.threat_field = None;
+        }
+    }
+
+    #[inline]
+    pub fn use_threat_field(&self) -> bool {
+        self.use_threat_field
+    }
+
     #[inline]
     fn profile_start(&self) -> Option<Instant> {
         self.profile.start()
@@ -1217,6 +1239,31 @@ impl Searcher {
     #[inline]
     fn profile_add(&mut self, bucket: SearchProfileBucket, started_at: Option<Instant>) {
         self.profile.add(bucket, started_at);
+    }
+
+    fn reset_threat_field(&mut self, board: &Board) {
+        if self.use_threat_field {
+            match self.threat_field.as_mut() {
+                Some(field) => field.refresh(board),
+                None => self.threat_field = Some(IncrementalThreatField::new(board)),
+            }
+        } else {
+            self.threat_field = None;
+        }
+    }
+
+    #[inline]
+    fn push_threat_field(&mut self, board: &Board, mv: Move) {
+        if let Some(field) = self.threat_field.as_mut() {
+            field.push_move(board, mv);
+        }
+    }
+
+    #[inline]
+    fn pop_threat_field(&mut self, board: &Board) {
+        if let Some(field) = self.threat_field.as_mut() {
+            field.pop_move(board);
+        }
     }
 
     fn reset_for_search(&mut self, time_limit: Option<Duration>) {
@@ -1237,6 +1284,7 @@ impl Searcher {
         self.tt.reset_stats();
         self.tt.clear();
         self.profile.reset(search_profile_enabled());
+        self.threat_field = None;
     }
 
     fn try_root_vct(
@@ -1310,6 +1358,7 @@ impl Searcher {
         max_depth: u32,
         root_search_decision_audit: bool,
     ) -> SearchResult {
+        self.reset_threat_field(board);
         let mut best_result = SearchResult {
             best_move: None,
             score: 0,
@@ -1508,6 +1557,7 @@ impl Searcher {
         // ???????ル???? search() ???遺얘턁?????????iterative deepening ????????TT???????ル??? ??????耀붾굝????????        // ???????????? iteration????? iteration??cutoff/PV ???遺얘턁?????????????????ル탛????????耀붾굝???????????
         self.tt.clear();
         self.profile.reset(search_profile_enabled());
+        self.threat_field = None;
         let root_search_decision_audit =
             crate::candidate_local_ensemble::root_search_decision_audit_enabled();
 
@@ -1576,6 +1626,7 @@ impl Searcher {
 
         // Incremental NNUE state ??????????耀붾굝?????傭?끆????椰???????full refresh, ???????꾩룆梨띰쭕??        // make_move/undo_move?? ?????????딅즹???push/pop????????源낅?????leaf?????full
         // compute_active_features????? ??????????Accumulator forward??????????
+        self.reset_threat_field(board);
         let mut inc = FlatEvalState::new(board, weights);
 
         // PV-move priority: the best move from iteration depth-1 becomes the
@@ -1826,8 +1877,10 @@ impl Searcher {
         self.cont_hist_2.fill([0; NUM_CELLS]);
         self.tt.reset_stats();
         self.tt.clear();
+        self.threat_field = None;
 
         let mut inc = FlatEvalState::new(board, weights);
+        self.reset_threat_field(board);
 
         if root_vct_enabled() {
             let vct_budget = match time_limit {
@@ -2116,6 +2169,7 @@ impl Searcher {
             let profile_start = self.profile_start();
             board.make_move(mv);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            self.push_threat_field(board, mv);
             let profile_start = self.profile_start();
             let detail = inc.push_move(board, mv, self.profile.enabled);
             self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
@@ -2164,6 +2218,7 @@ impl Searcher {
             let profile_start = self.profile_start();
             board.undo_move();
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            self.pop_threat_field(board);
             self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
 
             let candidate_rank_gate = if use_candidate_ranker {
@@ -2628,6 +2683,7 @@ impl Searcher {
             let profile_start = self.profile_start();
             board.make_move(mv);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            self.push_threat_field(board, mv);
             let profile_start = self.profile_start();
             let detail = inc.push_move(board, mv, self.profile.enabled);
             self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
@@ -2674,6 +2730,7 @@ impl Searcher {
             let profile_start = self.profile_start();
             board.undo_move();
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            self.pop_threat_field(board);
             self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
 
             if self.aborted {
@@ -2878,6 +2935,7 @@ impl Searcher {
             let profile_start = self.profile_start();
             board.make_move(mv);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            self.push_threat_field(board, mv);
             let profile_start = self.profile_start();
             let detail = inc.push_move(board, mv, self.profile.enabled);
             self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
@@ -2892,6 +2950,7 @@ impl Searcher {
             let profile_start = self.profile_start();
             board.undo_move();
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            self.pop_threat_field(board);
             self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
 
             if self.aborted {

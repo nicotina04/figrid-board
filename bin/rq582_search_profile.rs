@@ -24,6 +24,7 @@ struct Args {
     use_lazy_threat_field: bool,
     stress_threat_field: bool,
     use_move_picker: bool,
+    use_tail_threat_materialize: bool,
 }
 
 impl Args {
@@ -41,6 +42,7 @@ impl Args {
         let mut stress_threat_field = false;
 
         let mut use_move_picker = false;
+        let mut use_tail_threat_materialize = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -99,6 +101,10 @@ impl Args {
                 }
                 "--stress-threat-field" => stress_threat_field = true,
                 "--use-move-picker" => use_move_picker = true,
+                "--use-tail-threat-materialize" => {
+                    use_move_picker = true;
+                    use_tail_threat_materialize = true;
+                }
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument `{other}`\n{}", usage())),
             }
@@ -121,6 +127,7 @@ impl Args {
             use_lazy_threat_field,
             stress_threat_field,
             use_move_picker,
+            use_tail_threat_materialize,
         })
     }
 }
@@ -129,7 +136,7 @@ fn usage() -> String {
     "usage: rq582-search-profile --input games.jsonl [--output out.jsonl] \
      [--eval flat|codebook-quant] [--depth N] [--time-ms MS] [--node-budget N] [--limit N] \
      [--sample-every N] [--use-threat-field|--use-lazy-threat-field|--no-threat-field] \
-     [--stress-threat-field] [--use-move-picker]\n\
+     [--stress-threat-field] [--use-move-picker] [--use-tail-threat-materialize]\n\
      Set NORU_SEARCH_PROFILE=1 to record profile buckets."
         .to_string()
 }
@@ -167,6 +174,10 @@ fn move_picker_json(stats: MovePickerStats) -> Value {
         "duplicate_suppressed": stats.duplicate_suppressed,
         "l1_materialize_nodes": stats.l1_materialize_nodes,
         "l1_materialize_dirty_cells": stats.l1_materialize_dirty_cells,
+        "direct_urgent_nodes": stats.direct_urgent_nodes,
+        "direct_urgent_moves": stats.direct_urgent_moves,
+        "tail_l1_query_nodes": stats.tail_l1_query_nodes,
+        "tail_l1_query_dirty_cells": stats.tail_l1_query_dirty_cells,
         "quiet_generated_nodes": stats.quiet_generated_nodes,
         "quiet_skipped_nodes": stats.quiet_skipped_nodes,
     })
@@ -274,6 +285,7 @@ fn main() -> Result<(), String> {
                     searcher.set_use_lazy_threat_field(args.use_lazy_threat_field);
                     searcher.set_stress_threat_field(args.stress_threat_field);
                     searcher.set_use_move_picker(args.use_move_picker);
+                    searcher.set_use_tail_threat_materialize(args.use_tail_threat_materialize);
                     searcher.set_node_limit(args.node_budget);
                     let started = Instant::now();
                     let result = match args.eval.as_str() {
@@ -311,6 +323,7 @@ fn main() -> Result<(), String> {
                         "use_lazy_threat_field": args.use_lazy_threat_field,
                         "stress_threat_field": args.stress_threat_field,
                         "use_move_picker": args.use_move_picker,
+                        "use_tail_threat_materialize": args.use_tail_threat_materialize,
                         "elapsed_ms": elapsed_ms,
                         "best_move": best_move,
                         "score": result.score,

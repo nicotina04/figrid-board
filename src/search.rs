@@ -89,6 +89,11 @@ fn move_picker_enabled_by_env() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("NORU_USE_MOVE_PICKER", false))
 }
 
+fn tail_threat_materialize_enabled_by_env() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("NORU_USE_TAIL_THREAT_MATERIALIZE", false))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchThreatFieldMode {
     Off,
@@ -813,6 +818,10 @@ pub struct MovePickerStats {
     pub duplicate_suppressed: u64,
     pub l1_materialize_nodes: u64,
     pub l1_materialize_dirty_cells: u64,
+    pub direct_urgent_nodes: u64,
+    pub direct_urgent_moves: u64,
+    pub tail_l1_query_nodes: u64,
+    pub tail_l1_query_dirty_cells: u64,
     pub quiet_generated_nodes: u64,
     pub quiet_skipped_nodes: u64,
 }
@@ -1270,13 +1279,15 @@ pub struct Searcher {
     threat_field_mode: SearchThreatFieldMode,
     stress_threat_field: bool,
     use_move_picker: bool,
+    use_tail_threat_materialize: bool,
     move_picker_stats: MovePickerStats,
     threat_field: Option<IncrementalThreatField>,
 }
 
 impl Searcher {
     pub fn new() -> Self {
-        let use_move_picker = move_picker_enabled_by_env();
+        let use_tail_threat_materialize = tail_threat_materialize_enabled_by_env();
+        let use_move_picker = move_picker_enabled_by_env() || use_tail_threat_materialize;
         let mut threat_field_mode = threat_field_mode_by_env();
         if use_move_picker && threat_field_mode == SearchThreatFieldMode::Off {
             threat_field_mode = SearchThreatFieldMode::Lazy;
@@ -1299,6 +1310,7 @@ impl Searcher {
             stress_threat_field: threat_field_stress_enabled_by_env(),
             threat_field: None,
             use_move_picker,
+            use_tail_threat_materialize,
             move_picker_stats: MovePickerStats::default(),
         }
     }
@@ -1371,6 +1383,13 @@ impl Searcher {
             // The staged picker consumes L1 threat sources. Default to the
             // already accepted lazy field when callers only toggle the picker.
             self.threat_field_mode = SearchThreatFieldMode::Lazy;
+        }
+    }
+
+    pub fn set_use_tail_threat_materialize(&mut self, enabled: bool) {
+        self.use_tail_threat_materialize = enabled;
+        if enabled {
+            self.set_use_move_picker(true);
         }
     }
     #[inline]
@@ -2800,6 +2819,7 @@ impl Searcher {
                 let stage_moves = self.generate_move_picker_stage(
                     board,
                     ply,
+                    depth,
                     weights,
                     tt_move,
                     stage,
@@ -3241,6 +3261,7 @@ impl Searcher {
         &mut self,
         board: &Board,
         ply: usize,
+        depth: u32,
         _weights: &NnueWeights,
         tt_move: Option<Move>,
         stage: usize,
@@ -3251,13 +3272,26 @@ impl Searcher {
             Stone::Black => (&board.black, &board.white),
             Stone::White => (&board.white, &board.black),
         };
-        match stage {
-            0 => self.generate_tt_stage(board, ply, side, my, opp, emitted, tt_move),
-            1 => self.generate_l1_threat_stage(board, ply, side, my, opp, emitted),
-            2 => self.generate_forcing_stage(board, ply, side, my, opp, emitted),
-            3 => self.generate_killer_stage(board, ply, side, my, opp, emitted),
-            4 => self.generate_quiet_stage(board, ply, side, my, opp, emitted),
-            _ => Vec::new(),
+        if self.use_tail_threat_materialize {
+            match stage {
+                0 => self.generate_tt_stage(board, ply, side, my, opp, emitted, tt_move),
+                1 => self.generate_direct_urgent_stage(board, ply, side, my, opp, emitted),
+                2 => self.generate_killer_stage(board, ply, side, my, opp, emitted),
+                3 => self.generate_l1_threat_stage(board, ply, depth, side, my, opp, emitted, true),
+                4 => self.generate_quiet_stage(board, ply, side, my, opp, emitted),
+                _ => Vec::new(),
+            }
+        } else {
+            match stage {
+                0 => self.generate_tt_stage(board, ply, side, my, opp, emitted, tt_move),
+                1 => {
+                    self.generate_l1_threat_stage(board, ply, depth, side, my, opp, emitted, false)
+                }
+                2 => self.generate_forcing_stage(board, ply, side, my, opp, emitted),
+                3 => self.generate_killer_stage(board, ply, side, my, opp, emitted),
+                4 => self.generate_quiet_stage(board, ply, side, my, opp, emitted),
+                _ => Vec::new(),
+            }
         }
     }
 
@@ -3286,15 +3320,24 @@ impl Searcher {
         &mut self,
         board: &Board,
         ply: usize,
+        depth: u32,
         side: usize,
         my: &BitBoard,
         opp: &BitBoard,
         emitted: &mut [bool; NUM_CELLS],
+        tail_query: bool,
     ) -> Vec<(Move, bool)> {
+        if tail_query && depth < 2 {
+            return Vec::new();
+        }
         let Some(field) = self.threat_field.as_mut() else {
             return Vec::new();
         };
         let pending = field.pending_dirty_count();
+        if tail_query {
+            self.move_picker_stats.tail_l1_query_nodes += 1;
+            self.move_picker_stats.tail_l1_query_dirty_cells += pending as u64;
+        }
         if pending > 0 {
             self.move_picker_stats.l1_materialize_nodes += 1;
             self.move_picker_stats.l1_materialize_dirty_cells += pending as u64;
@@ -3324,6 +3367,39 @@ impl Searcher {
                 }
             }
         }
+        sort_packed_stage_moves(&mut packed);
+        packed.into_iter().map(|(_, mv, f)| (mv, f)).collect()
+    }
+
+    fn generate_direct_urgent_stage(
+        &mut self,
+        board: &Board,
+        ply: usize,
+        side: usize,
+        my: &BitBoard,
+        opp: &BitBoard,
+        emitted: &mut [bool; NUM_CELLS],
+    ) -> Vec<(Move, bool)> {
+        self.move_picker_stats.direct_urgent_nodes += 1;
+        let us = board.side_to_move;
+        let them = us.opponent();
+        let mut packed = Vec::new();
+        for mv in board.candidate_moves() {
+            if emitted[mv] {
+                continue;
+            }
+            let my_kind = classify_move_fast(board, mv, us);
+            let opp_kind = classify_move_fast(board, mv, them);
+            let urgent = matches!(my_kind, ThreatKind::Five | ThreatKind::OpenFour)
+                || matches!(opp_kind, ThreatKind::Five | ThreatKind::OpenFour);
+            if urgent {
+                let (score, is_forcing) =
+                    self.move_score_and_forcing(mv, ply, side, my, opp, board);
+                emitted[mv] = true;
+                packed.push((score, mv, is_forcing));
+            }
+        }
+        self.move_picker_stats.direct_urgent_moves += packed.len() as u64;
         sort_packed_stage_moves(&mut packed);
         packed.into_iter().map(|(_, mv, f)| (mv, f)).collect()
     }

@@ -1205,6 +1205,7 @@ pub struct Searcher {
     deadline: Option<Instant>,
     aborted: bool,
     node_limit: Option<u64>,
+    configured_node_limit: Option<u64>,
     node_limit_hit: bool,
     /// ???????遺얘턁????????ㅼ뒧??띤겫??눫????癲됱빖???嶺????????? ???????ル???? ?????????⑤슢堉??곕?????????????????????뀀맩鍮???????
     /// search ???遺얘턁??????????????????⑤벡瑜??????耀붾굝????????iterative deepening ???????롮쾸?椰???iteration?????    /// ?????????대첐??iteration??PV/cutoff ???遺얘턁?????????????????ル탛????????耀붾굝???????????
@@ -1234,6 +1235,7 @@ impl Searcher {
             deadline: None,
             aborted: false,
             node_limit: None,
+            configured_node_limit: None,
             node_limit_hit: false,
             tt: TranspositionTable::new(TT_BUCKET_BITS),
             profile: SearchProfile::default(),
@@ -1300,6 +1302,13 @@ impl Searcher {
         self.stress_threat_field = enabled;
     }
 
+    pub fn set_node_limit(&mut self, limit: Option<u64>) {
+        self.configured_node_limit = limit;
+    }
+
+    pub fn node_limit_hit(&self) -> bool {
+        self.node_limit_hit
+    }
     pub fn set_use_move_picker(&mut self, enabled: bool) {
         self.use_move_picker = enabled;
         if enabled && self.threat_field_mode == SearchThreatFieldMode::Off {
@@ -1367,7 +1376,7 @@ impl Searcher {
         self.nodes = 0;
         self.tt_cutoffs = 0;
         self.aborted = false;
-        self.node_limit = None;
+        self.node_limit = self.configured_node_limit;
         self.node_limit_hit = false;
         self.killers = [[None; 2]; 64];
         self.history = [[0; NUM_CELLS]; 2];
@@ -1638,7 +1647,7 @@ impl Searcher {
         self.nodes = 0;
         self.tt_cutoffs = 0;
         self.aborted = false;
-        self.node_limit = None;
+        self.node_limit = self.configured_node_limit;
         self.node_limit_hit = false;
         self.killers = [[None; 2]; 64];
         self.history = [[0; NUM_CELLS]; 2];

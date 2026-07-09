@@ -18,6 +18,7 @@ struct Args {
     sample_every: usize,
     depth: u32,
     time_ms: Option<u64>,
+    node_budget: Option<u64>,
     eval: String,
     use_threat_field: bool,
     use_lazy_threat_field: bool,
@@ -33,6 +34,7 @@ impl Args {
         let mut sample_every = 8usize;
         let mut depth = 20u32;
         let mut time_ms = None;
+        let mut node_budget = None;
         let mut eval = "flat".to_string();
         let mut use_threat_field = false;
         let mut use_lazy_threat_field = false;
@@ -73,6 +75,14 @@ impl Args {
                             .map_err(|e| format!("bad --time-ms: {e}"))?,
                     );
                 }
+                "--node-budget" => {
+                    node_budget = Some(
+                        it.next()
+                            .ok_or("--node-budget requires a value")?
+                            .parse()
+                            .map_err(|e| format!("bad --node-budget: {e}"))?,
+                    );
+                }
                 "--eval" => eval = it.next().ok_or("--eval requires a value")?,
                 "--use-threat-field" => {
                     use_threat_field = true;
@@ -105,6 +115,7 @@ impl Args {
             sample_every,
             depth,
             time_ms,
+            node_budget,
             eval,
             use_threat_field,
             use_lazy_threat_field,
@@ -116,7 +127,7 @@ impl Args {
 
 fn usage() -> String {
     "usage: rq582-search-profile --input games.jsonl [--output out.jsonl] \
-     [--eval flat|codebook-quant] [--depth N] [--time-ms MS] [--limit N] \
+     [--eval flat|codebook-quant] [--depth N] [--time-ms MS] [--node-budget N] [--limit N] \
      [--sample-every N] [--use-threat-field|--use-lazy-threat-field|--no-threat-field] \
      [--stress-threat-field] [--use-move-picker]\n\
      Set NORU_SEARCH_PROFILE=1 to record profile buckets."
@@ -263,6 +274,7 @@ fn main() -> Result<(), String> {
                     searcher.set_use_lazy_threat_field(args.use_lazy_threat_field);
                     searcher.set_stress_threat_field(args.stress_threat_field);
                     searcher.set_use_move_picker(args.use_move_picker);
+                    searcher.set_node_limit(args.node_budget);
                     let started = Instant::now();
                     let result = match args.eval.as_str() {
                         "flat" => searcher.search(
@@ -294,6 +306,7 @@ fn main() -> Result<(), String> {
                         "eval": args.eval,
                         "depth": args.depth,
                         "time_ms_limit": args.time_ms,
+                        "node_budget": args.node_budget,
                         "use_threat_field": args.use_threat_field,
                         "use_lazy_threat_field": args.use_lazy_threat_field,
                         "stress_threat_field": args.stress_threat_field,
@@ -303,6 +316,7 @@ fn main() -> Result<(), String> {
                         "score": result.score,
                         "searched_depth": result.depth,
                         "nodes": result.nodes,
+                        "node_limit_hit": searcher.node_limit_hit(),
                         "profile": profile_json(searcher.search_profile()),
                         "move_picker": move_picker_json(searcher.move_picker_stats()),
                     });

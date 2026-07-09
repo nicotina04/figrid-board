@@ -807,6 +807,7 @@ pub struct SearchProfileSnapshot {
 }
 
 pub const MOVE_PICKER_STAGE_COUNT: usize = 5;
+pub const MOVE_PICKER_DIRTY_HIST_BUCKETS: usize = 10;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MovePickerStats {
@@ -822,9 +823,27 @@ pub struct MovePickerStats {
     pub direct_urgent_moves: u64,
     pub tail_l1_query_nodes: u64,
     pub tail_l1_query_dirty_cells: u64,
+    pub tail_l1_query_dirty_hist: [u64; MOVE_PICKER_DIRTY_HIST_BUCKETS],
     pub quiet_generated_nodes: u64,
     pub quiet_skipped_nodes: u64,
 }
+
+#[inline]
+fn move_picker_dirty_hist_bucket(dirty_cells: u32) -> usize {
+    match dirty_cells {
+        0 => 0,
+        1..=16 => 1,
+        17..=32 => 2,
+        33..=64 => 3,
+        65..=96 => 4,
+        97..=128 => 5,
+        129..=160 => 6,
+        161..=192 => 7,
+        193..=224 => 8,
+        _ => 9,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SearchProfileBucket {
     Eval,
@@ -3337,6 +3356,8 @@ impl Searcher {
         if tail_query {
             self.move_picker_stats.tail_l1_query_nodes += 1;
             self.move_picker_stats.tail_l1_query_dirty_cells += pending as u64;
+            let bucket = move_picker_dirty_hist_bucket(pending);
+            self.move_picker_stats.tail_l1_query_dirty_hist[bucket] += 1;
         }
         if pending > 0 {
             self.move_picker_stats.l1_materialize_nodes += 1;

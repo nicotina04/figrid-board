@@ -178,6 +178,7 @@ fn move_picker_json(stats: MovePickerStats) -> Value {
         "direct_urgent_moves": stats.direct_urgent_moves,
         "tail_l1_query_nodes": stats.tail_l1_query_nodes,
         "tail_l1_query_dirty_cells": stats.tail_l1_query_dirty_cells,
+        "tail_l1_query_dirty_hist": stats.tail_l1_query_dirty_hist,
         "quiet_generated_nodes": stats.quiet_generated_nodes,
         "quiet_skipped_nodes": stats.quiet_skipped_nodes,
     })

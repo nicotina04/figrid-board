@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "codebook-eval")]
 use figrid_board::codebook_eval::{CodebookWeights, QuantizedCodebookWeights};
-use figrid_board::{Board, GOMOKU_NNUE_CONFIG, SearchProfileSnapshot, Searcher, to_idx, to_rc};
+use figrid_board::{
+    Board, GOMOKU_NNUE_CONFIG, MovePickerStats, SearchProfileSnapshot, Searcher, to_idx, to_rc,
+};
 use noru::network::NnueWeights;
 use serde_json::{Value, json};
 
@@ -20,6 +22,7 @@ struct Args {
     use_threat_field: bool,
     use_lazy_threat_field: bool,
     stress_threat_field: bool,
+    use_move_picker: bool,
 }
 
 impl Args {
@@ -35,6 +38,7 @@ impl Args {
         let mut use_lazy_threat_field = false;
         let mut stress_threat_field = false;
 
+        let mut use_move_picker = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -84,6 +88,7 @@ impl Args {
                     stress_threat_field = false;
                 }
                 "--stress-threat-field" => stress_threat_field = true,
+                "--use-move-picker" => use_move_picker = true,
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument `{other}`\n{}", usage())),
             }
@@ -104,6 +109,7 @@ impl Args {
             use_threat_field,
             use_lazy_threat_field,
             stress_threat_field,
+            use_move_picker,
         })
     }
 }
@@ -112,7 +118,7 @@ fn usage() -> String {
     "usage: rq582-search-profile --input games.jsonl [--output out.jsonl] \
      [--eval flat|codebook-quant] [--depth N] [--time-ms MS] [--limit N] \
      [--sample-every N] [--use-threat-field|--use-lazy-threat-field|--no-threat-field] \
-     [--stress-threat-field]\n\
+     [--stress-threat-field] [--use-move-picker]\n\
      Set NORU_SEARCH_PROFILE=1 to record profile buckets."
         .to_string()
 }
@@ -140,6 +146,20 @@ fn load_quantized_codebook() -> Result<QuantizedCodebookWeights, String> {
     Ok(weights.quantize_i16_s32_s64())
 }
 
+fn move_picker_json(stats: MovePickerStats) -> Value {
+    json!({
+        "enabled_nodes": stats.enabled_nodes,
+        "legacy_nodes": stats.legacy_nodes,
+        "stage_reached": stats.stage_reached,
+        "stage_moves": stats.stage_moves,
+        "stage_cutoffs": stats.stage_cutoffs,
+        "duplicate_suppressed": stats.duplicate_suppressed,
+        "l1_materialize_nodes": stats.l1_materialize_nodes,
+        "l1_materialize_dirty_cells": stats.l1_materialize_dirty_cells,
+        "quiet_generated_nodes": stats.quiet_generated_nodes,
+        "quiet_skipped_nodes": stats.quiet_skipped_nodes,
+    })
+}
 fn profile_json(profile: SearchProfileSnapshot) -> Value {
     json!({
         "enabled": profile.enabled,
@@ -242,6 +262,7 @@ fn main() -> Result<(), String> {
                     searcher.set_use_threat_field(args.use_threat_field);
                     searcher.set_use_lazy_threat_field(args.use_lazy_threat_field);
                     searcher.set_stress_threat_field(args.stress_threat_field);
+                    searcher.set_use_move_picker(args.use_move_picker);
                     let started = Instant::now();
                     let result = match args.eval.as_str() {
                         "flat" => searcher.search(
@@ -276,12 +297,14 @@ fn main() -> Result<(), String> {
                         "use_threat_field": args.use_threat_field,
                         "use_lazy_threat_field": args.use_lazy_threat_field,
                         "stress_threat_field": args.stress_threat_field,
+                        "use_move_picker": args.use_move_picker,
                         "elapsed_ms": elapsed_ms,
                         "best_move": best_move,
                         "score": result.score,
                         "searched_depth": result.depth,
                         "nodes": result.nodes,
                         "profile": profile_json(searcher.search_profile()),
+                        "move_picker": move_picker_json(searcher.move_picker_stats()),
                     });
                     writeln!(out, "{row}").map_err(|e| format!("failed to write output: {e}"))?;
                     emitted += 1;

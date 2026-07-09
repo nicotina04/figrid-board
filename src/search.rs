@@ -4,7 +4,7 @@
 /// - ????????ㅻ깹???????????????袁ｋ쨨?? ???????ル???????븐뼐???????????筌뤾퍓愿?????????ъ몴??/// - ??????????뀀?????? ????????????????????遺얘턁????????????(4??????? ???????ル????)
 /// - ?????????+ ????????⑤벡????????????????????????紐껊짍
 /// - ??????????????
-use crate::board::{BOARD_SIZE, Board, GameResult, Move, NUM_CELLS, Stone, to_rc};
+use crate::board::{BOARD_SIZE, BitBoard, Board, GameResult, Move, NUM_CELLS, Stone, to_rc};
 #[cfg(feature = "codebook-eval")]
 use crate::codebook_eval::{
     CodebookWeights, IncrementalCodebookEval, IncrementalQuantizedCodebookEval,
@@ -82,6 +82,11 @@ fn root_defensive_vct_veto_enabled() -> bool {
 fn search_profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("NORU_SEARCH_PROFILE", false))
+}
+
+fn move_picker_enabled_by_env() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("NORU_USE_MOVE_PICKER", false))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -709,6 +714,21 @@ pub struct SearchProfileSnapshot {
     pub qsearch_calls: u64,
 }
 
+pub const MOVE_PICKER_STAGE_COUNT: usize = 5;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MovePickerStats {
+    pub enabled_nodes: u64,
+    pub legacy_nodes: u64,
+    pub stage_reached: [u64; MOVE_PICKER_STAGE_COUNT],
+    pub stage_moves: [u64; MOVE_PICKER_STAGE_COUNT],
+    pub stage_cutoffs: [u64; MOVE_PICKER_STAGE_COUNT],
+    pub duplicate_suppressed: u64,
+    pub l1_materialize_nodes: u64,
+    pub l1_materialize_dirty_cells: u64,
+    pub quiet_generated_nodes: u64,
+    pub quiet_skipped_nodes: u64,
+}
 #[derive(Debug, Clone, Copy)]
 enum SearchProfileBucket {
     Eval,
@@ -1192,11 +1212,18 @@ pub struct Searcher {
     profile: SearchProfile,
     threat_field_mode: SearchThreatFieldMode,
     stress_threat_field: bool,
+    use_move_picker: bool,
+    move_picker_stats: MovePickerStats,
     threat_field: Option<IncrementalThreatField>,
 }
 
 impl Searcher {
     pub fn new() -> Self {
+        let use_move_picker = move_picker_enabled_by_env();
+        let mut threat_field_mode = threat_field_mode_by_env();
+        if use_move_picker && threat_field_mode == SearchThreatFieldMode::Off {
+            threat_field_mode = SearchThreatFieldMode::Lazy;
+        }
         Self {
             nodes: 0,
             tt_cutoffs: 0,
@@ -1210,9 +1237,11 @@ impl Searcher {
             node_limit_hit: false,
             tt: TranspositionTable::new(TT_BUCKET_BITS),
             profile: SearchProfile::default(),
-            threat_field_mode: threat_field_mode_by_env(),
+            threat_field_mode,
             stress_threat_field: threat_field_stress_enabled_by_env(),
             threat_field: None,
+            use_move_picker,
+            move_picker_stats: MovePickerStats::default(),
         }
     }
 
@@ -1241,6 +1270,10 @@ impl Searcher {
         self.profile.snapshot()
     }
 
+    pub fn move_picker_stats(&self) -> MovePickerStats {
+        self.move_picker_stats
+    }
+
     pub fn set_use_threat_field(&mut self, enabled: bool) {
         self.threat_field_mode = if enabled {
             SearchThreatFieldMode::Eager
@@ -1267,6 +1300,14 @@ impl Searcher {
         self.stress_threat_field = enabled;
     }
 
+    pub fn set_use_move_picker(&mut self, enabled: bool) {
+        self.use_move_picker = enabled;
+        if enabled && self.threat_field_mode == SearchThreatFieldMode::Off {
+            // The staged picker consumes L1 threat sources. Default to the
+            // already accepted lazy field when callers only toggle the picker.
+            self.threat_field_mode = SearchThreatFieldMode::Lazy;
+        }
+    }
     #[inline]
     pub fn use_threat_field(&self) -> bool {
         self.threat_field_mode != SearchThreatFieldMode::Off
@@ -1341,6 +1382,7 @@ impl Searcher {
         self.tt.clear();
         self.profile.reset(search_profile_enabled());
         self.threat_field = None;
+        self.move_picker_stats = MovePickerStats::default();
     }
 
     fn try_root_vct(
@@ -1614,6 +1656,7 @@ impl Searcher {
         self.tt.clear();
         self.profile.reset(search_profile_enabled());
         self.threat_field = None;
+        self.move_picker_stats = MovePickerStats::default();
         let root_search_decision_audit =
             crate::candidate_local_ensemble::root_search_decision_audit_enabled();
 
@@ -1935,6 +1978,7 @@ impl Searcher {
         self.tt.clear();
         self.threat_field = None;
 
+        self.move_picker_stats = MovePickerStats::default();
         let mut inc = FlatEvalState::new(board, weights);
         self.reset_threat_field(board);
 
@@ -2656,22 +2700,6 @@ impl Searcher {
             depth
         };
 
-        let profile_start = self.profile_start();
-        let mut moves = self.order_moves(board, ply, weights);
-        self.profile_add(SearchProfileBucket::MovegenOrder, profile_start);
-        if moves.is_empty() {
-            return 0;
-        }
-
-        // TT-best move???????????(PVS????????????ル???????cutoff ??????????????.
-        if let Some(tt_mv) = tt_move {
-            if let Some(pos) = moves.iter().position(|&(m, _)| m == tt_mv) {
-                if pos != 0 {
-                    moves.swap(0, pos);
-                }
-            }
-        }
-
         let mut best_score = -INF;
         let mut best_move_at_node: Option<Move> = None;
         let side = board.side_to_move as usize;
@@ -2697,144 +2725,113 @@ impl Searcher {
         // order_moves[0] = PV ???? ??full window ?????
         // ???????꾩룆梨띰쭕??????븐뼐???????????븐뼔??????????null-window???????????????fail-high??full re-search.
         // LMR ??????熬곣몿???: ??PV / ??killer / ??forcing ??????reduction r ply ??????ш끽踰椰???????????        // ??????⑤벡瑜??꿔꺂?????? ??????ш끽踰椰????????????耀붾굝???????alpha ??????⑤슢堉??곕????轅붽틓?????獒뺣폍??full depth??????? tier ???????????????gating????????        // ???????ル????????뀀맩鍮??????룸챶猷??????? reduce??? ?????關?쒎첎?嫄??怨룻돫?? horizon effect ???.
-        for (move_idx, &(mv, is_forcing)) in moves.iter().enumerate() {
-            let is_killer =
-                ply < 64 && (self.killers[ply][0] == Some(mv) || self.killers[ply][1] == Some(mv));
-
-            // === LMP (Late Move Pruning) ===
-            // ??PV / ??forcing / ??killer / ??? depth?????move_idx???????ル???
-            // ?????????????????????????????quiet move skip. count-based??eval ??????????已???            // ????轅붽틓???壤굿??덊뒌??, ????trigger ??????⑤벡瑜???? tier ???遺얘턁???????????????????quiet move??????????
-            // ??????袁⑸즴筌?씛彛??????????ル???????????????븐뼐????????????
-            if !is_pv
-                && !is_forcing
-                && !is_killer
-                && depth >= LMP_MIN_DEPTH
-                && depth <= LMP_MAX_DEPTH
-            {
-                let lmp_threshold = LMP_BASE + LMP_PER_DEPTH * depth as usize;
-                if move_idx >= lmp_threshold {
-                    continue;
-                }
-            }
-
-            // TT prefetch: hint the CPU to load the child node's TT bucket
-            // into L1 while we run the (cache-cold) make_move + accumulator
-            // delta below. The child's first action is a TT probe, so by
-            // the time it gets there the line is already warm. Worth ~5-10%
-            // search throughput on cache-bound positions.
-            let next_zob = board.zobrist
-                ^ crate::board::zobrist_stone_key(board.side_to_move, mv)
-                ^ crate::board::ZOBRIST_SIDE;
-            let profile_start = self.profile_start();
-            self.tt.prefetch(next_zob);
-            self.profile_add(SearchProfileBucket::Tt, profile_start);
-
-            // Track quiet move ordering for continuation-history penalties on
-            // a later cutoff (skipped for forcing moves ??those carry their
-            // own tier signal and shouldn't get history bonuses).
-            if !is_forcing {
-                quiets_tried.push(mv);
-            }
-
-            let make_undo_profile_start = self.profile_start();
-            let profile_start = self.profile_start();
-            board.make_move(mv);
-            self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
-            self.push_threat_field(board, mv);
-            self.stress_threat_field_query(board);
-            let profile_start = self.profile_start();
-            let detail = inc.push_move(board, mv, self.profile.enabled);
-            self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
-            self.profile.add_eval_state_detail(detail);
-            self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
-
-            let score = if move_idx == 0 {
-                -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -alpha)
-            } else {
-                let reduction = lmr_reduction(depth, move_idx, is_forcing, is_killer);
-                let reduced_depth = (depth - 1).saturating_sub(reduction);
-                let mut null_score = -self.alpha_beta(
+        let mut searched_moves = 0usize;
+        if self.use_move_picker && ply > 0 {
+            self.move_picker_stats.enabled_nodes += 1;
+            let mut emitted = [false; NUM_CELLS];
+            let mut stop = false;
+            for stage in 0..MOVE_PICKER_STAGE_COUNT {
+                let profile_start = self.profile_start();
+                let stage_moves = self.generate_move_picker_stage(
                     board,
+                    ply,
                     weights,
-                    inc,
-                    reduced_depth,
-                    ply + 1,
-                    -alpha - 1,
-                    -alpha,
+                    tt_move,
+                    stage,
+                    &mut emitted,
                 );
-                if !self.aborted && reduction > 0 && null_score > alpha {
-                    null_score = -self.alpha_beta(
+                self.profile_add(SearchProfileBucket::MovegenOrder, profile_start);
+                self.move_picker_stats.stage_reached[stage] += 1;
+                self.move_picker_stats.stage_moves[stage] += stage_moves.len() as u64;
+                if stage == 4 && !stage_moves.is_empty() {
+                    self.move_picker_stats.quiet_generated_nodes += 1;
+                }
+
+                for (mv, is_forcing) in stage_moves {
+                    stop = self.search_alpha_beta_child(
                         board,
                         weights,
                         inc,
-                        depth - 1,
-                        ply + 1,
-                        -alpha - 1,
-                        -alpha,
+                        depth,
+                        ply,
+                        searched_moves,
+                        mv,
+                        is_forcing,
+                        is_pv,
+                        &mut alpha,
+                        beta,
+                        side,
+                        prev1,
+                        prev2,
+                        &mut quiets_tried,
+                        &mut best_score,
+                        &mut best_move_at_node,
                     );
+                    searched_moves += 1;
+                    if stop {
+                        self.move_picker_stats.stage_cutoffs[stage] += 1;
+                        if stage < 4 {
+                            self.move_picker_stats.quiet_skipped_nodes += 1;
+                        }
+                        break;
+                    }
                 }
-                if !self.aborted && null_score > alpha && null_score < beta {
-                    -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -alpha)
-                } else {
-                    null_score
+
+                if stop || self.aborted {
+                    break;
                 }
-            };
-
-            let make_undo_profile_start = self.profile_start();
+            }
+        } else {
+            self.move_picker_stats.legacy_nodes += 1;
             let profile_start = self.profile_start();
-            let detail = inc.pop_move(self.profile.enabled);
-            self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
-            self.profile.add_eval_state_detail(detail);
-            let profile_start = self.profile_start();
-            board.undo_move();
-            self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
-            self.pop_threat_field(board);
-            self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
-
-            if self.aborted {
+            let mut moves = self.order_moves(board, ply, weights);
+            self.profile_add(SearchProfileBucket::MovegenOrder, profile_start);
+            if moves.is_empty() {
                 return 0;
             }
 
-            if score > best_score {
-                best_score = score;
-                best_move_at_node = Some(mv);
-            }
-            if score > alpha {
-                alpha = score;
-                self.history[side][mv] += (depth * depth) as i32;
-            }
-            if alpha >= beta {
-                if ply < 64 {
-                    self.killers[ply][1] = self.killers[ply][0];
-                    self.killers[ply][0] = Some(mv);
-                }
-                // Continuation-history bonus on beta-cutoff. Only quiet
-                // (non-forcing) cutters earn history; forcing cutters are
-                // already prioritized by their tier score in the move
-                // ordering and don't need the table to remember them. Quiet
-                // moves tried earlier in this node receive a symmetric
-                // penalty so the next ordering pass demotes them.
-                if !is_forcing {
-                    let bonus = ((depth * depth) as i32).min(HISTORY_MAX);
-                    if let Some(p1) = prev1 {
-                        history_gravity_update(&mut self.cont_hist_1[p1][mv], bonus);
-                    }
-                    if let Some(p2) = prev2 {
-                        history_gravity_update(&mut self.cont_hist_2[p2][mv], bonus);
-                    }
-                    for &qm in &quiets_tried[..quiets_tried.len().saturating_sub(1)] {
-                        if let Some(p1) = prev1 {
-                            history_gravity_update(&mut self.cont_hist_1[p1][qm], -bonus);
-                        }
-                        if let Some(p2) = prev2 {
-                            history_gravity_update(&mut self.cont_hist_2[p2][qm], -bonus);
-                        }
+            // TT-best move first for legacy generate-all ordering.
+            if let Some(tt_mv) = tt_move {
+                if let Some(pos) = moves.iter().position(|&(m, _)| m == tt_mv) {
+                    if pos != 0 {
+                        moves.swap(0, pos);
                     }
                 }
-                break;
+            }
+
+            for &(mv, is_forcing) in moves.iter() {
+                let stop = self.search_alpha_beta_child(
+                    board,
+                    weights,
+                    inc,
+                    depth,
+                    ply,
+                    searched_moves,
+                    mv,
+                    is_forcing,
+                    is_pv,
+                    &mut alpha,
+                    beta,
+                    side,
+                    prev1,
+                    prev2,
+                    &mut quiets_tried,
+                    &mut best_score,
+                    &mut best_move_at_node,
+                );
+                searched_moves += 1;
+                if stop || self.aborted {
+                    break;
+                }
             }
         }
 
+        if searched_moves == 0 {
+            return 0;
+        }
+        if self.aborted {
+            return 0;
+        }
         // === TT store ===
         // bound ??????????已???????
         //   - best_score <= original_alpha ??fail-low (Upper bound, true value ??
@@ -2861,6 +2858,140 @@ impl Searcher {
         best_score
     }
 
+    fn search_alpha_beta_child<E: SearchEvalState>(
+        &mut self,
+        board: &mut Board,
+        weights: &NnueWeights,
+        inc: &mut E,
+        depth: u32,
+        ply: usize,
+        move_idx: usize,
+        mv: Move,
+        is_forcing: bool,
+        is_pv: bool,
+        alpha: &mut i32,
+        beta: i32,
+        side: usize,
+        prev1: Option<Move>,
+        prev2: Option<Move>,
+        quiets_tried: &mut Vec<Move>,
+        best_score: &mut i32,
+        best_move_at_node: &mut Option<Move>,
+    ) -> bool {
+        let is_killer =
+            ply < 64 && (self.killers[ply][0] == Some(mv) || self.killers[ply][1] == Some(mv));
+
+        if !is_pv && !is_forcing && !is_killer && depth >= LMP_MIN_DEPTH && depth <= LMP_MAX_DEPTH {
+            let lmp_threshold = LMP_BASE + LMP_PER_DEPTH * depth as usize;
+            if move_idx >= lmp_threshold {
+                return false;
+            }
+        }
+
+        let next_zob = board.zobrist
+            ^ crate::board::zobrist_stone_key(board.side_to_move, mv)
+            ^ crate::board::ZOBRIST_SIDE;
+        let profile_start = self.profile_start();
+        self.tt.prefetch(next_zob);
+        self.profile_add(SearchProfileBucket::Tt, profile_start);
+
+        if !is_forcing {
+            quiets_tried.push(mv);
+        }
+
+        let make_undo_profile_start = self.profile_start();
+        let profile_start = self.profile_start();
+        board.make_move(mv);
+        self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+        self.push_threat_field(board, mv);
+        self.stress_threat_field_query(board);
+        let profile_start = self.profile_start();
+        let detail = inc.push_move(board, mv, self.profile.enabled);
+        self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
+        self.profile.add_eval_state_detail(detail);
+        self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
+
+        let score = if move_idx == 0 {
+            -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -(*alpha))
+        } else {
+            let reduction = lmr_reduction(depth, move_idx, is_forcing, is_killer);
+            let reduced_depth = (depth - 1).saturating_sub(reduction);
+            let mut null_score = -self.alpha_beta(
+                board,
+                weights,
+                inc,
+                reduced_depth,
+                ply + 1,
+                -(*alpha) - 1,
+                -(*alpha),
+            );
+            if !self.aborted && reduction > 0 && null_score > *alpha {
+                null_score = -self.alpha_beta(
+                    board,
+                    weights,
+                    inc,
+                    depth - 1,
+                    ply + 1,
+                    -(*alpha) - 1,
+                    -(*alpha),
+                );
+            }
+            if !self.aborted && null_score > *alpha && null_score < beta {
+                -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -(*alpha))
+            } else {
+                null_score
+            }
+        };
+
+        let make_undo_profile_start = self.profile_start();
+        let profile_start = self.profile_start();
+        let detail = inc.pop_move(self.profile.enabled);
+        self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
+        self.profile.add_eval_state_detail(detail);
+        let profile_start = self.profile_start();
+        board.undo_move();
+        self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+        self.pop_threat_field(board);
+        self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
+
+        if self.aborted {
+            return true;
+        }
+
+        if score > *best_score {
+            *best_score = score;
+            *best_move_at_node = Some(mv);
+        }
+        if score > *alpha {
+            *alpha = score;
+            self.history[side][mv] += (depth * depth) as i32;
+        }
+        if *alpha >= beta {
+            if ply < 64 {
+                self.killers[ply][1] = self.killers[ply][0];
+                self.killers[ply][0] = Some(mv);
+            }
+            if !is_forcing {
+                let bonus = ((depth * depth) as i32).min(HISTORY_MAX);
+                if let Some(p1) = prev1 {
+                    history_gravity_update(&mut self.cont_hist_1[p1][mv], bonus);
+                }
+                if let Some(p2) = prev2 {
+                    history_gravity_update(&mut self.cont_hist_2[p2][mv], bonus);
+                }
+                for &qm in &quiets_tried[..quiets_tried.len().saturating_sub(1)] {
+                    if let Some(p1) = prev1 {
+                        history_gravity_update(&mut self.cont_hist_1[p1][qm], -bonus);
+                    }
+                    if let Some(p2) = prev2 {
+                        history_gravity_update(&mut self.cont_hist_2[p2][qm], -bonus);
+                    }
+                }
+            }
+            return true;
+        }
+        false
+    }
     /// Quiescence lite. ???????ル?????????????遺얘턁?????????horizon effect ??????????뀀??
     /// - stand-pat (NNUE static eval) ??fail-high ?????cutoff
     /// Quiescence lite search for forcing replies at the horizon.
@@ -3041,6 +3172,188 @@ impl Searcher {
     /// of the order_moves time vs the previous `Vec<(Move, i32, bool)>`
     /// + `sort_unstable_by(|a,b| b.1.cmp(&a.1))` form. Search throughput
     /// gain ~3-5%.
+    fn generate_move_picker_stage(
+        &mut self,
+        board: &Board,
+        ply: usize,
+        _weights: &NnueWeights,
+        tt_move: Option<Move>,
+        stage: usize,
+        emitted: &mut [bool; NUM_CELLS],
+    ) -> Vec<(Move, bool)> {
+        let side = board.side_to_move as usize;
+        let (my, opp) = match board.side_to_move {
+            Stone::Black => (&board.black, &board.white),
+            Stone::White => (&board.white, &board.black),
+        };
+        match stage {
+            0 => self.generate_tt_stage(board, ply, side, my, opp, emitted, tt_move),
+            1 => self.generate_l1_threat_stage(board, ply, side, my, opp, emitted),
+            2 => self.generate_forcing_stage(board, ply, side, my, opp, emitted),
+            3 => self.generate_killer_stage(board, ply, side, my, opp, emitted),
+            4 => self.generate_quiet_stage(board, ply, side, my, opp, emitted),
+            _ => Vec::new(),
+        }
+    }
+
+    fn generate_tt_stage(
+        &mut self,
+        board: &Board,
+        ply: usize,
+        side: usize,
+        my: &BitBoard,
+        opp: &BitBoard,
+        emitted: &mut [bool; NUM_CELLS],
+        tt_move: Option<Move>,
+    ) -> Vec<(Move, bool)> {
+        let mut out = Vec::with_capacity(1);
+        if let Some(mv) = tt_move {
+            if let Some((_, mv, is_forcing)) =
+                self.score_stage_move(board, ply, side, my, opp, emitted, mv)
+            {
+                out.push((mv, is_forcing));
+            }
+        }
+        out
+    }
+
+    fn generate_l1_threat_stage(
+        &mut self,
+        board: &Board,
+        ply: usize,
+        side: usize,
+        my: &BitBoard,
+        opp: &BitBoard,
+        emitted: &mut [bool; NUM_CELLS],
+    ) -> Vec<(Move, bool)> {
+        let Some(field) = self.threat_field.as_mut() else {
+            return Vec::new();
+        };
+        let pending = field.pending_dirty_count();
+        if pending > 0 {
+            self.move_picker_stats.l1_materialize_nodes += 1;
+            self.move_picker_stats.l1_materialize_dirty_cells += pending as u64;
+        }
+        let us = board.side_to_move;
+        let them = us.opponent();
+        let mut sources = Vec::with_capacity(10);
+        for &(source_side, kind) in &[
+            (us, ThreatKind::Five),
+            (them, ThreatKind::Five),
+            (us, ThreatKind::OpenFour),
+            (them, ThreatKind::OpenFour),
+            (us, ThreatKind::DoubleFour),
+            (them, ThreatKind::DoubleFour),
+            (us, ThreatKind::FourThree),
+            (them, ThreatKind::FourThree),
+            (us, ThreatKind::ClosedFour),
+            (them, ThreatKind::ClosedFour),
+        ] {
+            sources.push(field.tier_sources(board, source_side, kind));
+        }
+        let mut packed = Vec::new();
+        for source in sources {
+            for mv in source.iter_ones() {
+                if let Some(entry) = self.score_stage_move(board, ply, side, my, opp, emitted, mv) {
+                    packed.push(entry);
+                }
+            }
+        }
+        sort_packed_stage_moves(&mut packed);
+        packed.into_iter().map(|(_, mv, f)| (mv, f)).collect()
+    }
+
+    fn generate_forcing_stage(
+        &mut self,
+        board: &Board,
+        ply: usize,
+        side: usize,
+        my: &BitBoard,
+        opp: &BitBoard,
+        emitted: &mut [bool; NUM_CELLS],
+    ) -> Vec<(Move, bool)> {
+        let mut packed = Vec::new();
+        for mv in board.candidate_moves() {
+            if emitted[mv] {
+                continue;
+            }
+            let (score, is_forcing) = self.move_score_and_forcing(mv, ply, side, my, opp, board);
+            if is_forcing {
+                emitted[mv] = true;
+                packed.push((score, mv, is_forcing));
+            }
+        }
+        sort_packed_stage_moves(&mut packed);
+        packed.into_iter().map(|(_, mv, f)| (mv, f)).collect()
+    }
+
+    fn generate_killer_stage(
+        &mut self,
+        board: &Board,
+        ply: usize,
+        side: usize,
+        my: &BitBoard,
+        opp: &BitBoard,
+        emitted: &mut [bool; NUM_CELLS],
+    ) -> Vec<(Move, bool)> {
+        let mut out = Vec::with_capacity(2);
+        if ply < 64 {
+            for mv in self.killers[ply] {
+                if let Some(mv) = mv {
+                    if let Some((_, mv, is_forcing)) =
+                        self.score_stage_move(board, ply, side, my, opp, emitted, mv)
+                    {
+                        out.push((mv, is_forcing));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn generate_quiet_stage(
+        &mut self,
+        board: &Board,
+        ply: usize,
+        side: usize,
+        my: &BitBoard,
+        opp: &BitBoard,
+        emitted: &mut [bool; NUM_CELLS],
+    ) -> Vec<(Move, bool)> {
+        let mut packed = Vec::new();
+        for mv in board.candidate_moves() {
+            if emitted[mv] {
+                continue;
+            }
+            let (score, is_forcing) = self.move_score_and_forcing(mv, ply, side, my, opp, board);
+            emitted[mv] = true;
+            packed.push((score, mv, is_forcing));
+        }
+        sort_packed_stage_moves(&mut packed);
+        packed.into_iter().map(|(_, mv, f)| (mv, f)).collect()
+    }
+
+    fn score_stage_move(
+        &mut self,
+        board: &Board,
+        ply: usize,
+        side: usize,
+        my: &BitBoard,
+        opp: &BitBoard,
+        emitted: &mut [bool; NUM_CELLS],
+        mv: Move,
+    ) -> Option<(i32, Move, bool)> {
+        if mv >= NUM_CELLS || !board.is_legal_move(mv) {
+            return None;
+        }
+        if emitted[mv] {
+            self.move_picker_stats.duplicate_suppressed += 1;
+            return None;
+        }
+        let (score, is_forcing) = self.move_score_and_forcing(mv, ply, side, my, opp, board);
+        emitted[mv] = true;
+        Some((score, mv, is_forcing))
+    }
     fn order_moves(&self, board: &Board, ply: usize, weights: &NnueWeights) -> Vec<(Move, bool)> {
         let candidates = board.candidate_moves();
         let side = board.side_to_move as usize;
@@ -3444,6 +3757,13 @@ impl Searcher {
     }
 }
 
+fn sort_packed_stage_moves(moves: &mut [(i32, Move, bool)]) {
+    moves.sort_unstable_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| b.1.cmp(&a.1))
+    });
+}
 // === Move ordering tier ?????===
 // ??tier ????buffer???????ル??? ??100 000??????????history/killer/center ???????밸븶筌믩끃?????// ?????????뼿??tier?? ??? ???汝뷴젆?琉??誘↔덱???????? ???????繹먮굞???
 const TIER_WIN: i32 = 10_000_000;

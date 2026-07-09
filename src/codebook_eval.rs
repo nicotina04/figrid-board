@@ -5,14 +5,104 @@
 //! search by default.
 
 use serde_json::Value;
+use std::time::Instant;
 
 use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
 use crate::pattern_table::{PATTERN_NUM_IDS, swap_mapped_id};
 
+const MAX_DIRTY_CELLS: usize = 41;
 const REGIONS: usize = 9;
 pub const QUANT_EMBED_SCALE: i32 = 32;
 pub const QUANT_HEAD_SCALE: i32 = 64;
 pub const QUANT_FACTOR_SCALE: i32 = 64;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EvalStateStepProfile {
+    pub dirty_list_ns: u128,
+    pub dirty_list_calls: u64,
+    pub frame_write_ns: u128,
+    pub frame_write_calls: u64,
+    pub backup_ns: u128,
+    pub backup_calls: u64,
+    pub recompute_ns: u128,
+    pub recompute_calls: u64,
+    pub aggregate_ns: u128,
+    pub aggregate_calls: u64,
+    pub restore_ns: u128,
+    pub restore_calls: u64,
+    pub forward_ns: u128,
+    pub forward_calls: u64,
+    pub push_calls: u64,
+    pub pop_calls: u64,
+}
+
+impl EvalStateStepProfile {
+    #[inline]
+    fn start(profile_enabled: bool) -> Option<Instant> {
+        profile_enabled.then(Instant::now)
+    }
+
+    #[inline]
+    fn elapsed(start: Option<Instant>) -> u128 {
+        start.map(|t| t.elapsed().as_nanos()).unwrap_or(0)
+    }
+
+    #[inline]
+    fn add_backup(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.backup_ns += Self::elapsed(start);
+            self.backup_calls += 1;
+        }
+    }
+
+    #[inline]
+    fn add_dirty_list(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.dirty_list_ns += Self::elapsed(start);
+            self.dirty_list_calls += 1;
+        }
+    }
+
+    #[inline]
+    fn add_frame_write(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.frame_write_ns += Self::elapsed(start);
+            self.frame_write_calls += 1;
+        }
+    }
+
+    #[inline]
+    fn add_recompute(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.recompute_ns += Self::elapsed(start);
+            self.recompute_calls += 1;
+        }
+    }
+
+    #[inline]
+    fn add_aggregate(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.aggregate_ns += Self::elapsed(start);
+            self.aggregate_calls += 1;
+        }
+    }
+
+    #[inline]
+    fn add_restore(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.restore_ns += Self::elapsed(start);
+            self.restore_calls += 1;
+        }
+    }
+
+    #[inline]
+    fn add_forward(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.forward_ns += Self::elapsed(start);
+            self.forward_calls += 1;
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CodebookWeights {
@@ -398,17 +488,35 @@ pub struct IncrementalQuantizedCodebookEval {
     features_black: Vec<i32>,
     features_white: Vec<i32>,
     stack: Vec<QuantUndoRecord>,
+    stack_len: usize,
     last_dirty_cells: usize,
 }
 
 struct QuantUndoRecord {
-    changes: Vec<QuantCellUndo>,
-}
-
-struct QuantCellUndo {
-    cell: usize,
+    len: usize,
+    materialized: bool,
+    cells: [usize; MAX_DIRTY_CELLS],
+    pattern_ids: [[u16; 4]; MAX_DIRTY_CELLS],
     black: Vec<i32>,
     white: Vec<i32>,
+}
+
+impl QuantUndoRecord {
+    fn new(dim: usize) -> Self {
+        Self {
+            len: 0,
+            materialized: false,
+            cells: [0; MAX_DIRTY_CELLS],
+            pattern_ids: [[0u16; 4]; MAX_DIRTY_CELLS],
+            black: vec![0; MAX_DIRTY_CELLS * dim],
+            white: vec![0; MAX_DIRTY_CELLS * dim],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+        self.materialized = false;
+    }
 }
 
 impl IncrementalQuantizedCodebookEval {
@@ -419,7 +527,10 @@ impl IncrementalQuantizedCodebookEval {
             cell_white: vec![0; NUM_CELLS * weights.dim],
             features_black: vec![0; weights.feature_len()],
             features_white: vec![0; weights.feature_len()],
-            stack: Vec::with_capacity(NUM_CELLS),
+            stack: (0..NUM_CELLS)
+                .map(|_| QuantUndoRecord::new(weights.dim))
+                .collect(),
+            stack_len: 0,
             last_dirty_cells: 0,
         }
     }
@@ -463,126 +574,222 @@ impl IncrementalQuantizedCodebookEval {
             );
         }
 
-        self.stack.clear();
+        self.stack_len = 0;
         self.last_dirty_cells = 0;
     }
 
     pub fn push_move(&mut self, board: &Board, mv: Move, weights: &QuantizedCodebookWeights) {
+        let _ = self.push_move_profiled(board, mv, weights, false);
+    }
+
+    pub fn push_move_profiled(
+        &mut self,
+        board: &Board,
+        mv: Move,
+        weights: &QuantizedCodebookWeights,
+        _profile_enabled: bool,
+    ) -> EvalStateStepProfile {
         weights.validate();
-        let dirty = dirty_cells_for_move(mv);
-        let mut undo = QuantUndoRecord {
-            changes: Vec::with_capacity(dirty.len()),
+        let mut profile = EvalStateStepProfile {
+            push_calls: 1,
+            ..EvalStateStepProfile::default()
         };
+        let start = EvalStateStepProfile::start(_profile_enabled);
+        let dirty = dirty_cells_for_move(mv);
+        profile.add_dirty_list(start);
+        debug_assert!(dirty.len() <= MAX_DIRTY_CELLS);
+        debug_assert!(
+            self.stack_len < self.stack.len(),
+            "quantized codebook undo stack overflow"
+        );
+        let undo = &mut self.stack[self.stack_len];
+        undo.clear();
 
+        let start = EvalStateStepProfile::start(_profile_enabled);
         for cell in dirty.iter().copied() {
-            let old_black = quant_cell_slice(&self.cell_black, cell, weights.dim).to_vec();
-            let old_white = quant_cell_slice(&self.cell_white, cell, weights.dim).to_vec();
-
-            add_quant_cell_to_features(
-                &self.cell_black,
-                &mut self.features_black,
-                cell,
-                weights.dim,
-                -1,
-            );
-            add_quant_cell_to_features(
-                &self.cell_white,
-                &mut self.features_white,
-                cell,
-                weights.dim,
-                -1,
-            );
-
-            compute_cell_quantized(
-                board,
-                weights,
-                cell,
-                Stone::Black,
-                quant_cell_slice_mut(&mut self.cell_black, cell, weights.dim),
-            );
-            compute_cell_quantized(
-                board,
-                weights,
-                cell,
-                Stone::White,
-                quant_cell_slice_mut(&mut self.cell_white, cell, weights.dim),
-            );
-
-            add_quant_cell_to_features(
-                &self.cell_black,
-                &mut self.features_black,
-                cell,
-                weights.dim,
-                1,
-            );
-            add_quant_cell_to_features(
-                &self.cell_white,
-                &mut self.features_white,
-                cell,
-                weights.dim,
-                1,
-            );
-
-            undo.changes.push(QuantCellUndo {
-                cell,
-                black: old_black,
-                white: old_white,
-            });
+            let undo_idx = undo.len;
+            undo.cells[undo_idx] = cell;
+            undo.pattern_ids[undo_idx] = board.line_pattern_ids[cell];
+            undo.len += 1;
         }
+        profile.add_frame_write(start);
 
         self.last_dirty_cells = dirty.len();
-        self.stack.push(undo);
+        self.stack_len += 1;
+        profile
+    }
+
+    fn materialize_pending(
+        &mut self,
+        weights: &QuantizedCodebookWeights,
+        profile_enabled: bool,
+    ) -> EvalStateStepProfile {
+        let mut profile = EvalStateStepProfile::default();
+        for frame_idx in 0..self.stack_len {
+            if self.stack[frame_idx].materialized {
+                continue;
+            }
+            let undo = &mut self.stack[frame_idx];
+            for undo_idx in 0..undo.len {
+                let cell = undo.cells[undo_idx];
+                let undo_base = undo_idx * weights.dim;
+
+                let start = EvalStateStepProfile::start(profile_enabled);
+                undo.black[undo_base..undo_base + weights.dim].copy_from_slice(quant_cell_slice(
+                    &self.cell_black,
+                    cell,
+                    weights.dim,
+                ));
+                undo.white[undo_base..undo_base + weights.dim].copy_from_slice(quant_cell_slice(
+                    &self.cell_white,
+                    cell,
+                    weights.dim,
+                ));
+                profile.add_backup(start);
+
+                let start = EvalStateStepProfile::start(profile_enabled);
+                add_quant_cell_to_features(
+                    &self.cell_black,
+                    &mut self.features_black,
+                    cell,
+                    weights.dim,
+                    -1,
+                );
+                add_quant_cell_to_features(
+                    &self.cell_white,
+                    &mut self.features_white,
+                    cell,
+                    weights.dim,
+                    -1,
+                );
+                profile.add_aggregate(start);
+
+                let start = EvalStateStepProfile::start(profile_enabled);
+                compute_cell_quantized_from_pattern_ids(
+                    &undo.pattern_ids[undo_idx],
+                    weights,
+                    Stone::Black,
+                    quant_cell_slice_mut(&mut self.cell_black, cell, weights.dim),
+                );
+                compute_cell_quantized_from_pattern_ids(
+                    &undo.pattern_ids[undo_idx],
+                    weights,
+                    Stone::White,
+                    quant_cell_slice_mut(&mut self.cell_white, cell, weights.dim),
+                );
+                profile.add_recompute(start);
+
+                let start = EvalStateStepProfile::start(profile_enabled);
+                add_quant_cell_to_features(
+                    &self.cell_black,
+                    &mut self.features_black,
+                    cell,
+                    weights.dim,
+                    1,
+                );
+                add_quant_cell_to_features(
+                    &self.cell_white,
+                    &mut self.features_white,
+                    cell,
+                    weights.dim,
+                    1,
+                );
+                profile.add_aggregate(start);
+            }
+            undo.materialized = true;
+        }
+        profile
     }
 
     pub fn pop_move(&mut self, weights: &QuantizedCodebookWeights) {
-        let Some(undo) = self.stack.pop() else {
-            return;
-        };
-        for change in undo.changes.into_iter().rev() {
-            add_quant_cell_to_features(
-                &self.cell_black,
-                &mut self.features_black,
-                change.cell,
-                weights.dim,
-                -1,
-            );
-            add_quant_cell_to_features(
-                &self.cell_white,
-                &mut self.features_white,
-                change.cell,
-                weights.dim,
-                -1,
-            );
-
-            quant_cell_slice_mut(&mut self.cell_black, change.cell, weights.dim)
-                .copy_from_slice(&change.black);
-            quant_cell_slice_mut(&mut self.cell_white, change.cell, weights.dim)
-                .copy_from_slice(&change.white);
-
-            add_quant_cell_to_features(
-                &self.cell_black,
-                &mut self.features_black,
-                change.cell,
-                weights.dim,
-                1,
-            );
-            add_quant_cell_to_features(
-                &self.cell_white,
-                &mut self.features_white,
-                change.cell,
-                weights.dim,
-                1,
-            );
-        }
-        self.last_dirty_cells = 0;
+        let _ = self.pop_move_profiled(weights, false);
     }
 
-    pub fn value(&self, board: &Board, weights: &QuantizedCodebookWeights) -> f32 {
+    pub fn pop_move_profiled(
+        &mut self,
+        weights: &QuantizedCodebookWeights,
+        profile_enabled: bool,
+    ) -> EvalStateStepProfile {
+        let mut profile = EvalStateStepProfile {
+            pop_calls: 1,
+            ..EvalStateStepProfile::default()
+        };
+        if self.stack_len == 0 {
+            return profile;
+        }
+        self.stack_len -= 1;
+        let undo = &self.stack[self.stack_len];
+        if !undo.materialized {
+            self.last_dirty_cells = 0;
+            return profile;
+        }
+        for undo_idx in (0..undo.len).rev() {
+            let cell = undo.cells[undo_idx];
+            let undo_base = undo_idx * weights.dim;
+            let start = EvalStateStepProfile::start(profile_enabled);
+            add_quant_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                cell,
+                weights.dim,
+                -1,
+            );
+            add_quant_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                cell,
+                weights.dim,
+                -1,
+            );
+            profile.add_aggregate(start);
+
+            let start = EvalStateStepProfile::start(profile_enabled);
+            quant_cell_slice_mut(&mut self.cell_black, cell, weights.dim)
+                .copy_from_slice(&undo.black[undo_base..undo_base + weights.dim]);
+            quant_cell_slice_mut(&mut self.cell_white, cell, weights.dim)
+                .copy_from_slice(&undo.white[undo_base..undo_base + weights.dim]);
+            profile.add_restore(start);
+
+            let start = EvalStateStepProfile::start(profile_enabled);
+            add_quant_cell_to_features(
+                &self.cell_black,
+                &mut self.features_black,
+                cell,
+                weights.dim,
+                1,
+            );
+            add_quant_cell_to_features(
+                &self.cell_white,
+                &mut self.features_white,
+                cell,
+                weights.dim,
+                1,
+            );
+            profile.add_aggregate(start);
+        }
+        self.last_dirty_cells = 0;
+        profile
+    }
+
+    pub fn value(&mut self, board: &Board, weights: &QuantizedCodebookWeights) -> f32 {
+        self.value_profiled(board, weights, false).0
+    }
+
+    pub fn value_profiled(
+        &mut self,
+        board: &Board,
+        weights: &QuantizedCodebookWeights,
+        profile_enabled: bool,
+    ) -> (f32, EvalStateStepProfile) {
+        let mut profile = self.materialize_pending(weights, profile_enabled);
         let features = match board.side_to_move {
             Stone::Black => &self.features_black,
             Stone::White => &self.features_white,
         };
-        quant_value_from_features(features, weights)
+        let start = EvalStateStepProfile::start(profile_enabled);
+        let value = quant_value_from_features(features, weights);
+        profile.add_forward(start);
+        (value, profile)
     }
 
     pub fn last_dirty_cells(&self) -> usize {
@@ -601,7 +808,7 @@ pub fn dirty_cells_for_move(mv: Move) -> Vec<usize> {
     let row = (mv / BOARD_SIZE) as i32;
     let col = (mv % BOARD_SIZE) as i32;
     let mut seen = [false; NUM_CELLS];
-    let mut cells = Vec::with_capacity(41);
+    let mut cells = Vec::with_capacity(MAX_DIRTY_CELLS);
     for &(dr, dc) in &DIRS {
         for offset in -5i32..=5 {
             let r = row + dr * offset;
@@ -652,9 +859,23 @@ fn compute_cell_quantized(
     perspective: Stone,
     out: &mut [i32],
 ) {
+    compute_cell_quantized_from_pattern_ids(
+        &board.line_pattern_ids[cell],
+        weights,
+        perspective,
+        out,
+    );
+}
+
+fn compute_cell_quantized_from_pattern_ids(
+    pattern_ids: &[u16; 4],
+    weights: &QuantizedCodebookWeights,
+    perspective: Stone,
+    out: &mut [i32],
+) {
     out.fill(0);
     let swap = perspective == Stone::White;
-    for &pid in &board.line_pattern_ids[cell] {
+    for &pid in pattern_ids {
         let pid = if swap { swap_mapped_id(pid) } else { pid };
         let emb_base = pid as usize * weights.dim;
         for d in 0..weights.dim {

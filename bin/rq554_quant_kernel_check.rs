@@ -70,7 +70,7 @@ fn main() -> Result<(), String> {
                 stats.dirty_counts.push(inc.last_dirty_cells());
                 stats.transitions += 1;
                 played += 1;
-                record_position(&mut stats, &args, &board, &inc, &quant, &dequant);
+                record_position(&mut stats, &args, &board, &mut inc, &quant, &dequant);
             }
             for _ in 0..played {
                 board.undo_move();
@@ -131,7 +131,7 @@ fn record_position(
     stats: &mut Stats,
     args: &Args,
     board: &Board,
-    inc: &IncrementalQuantizedCodebookEval,
+    inc: &mut IncrementalQuantizedCodebookEval,
     quant: &figrid_board::codebook_eval::QuantizedCodebookWeights,
     dequant: &CodebookWeights,
 ) {

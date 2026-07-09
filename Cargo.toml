@@ -123,6 +123,11 @@ path = "bin/rq576_reach_mask_check.rs"
 name = "rq578-immediate-five-check"
 path = "bin/rq578_immediate_five_check.rs"
 
+[[bin]]
+name = "rq582-search-profile"
+path = "bin/rq582_search_profile.rs"
+required-features = ["codebook-eval"]
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

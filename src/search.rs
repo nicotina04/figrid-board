@@ -78,6 +78,11 @@ fn root_defensive_vct_veto_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("NORU_ROOT_DEFENSIVE_VCT_VETO", false))
 }
 
+fn search_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("NORU_SEARCH_PROFILE", false))
+}
+
 fn root_defensive_vct_budget(time_limit: Option<Duration>) -> Duration {
     match time_limit {
         Some(d) => (d / ROOT_DEFENSIVE_VCT_BUDGET_FRACTION)
@@ -640,6 +645,154 @@ pub struct SearchResult {
     pub nodes: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SearchProfileSnapshot {
+    pub enabled: bool,
+    pub total_ns: u128,
+    pub eval_ns: u128,
+    pub eval_calls: u64,
+    pub movegen_order_ns: u128,
+    pub movegen_order_calls: u64,
+    pub make_undo_ns: u128,
+    pub make_undo_calls: u64,
+    pub board_make_undo_ns: u128,
+    pub board_make_undo_calls: u64,
+    pub eval_state_push_pop_ns: u128,
+    pub eval_state_push_pop_calls: u64,
+    pub eval_state_dirty_list_ns: u128,
+    pub eval_state_dirty_list_calls: u64,
+    pub eval_state_frame_write_ns: u128,
+    pub eval_state_frame_write_calls: u64,
+    pub eval_state_backup_ns: u128,
+    pub eval_state_backup_calls: u64,
+    pub eval_state_recompute_ns: u128,
+    pub eval_state_recompute_calls: u64,
+    pub eval_state_aggregate_ns: u128,
+    pub eval_state_aggregate_calls: u64,
+    pub eval_state_restore_ns: u128,
+    pub eval_state_restore_calls: u64,
+    pub eval_state_forward_ns: u128,
+    pub eval_state_forward_calls: u64,
+    pub eval_state_push_calls: u64,
+    pub eval_state_pop_calls: u64,
+    pub tt_ns: u128,
+    pub tt_calls: u64,
+    pub root_vct_ns: u128,
+    pub root_vct_calls: u64,
+    pub qsearch_ns: u128,
+    pub qsearch_calls: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SearchProfileBucket {
+    Eval,
+    MovegenOrder,
+    MakeUndo,
+    BoardMakeUndo,
+    EvalStatePushPop,
+    Tt,
+    RootVct,
+    QSearch,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SearchProfile {
+    enabled: bool,
+    started_at: Option<Instant>,
+    snapshot: SearchProfileSnapshot,
+}
+
+impl SearchProfile {
+    fn reset(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        self.started_at = enabled.then(Instant::now);
+        self.snapshot = SearchProfileSnapshot {
+            enabled,
+            ..SearchProfileSnapshot::default()
+        };
+    }
+
+    #[inline]
+    fn start(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
+    }
+
+    #[inline]
+    fn add(&mut self, bucket: SearchProfileBucket, started_at: Option<Instant>) {
+        let Some(started_at) = started_at else {
+            return;
+        };
+        let elapsed = started_at.elapsed().as_nanos();
+        match bucket {
+            SearchProfileBucket::Eval => {
+                self.snapshot.eval_ns += elapsed;
+                self.snapshot.eval_calls += 1;
+            }
+            SearchProfileBucket::MovegenOrder => {
+                self.snapshot.movegen_order_ns += elapsed;
+                self.snapshot.movegen_order_calls += 1;
+            }
+            SearchProfileBucket::MakeUndo => {
+                self.snapshot.make_undo_ns += elapsed;
+                self.snapshot.make_undo_calls += 1;
+            }
+            SearchProfileBucket::BoardMakeUndo => {
+                self.snapshot.board_make_undo_ns += elapsed;
+                self.snapshot.board_make_undo_calls += 1;
+            }
+            SearchProfileBucket::EvalStatePushPop => {
+                self.snapshot.eval_state_push_pop_ns += elapsed;
+                self.snapshot.eval_state_push_pop_calls += 1;
+            }
+            SearchProfileBucket::Tt => {
+                self.snapshot.tt_ns += elapsed;
+                self.snapshot.tt_calls += 1;
+            }
+            SearchProfileBucket::RootVct => {
+                self.snapshot.root_vct_ns += elapsed;
+                self.snapshot.root_vct_calls += 1;
+            }
+            SearchProfileBucket::QSearch => {
+                self.snapshot.qsearch_ns += elapsed;
+                self.snapshot.qsearch_calls += 1;
+            }
+        }
+    }
+
+    #[inline]
+    fn add_eval_state_detail(&mut self, detail: crate::codebook_eval::EvalStateStepProfile) {
+        if !self.enabled {
+            return;
+        }
+        self.snapshot.eval_state_dirty_list_ns += detail.dirty_list_ns;
+        self.snapshot.eval_state_dirty_list_calls += detail.dirty_list_calls;
+        self.snapshot.eval_state_frame_write_ns += detail.frame_write_ns;
+        self.snapshot.eval_state_frame_write_calls += detail.frame_write_calls;
+        self.snapshot.eval_state_backup_ns += detail.backup_ns;
+        self.snapshot.eval_state_backup_calls += detail.backup_calls;
+        self.snapshot.eval_state_recompute_ns += detail.recompute_ns;
+        self.snapshot.eval_state_recompute_calls += detail.recompute_calls;
+        self.snapshot.eval_state_aggregate_ns += detail.aggregate_ns;
+        self.snapshot.eval_state_aggregate_calls += detail.aggregate_calls;
+        self.snapshot.eval_state_restore_ns += detail.restore_ns;
+        self.snapshot.eval_state_restore_calls += detail.restore_calls;
+        self.snapshot.eval_state_forward_ns += detail.forward_ns;
+        self.snapshot.eval_state_forward_calls += detail.forward_calls;
+        self.snapshot.eval_state_push_calls += detail.push_calls;
+        self.snapshot.eval_state_pop_calls += detail.pop_calls;
+    }
+
+    fn finish(&mut self) {
+        if let Some(started_at) = self.started_at {
+            self.snapshot.total_ns = started_at.elapsed().as_nanos();
+        }
+    }
+
+    fn snapshot(&self) -> SearchProfileSnapshot {
+        self.snapshot.clone()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RootCandidateAudit {
     pub mv: Move,
@@ -754,11 +907,24 @@ fn relation_score_prefers(candidate: Option<i32>, incumbent: Option<i32>) -> boo
 }
 
 trait SearchEvalState {
-    fn push_move(&mut self, board: &Board, mv: Move);
-    fn pop_move(&mut self);
-    fn eval(&self, board: &Board) -> i32;
-    fn eval_base(&self, board: &Board) -> i32 {
-        self.eval(board)
+    fn push_move(
+        &mut self,
+        board: &Board,
+        mv: Move,
+        profile_enabled: bool,
+    ) -> crate::codebook_eval::EvalStateStepProfile;
+    fn pop_move(&mut self, profile_enabled: bool) -> crate::codebook_eval::EvalStateStepProfile;
+    fn eval(
+        &mut self,
+        board: &Board,
+        profile_enabled: bool,
+    ) -> (i32, crate::codebook_eval::EvalStateStepProfile);
+    fn eval_base(
+        &mut self,
+        board: &Board,
+        profile_enabled: bool,
+    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
+        self.eval(board, profile_enabled)
     }
 }
 
@@ -776,20 +942,41 @@ impl<'a> FlatEvalState<'a> {
 }
 
 impl SearchEvalState for FlatEvalState<'_> {
-    fn push_move(&mut self, board: &Board, mv: Move) {
+    fn push_move(
+        &mut self,
+        board: &Board,
+        mv: Move,
+        _profile_enabled: bool,
+    ) -> crate::codebook_eval::EvalStateStepProfile {
         self.inc.push_move(board, mv, self.weights);
+        crate::codebook_eval::EvalStateStepProfile::default()
     }
 
-    fn pop_move(&mut self) {
+    fn pop_move(&mut self, _profile_enabled: bool) -> crate::codebook_eval::EvalStateStepProfile {
         self.inc.pop_move();
+        crate::codebook_eval::EvalStateStepProfile::default()
     }
 
-    fn eval(&self, board: &Board) -> i32 {
-        self.inc.eval(self.weights, board)
+    fn eval(
+        &mut self,
+        board: &Board,
+        _profile_enabled: bool,
+    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
+        (
+            self.inc.eval(self.weights, board),
+            crate::codebook_eval::EvalStateStepProfile::default(),
+        )
     }
 
-    fn eval_base(&self, board: &Board) -> i32 {
-        self.inc.eval_base(self.weights, board)
+    fn eval_base(
+        &mut self,
+        board: &Board,
+        _profile_enabled: bool,
+    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
+        (
+            self.inc.eval_base(self.weights, board),
+            crate::codebook_eval::EvalStateStepProfile::default(),
+        )
     }
 }
 
@@ -821,16 +1008,30 @@ impl<'a> CodebookEvalState<'a> {
 
 #[cfg(feature = "codebook-eval")]
 impl SearchEvalState for CodebookEvalState<'_> {
-    fn push_move(&mut self, board: &Board, mv: Move) {
+    fn push_move(
+        &mut self,
+        board: &Board,
+        mv: Move,
+        _profile_enabled: bool,
+    ) -> crate::codebook_eval::EvalStateStepProfile {
         self.inc.push_move(board, mv, self.weights);
+        crate::codebook_eval::EvalStateStepProfile::default()
     }
 
-    fn pop_move(&mut self) {
+    fn pop_move(&mut self, _profile_enabled: bool) -> crate::codebook_eval::EvalStateStepProfile {
         self.inc.pop_move(self.weights);
+        crate::codebook_eval::EvalStateStepProfile::default()
     }
 
-    fn eval(&self, board: &Board) -> i32 {
-        self.scaled_value(board)
+    fn eval(
+        &mut self,
+        board: &Board,
+        _profile_enabled: bool,
+    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
+        (
+            self.scaled_value(board),
+            crate::codebook_eval::EvalStateStepProfile::default(),
+        )
     }
 }
 
@@ -852,26 +1053,38 @@ impl<'a> QuantizedCodebookEvalState<'a> {
             scale,
         }
     }
-
-    fn scaled_value(&self, board: &Board) -> i32 {
-        (self.inc.value(board, self.weights) * self.scale)
-            .round()
-            .clamp(-(WIN_SCORE as f32 - 1.0), WIN_SCORE as f32 - 1.0) as i32
-    }
 }
 
 #[cfg(feature = "codebook-eval")]
 impl SearchEvalState for QuantizedCodebookEvalState<'_> {
-    fn push_move(&mut self, board: &Board, mv: Move) {
-        self.inc.push_move(board, mv, self.weights);
+    fn push_move(
+        &mut self,
+        board: &Board,
+        mv: Move,
+        profile_enabled: bool,
+    ) -> crate::codebook_eval::EvalStateStepProfile {
+        self.inc
+            .push_move_profiled(board, mv, self.weights, profile_enabled)
     }
 
-    fn pop_move(&mut self) {
-        self.inc.pop_move(self.weights);
+    fn pop_move(&mut self, profile_enabled: bool) -> crate::codebook_eval::EvalStateStepProfile {
+        self.inc.pop_move_profiled(self.weights, profile_enabled)
     }
 
-    fn eval(&self, board: &Board) -> i32 {
-        self.scaled_value(board)
+    fn eval(
+        &mut self,
+        board: &Board,
+        profile_enabled: bool,
+    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
+        let (value, detail) = self
+            .inc
+            .value_profiled(board, self.weights, profile_enabled);
+        (
+            (value * self.scale)
+                .round()
+                .clamp(-(WIN_SCORE as f32 - 1.0), WIN_SCORE as f32 - 1.0) as i32,
+            detail,
+        )
     }
 }
 
@@ -950,6 +1163,7 @@ pub struct Searcher {
     /// ???????遺얘턁????????ㅼ뒧??띤겫??눫????癲됱빖???嶺????????? ???????ル???? ?????????⑤슢堉??곕?????????????????????뀀맩鍮???????
     /// search ???遺얘턁??????????????????⑤벡瑜??????耀붾굝????????iterative deepening ???????롮쾸?椰???iteration?????    /// ?????????대첐??iteration??PV/cutoff ???遺얘턁?????????????????ル탛????????耀붾굝???????????
     tt: TranspositionTable,
+    profile: SearchProfile,
 }
 
 impl Searcher {
@@ -966,6 +1180,7 @@ impl Searcher {
             node_limit: None,
             node_limit_hit: false,
             tt: TranspositionTable::new(TT_BUCKET_BITS),
+            profile: SearchProfile::default(),
         }
     }
 
@@ -990,6 +1205,20 @@ impl Searcher {
         self.tt.occupancy()
     }
 
+    pub fn search_profile(&self) -> SearchProfileSnapshot {
+        self.profile.snapshot()
+    }
+
+    #[inline]
+    fn profile_start(&self) -> Option<Instant> {
+        self.profile.start()
+    }
+
+    #[inline]
+    fn profile_add(&mut self, bucket: SearchProfileBucket, started_at: Option<Instant>) {
+        self.profile.add(bucket, started_at);
+    }
+
     fn reset_for_search(&mut self, time_limit: Option<Duration>) {
         self.nodes = 0;
         self.tt_cutoffs = 0;
@@ -1007,6 +1236,7 @@ impl Searcher {
         self.deadline = time_limit.map(|d| Instant::now() + d);
         self.tt.reset_stats();
         self.tt.clear();
+        self.profile.reset(search_profile_enabled());
     }
 
     fn try_root_vct(
@@ -1042,7 +1272,10 @@ impl Searcher {
             use_fast_immediate_five: false,
             use_vct_scratch_buffers: false,
         };
-        if let Some(seq) = search_vct(board, &vct_cfg) {
+        let profile_start = self.profile_start();
+        let seq = search_vct(board, &vct_cfg);
+        self.profile_add(SearchProfileBucket::RootVct, profile_start);
+        if let Some(seq) = seq {
             if let Some(&first) = seq.first() {
                 let result = SearchResult {
                     best_move: Some(first),
@@ -1062,6 +1295,7 @@ impl Searcher {
                         &[],
                     );
                 }
+                self.profile.finish();
                 return Some(result);
             }
         }
@@ -1242,6 +1476,7 @@ impl Searcher {
             );
         }
 
+        self.profile.finish();
         best_result
     }
 
@@ -1272,6 +1507,7 @@ impl Searcher {
         // ???????롮쾸?椰???search ???遺얘턁????????????癲됱빖???嶺???????????????????????????롮쾸?椰?嚥▲굧???븍툖????????곗뵰?????TT ????.
         // ???????ル???? search() ???遺얘턁?????????iterative deepening ????????TT???????ル??? ??????耀붾굝????????        // ???????????? iteration????? iteration??cutoff/PV ???遺얘턁?????????????????ル탛????????耀붾굝???????????
         self.tt.clear();
+        self.profile.reset(search_profile_enabled());
         let root_search_decision_audit =
             crate::candidate_local_ensemble::root_search_decision_audit_enabled();
 
@@ -1302,7 +1538,10 @@ impl Searcher {
                 use_fast_immediate_five: false,
                 use_vct_scratch_buffers: false,
             };
-            if let Some(seq) = search_vct(board, &vct_cfg) {
+            let profile_start = self.profile_start();
+            let seq = search_vct(board, &vct_cfg);
+            self.profile_add(SearchProfileBucket::RootVct, profile_start);
+            if let Some(seq) = seq {
                 if let Some(&first) = seq.first() {
                     let result = SearchResult {
                         best_move: Some(first),
@@ -1322,6 +1561,7 @@ impl Searcher {
                             &[],
                         );
                     }
+                    self.profile.finish();
                     return result;
                 }
             }
@@ -1510,6 +1750,7 @@ impl Searcher {
             );
         }
 
+        self.profile.finish();
         best_result
     }
 
@@ -1820,7 +2061,9 @@ impl Searcher {
         };
         let codebook_gate_mode = crate::codebook_sidecar::root_gate_mode();
 
+        let profile_start = self.profile_start();
         let mut moves = self.order_moves(board, 0, weights);
+        self.profile_add(SearchProfileBucket::MovegenOrder, profile_start);
         let relation_fusion_order = if crate::relation_fusion_gate::enabled_for(board) {
             Some(moves.clone())
         } else {
@@ -1865,10 +2108,19 @@ impl Searcher {
             let next_zob = board.zobrist
                 ^ crate::board::zobrist_stone_key(board.side_to_move, mv)
                 ^ crate::board::ZOBRIST_SIDE;
+            let profile_start = self.profile_start();
             self.tt.prefetch(next_zob);
+            self.profile_add(SearchProfileBucket::Tt, profile_start);
 
+            let make_undo_profile_start = self.profile_start();
+            let profile_start = self.profile_start();
             board.make_move(mv);
-            inc.push_move(board, mv);
+            self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            let profile_start = self.profile_start();
+            let detail = inc.push_move(board, mv, self.profile.enabled);
+            self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
+            self.profile.add_eval_state_detail(detail);
+            self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
 
             let is_killer = self.killers[0][0] == Some(mv) || self.killers[0][1] == Some(mv);
 
@@ -1895,14 +2147,24 @@ impl Searcher {
                 && !self.aborted
                 && !is_win_score(score)
             {
-                let child_base = inc.eval_base(board);
+                let profile_start = self.profile_start();
+                let (child_base, detail) = inc.eval_base(board, self.profile.enabled);
+                self.profile_add(SearchProfileBucket::Eval, profile_start);
+                self.profile.add_eval_state_detail(detail);
                 crate::relation_lite::root_candidate_eval(board, child_base).map(|child| -child)
             } else {
                 None
             };
 
-            inc.pop_move();
+            let make_undo_profile_start = self.profile_start();
+            let profile_start = self.profile_start();
+            let detail = inc.pop_move(self.profile.enabled);
+            self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
+            self.profile.add_eval_state_detail(detail);
+            let profile_start = self.profile_start();
             board.undo_move();
+            self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
 
             let candidate_rank_gate = if use_candidate_ranker {
                 crate::candidate_ranker::root_gate_key(board, mv)
@@ -2208,8 +2470,10 @@ impl Searcher {
         mut alpha: i32,
         beta: i32,
     ) -> i32 {
+        let qsearch_profile_start = self.profile_start();
         self.nodes += 1;
         if self.check_node_limit() {
+            self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return 0;
         }
 
@@ -2241,7 +2505,9 @@ impl Searcher {
         // ???????ル???? zobrist key + ???汝뷴젆?琉??誘↔덱???????depth?????? ?????????????⑤챷竊???????
         // bound ????????源낅펰???????????산뭐???alpha/beta cutoff ???????ル?????
         let original_alpha = alpha;
+        let profile_start = self.profile_start();
         let tt_hit = self.tt.probe(board.zobrist);
+        self.profile_add(SearchProfileBucket::Tt, profile_start);
         let mut tt_move: Option<Move> = None;
         if let Some(entry) = tt_hit {
             tt_move = if entry.best_move == u16::MAX {
@@ -2278,7 +2544,9 @@ impl Searcher {
             depth
         };
 
+        let profile_start = self.profile_start();
         let mut moves = self.order_moves(board, ply, weights);
+        self.profile_add(SearchProfileBucket::MovegenOrder, profile_start);
         if moves.is_empty() {
             return 0;
         }
@@ -2345,7 +2613,9 @@ impl Searcher {
             let next_zob = board.zobrist
                 ^ crate::board::zobrist_stone_key(board.side_to_move, mv)
                 ^ crate::board::ZOBRIST_SIDE;
+            let profile_start = self.profile_start();
             self.tt.prefetch(next_zob);
+            self.profile_add(SearchProfileBucket::Tt, profile_start);
 
             // Track quiet move ordering for continuation-history penalties on
             // a later cutoff (skipped for forcing moves ??those carry their
@@ -2354,8 +2624,15 @@ impl Searcher {
                 quiets_tried.push(mv);
             }
 
+            let make_undo_profile_start = self.profile_start();
+            let profile_start = self.profile_start();
             board.make_move(mv);
-            inc.push_move(board, mv);
+            self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            let profile_start = self.profile_start();
+            let detail = inc.push_move(board, mv, self.profile.enabled);
+            self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
+            self.profile.add_eval_state_detail(detail);
+            self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
 
             let score = if move_idx == 0 {
                 -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -alpha)
@@ -2389,8 +2666,15 @@ impl Searcher {
                 }
             };
 
-            inc.pop_move();
+            let make_undo_profile_start = self.profile_start();
+            let profile_start = self.profile_start();
+            let detail = inc.pop_move(self.profile.enabled);
+            self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
+            self.profile.add_eval_state_detail(detail);
+            let profile_start = self.profile_start();
             board.undo_move();
+            self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
 
             if self.aborted {
                 return 0;
@@ -2449,6 +2733,7 @@ impl Searcher {
             Bound::Exact
         };
         // depth???????ル??? u8????????????????????ル?????saturate. ?????????녳븢??max_depth ??20??????????????????????대첉??
+        let profile_start = self.profile_start();
         self.tt.store(
             board.zobrist,
             best_score,
@@ -2456,6 +2741,7 @@ impl Searcher {
             bound,
             best_move_at_node,
         );
+        self.profile_add(SearchProfileBucket::Tt, profile_start);
 
         best_score
     }
@@ -2473,8 +2759,10 @@ impl Searcher {
         mut alpha: i32,
         beta: i32,
     ) -> i32 {
+        let qsearch_profile_start = self.profile_start();
         self.nodes += 1;
         if self.check_node_limit() {
+            self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return 0;
         }
 
@@ -2482,6 +2770,7 @@ impl Searcher {
             if let Some(deadline) = self.deadline {
                 if Instant::now() >= deadline {
                     self.aborted = true;
+                    self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
                     return 0;
                 }
             }
@@ -2489,17 +2778,27 @@ impl Searcher {
 
         match board.game_result() {
             GameResult::BlackWin | GameResult::WhiteWin => {
-                return -(WIN_SCORE - ply as i32);
+                let score = -(WIN_SCORE - ply as i32);
+                self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
+                return score;
             }
-            GameResult::Draw => return 0,
+            GameResult::Draw => {
+                self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
+                return 0;
+            }
             GameResult::Ongoing => {}
         }
 
-        let stand_pat = inc.eval(board);
+        let profile_start = self.profile_start();
+        let (stand_pat, detail) = inc.eval(board, self.profile.enabled);
+        self.profile_add(SearchProfileBucket::Eval, profile_start);
+        self.profile.add_eval_state_detail(detail);
         if qply >= QSEARCH_MAX_PLY {
+            self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
         if stand_pat >= beta {
+            self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
         if stand_pat > alpha {
@@ -2508,6 +2807,7 @@ impl Searcher {
 
         let candidates = board.candidate_moves();
         if candidates.is_empty() {
+            self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
 
@@ -2566,6 +2866,7 @@ impl Searcher {
         }
 
         if forcing.is_empty() {
+            self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
 
@@ -2573,13 +2874,28 @@ impl Searcher {
 
         let mut best = stand_pat;
         for &(mv, _) in &forcing {
+            let make_undo_profile_start = self.profile_start();
+            let profile_start = self.profile_start();
             board.make_move(mv);
-            inc.push_move(board, mv);
+            self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            let profile_start = self.profile_start();
+            let detail = inc.push_move(board, mv, self.profile.enabled);
+            self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
+            self.profile.add_eval_state_detail(detail);
+            self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
             let score = -self.qsearch(board, weights, inc, qply + 1, ply + 1, -beta, -alpha);
-            inc.pop_move();
+            let make_undo_profile_start = self.profile_start();
+            let profile_start = self.profile_start();
+            let detail = inc.pop_move(self.profile.enabled);
+            self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
+            self.profile.add_eval_state_detail(detail);
+            let profile_start = self.profile_start();
             board.undo_move();
+            self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
+            self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
 
             if self.aborted {
+                self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
                 return 0;
             }
 
@@ -2594,6 +2910,7 @@ impl Searcher {
             }
         }
 
+        self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
         best
     }
 

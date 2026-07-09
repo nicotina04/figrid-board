@@ -1,4 +1,4 @@
-use figrid_board::threat_field::threat_field_transition_check_for_audit;
+use figrid_board::threat_field::{ThreatFieldUpdateMode, threat_field_transition_check_for_audit};
 use figrid_board::{BOARD_SIZE, Move, to_idx};
 use serde_json::{Value, json};
 use std::env;
@@ -10,6 +10,7 @@ struct Args {
     games_jsonl: PathBuf,
     out_json: PathBuf,
     max_transitions: usize,
+    mode: ThreatFieldUpdateMode,
 }
 
 #[derive(Default)]
@@ -53,7 +54,7 @@ fn main() -> Result<(), String> {
             if take == 0 {
                 continue;
             }
-            match threat_field_transition_check_for_audit(&game.moves[..take]) {
+            match threat_field_transition_check_for_audit(&game.moves[..take], args.mode) {
                 Ok((transitions, undos)) => {
                     stats.checked_games += 1;
                     stats.transitions += transitions;
@@ -76,6 +77,7 @@ fn main() -> Result<(), String> {
     let passed = first_error.is_null();
     let report = json!({
         "format": "rq587-threat-field-check-v1",
+        "mode": format!("{:?}", args.mode),
         "games_jsonl": args.games_jsonl,
         "max_transitions": args.max_transitions,
         "stats": {
@@ -146,6 +148,7 @@ fn parse_args() -> Result<Args, String> {
     let mut games_jsonl = None;
     let mut out_json = None;
     let mut max_transitions = 100_000usize;
+    let mut mode = ThreatFieldUpdateMode::Eager;
 
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -157,6 +160,8 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("invalid --max-transitions: {e}"))?
             }
+            "--eager" => mode = ThreatFieldUpdateMode::Eager,
+            "--lazy" => mode = ThreatFieldUpdateMode::Lazy,
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -169,6 +174,7 @@ fn parse_args() -> Result<Args, String> {
         games_jsonl: games_jsonl.ok_or("missing --games-jsonl")?,
         out_json: out_json.ok_or("missing --out-json")?,
         max_transitions,
+        mode,
     })
 }
 
@@ -178,6 +184,6 @@ fn next_arg(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String,
 
 fn print_help() {
     eprintln!(
-        "usage: rq587-threat-field-check --games-jsonl games.jsonl --out-json out.json [--max-transitions 100000]"
+        "usage: rq587-threat-field-check --games-jsonl games.jsonl --out-json out.json [--max-transitions 100000] [--eager|--lazy]"
     );
 }

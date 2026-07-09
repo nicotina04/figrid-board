@@ -18,6 +18,8 @@ struct Args {
     time_ms: Option<u64>,
     eval: String,
     use_threat_field: bool,
+    use_lazy_threat_field: bool,
+    stress_threat_field: bool,
 }
 
 impl Args {
@@ -30,6 +32,8 @@ impl Args {
         let mut time_ms = None;
         let mut eval = "flat".to_string();
         let mut use_threat_field = false;
+        let mut use_lazy_threat_field = false;
+        let mut stress_threat_field = false;
 
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -66,8 +70,20 @@ impl Args {
                     );
                 }
                 "--eval" => eval = it.next().ok_or("--eval requires a value")?,
-                "--use-threat-field" => use_threat_field = true,
-                "--no-threat-field" => use_threat_field = false,
+                "--use-threat-field" => {
+                    use_threat_field = true;
+                    use_lazy_threat_field = false;
+                }
+                "--use-lazy-threat-field" => {
+                    use_threat_field = false;
+                    use_lazy_threat_field = true;
+                }
+                "--no-threat-field" => {
+                    use_threat_field = false;
+                    use_lazy_threat_field = false;
+                    stress_threat_field = false;
+                }
+                "--stress-threat-field" => stress_threat_field = true,
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument `{other}`\n{}", usage())),
             }
@@ -86,6 +102,8 @@ impl Args {
             time_ms,
             eval,
             use_threat_field,
+            use_lazy_threat_field,
+            stress_threat_field,
         })
     }
 }
@@ -93,7 +111,8 @@ impl Args {
 fn usage() -> String {
     "usage: rq582-search-profile --input games.jsonl [--output out.jsonl] \
      [--eval flat|codebook-quant] [--depth N] [--time-ms MS] [--limit N] \
-     [--sample-every N] [--use-threat-field|--no-threat-field]\n\
+     [--sample-every N] [--use-threat-field|--use-lazy-threat-field|--no-threat-field] \
+     [--stress-threat-field]\n\
      Set NORU_SEARCH_PROFILE=1 to record profile buckets."
         .to_string()
 }
@@ -221,6 +240,8 @@ fn main() -> Result<(), String> {
                     let mut search_board = board.clone();
                     let mut searcher = Searcher::new();
                     searcher.set_use_threat_field(args.use_threat_field);
+                    searcher.set_use_lazy_threat_field(args.use_lazy_threat_field);
+                    searcher.set_stress_threat_field(args.stress_threat_field);
                     let started = Instant::now();
                     let result = match args.eval.as_str() {
                         "flat" => searcher.search(
@@ -253,6 +274,8 @@ fn main() -> Result<(), String> {
                         "depth": args.depth,
                         "time_ms_limit": args.time_ms,
                         "use_threat_field": args.use_threat_field,
+                        "use_lazy_threat_field": args.use_lazy_threat_field,
+                        "stress_threat_field": args.stress_threat_field,
                         "elapsed_ms": elapsed_ms,
                         "best_move": best_move,
                         "score": result.score,

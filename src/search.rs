@@ -12,7 +12,7 @@ use crate::codebook_eval::{
 };
 use crate::eval::IncrementalEval;
 use crate::heuristic::{DIR, scan_line};
-use crate::threat_field::IncrementalThreatField;
+use crate::threat_field::{IncrementalThreatField, ThreatFieldUpdateMode};
 use crate::transposition::{Bound, TranspositionTable, TtStats};
 use crate::vct::{THREAT_KIND_COUNT, ThreatKind, VctConfig, classify_move_fast, search_vct};
 use noru::network::NnueWeights;
@@ -84,9 +84,29 @@ fn search_profile_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("NORU_SEARCH_PROFILE", false))
 }
 
-fn threat_field_enabled_by_env() -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchThreatFieldMode {
+    Off,
+    Eager,
+    Lazy,
+}
+
+fn threat_field_mode_by_env() -> SearchThreatFieldMode {
+    static MODE: OnceLock<SearchThreatFieldMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        if env_flag_enabled("NORU_USE_LAZY_THREAT_FIELD", false) {
+            SearchThreatFieldMode::Lazy
+        } else if env_flag_enabled("NORU_USE_THREAT_FIELD", false) {
+            SearchThreatFieldMode::Eager
+        } else {
+            SearchThreatFieldMode::Off
+        }
+    })
+}
+
+fn threat_field_stress_enabled_by_env() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("NORU_USE_THREAT_FIELD", false))
+    *ENABLED.get_or_init(|| env_flag_enabled("NORU_STRESS_THREAT_FIELD", false))
 }
 
 fn root_defensive_vct_budget(time_limit: Option<Duration>) -> Duration {
@@ -1170,7 +1190,8 @@ pub struct Searcher {
     /// search ???遺얘턁??????????????????⑤벡瑜??????耀붾굝????????iterative deepening ???????롮쾸?椰???iteration?????    /// ?????????대첐??iteration??PV/cutoff ???遺얘턁?????????????????ル탛????????耀붾굝???????????
     tt: TranspositionTable,
     profile: SearchProfile,
-    use_threat_field: bool,
+    threat_field_mode: SearchThreatFieldMode,
+    stress_threat_field: bool,
     threat_field: Option<IncrementalThreatField>,
 }
 
@@ -1189,7 +1210,8 @@ impl Searcher {
             node_limit_hit: false,
             tt: TranspositionTable::new(TT_BUCKET_BITS),
             profile: SearchProfile::default(),
-            use_threat_field: threat_field_enabled_by_env(),
+            threat_field_mode: threat_field_mode_by_env(),
+            stress_threat_field: threat_field_stress_enabled_by_env(),
             threat_field: None,
         }
     }
@@ -1220,15 +1242,34 @@ impl Searcher {
     }
 
     pub fn set_use_threat_field(&mut self, enabled: bool) {
-        self.use_threat_field = enabled;
+        self.threat_field_mode = if enabled {
+            SearchThreatFieldMode::Eager
+        } else {
+            SearchThreatFieldMode::Off
+        };
         if !enabled {
             self.threat_field = None;
         }
     }
 
+    pub fn set_use_lazy_threat_field(&mut self, enabled: bool) {
+        self.threat_field_mode = if enabled {
+            SearchThreatFieldMode::Lazy
+        } else {
+            SearchThreatFieldMode::Off
+        };
+        if !enabled {
+            self.threat_field = None;
+        }
+    }
+
+    pub fn set_stress_threat_field(&mut self, enabled: bool) {
+        self.stress_threat_field = enabled;
+    }
+
     #[inline]
     pub fn use_threat_field(&self) -> bool {
-        self.use_threat_field
+        self.threat_field_mode != SearchThreatFieldMode::Off
     }
 
     #[inline]
@@ -1242,13 +1283,18 @@ impl Searcher {
     }
 
     fn reset_threat_field(&mut self, board: &Board) {
-        if self.use_threat_field {
-            match self.threat_field.as_mut() {
-                Some(field) => field.refresh(board),
-                None => self.threat_field = Some(IncrementalThreatField::new(board)),
+        match self.threat_field_mode {
+            SearchThreatFieldMode::Off => {
+                self.threat_field = None;
             }
-        } else {
-            self.threat_field = None;
+            SearchThreatFieldMode::Eager | SearchThreatFieldMode::Lazy => {
+                let mode = match self.threat_field_mode {
+                    SearchThreatFieldMode::Eager => ThreatFieldUpdateMode::Eager,
+                    SearchThreatFieldMode::Lazy => ThreatFieldUpdateMode::Lazy,
+                    SearchThreatFieldMode::Off => unreachable!(),
+                };
+                self.threat_field = Some(IncrementalThreatField::with_mode(board, mode));
+            }
         }
     }
 
@@ -1263,6 +1309,16 @@ impl Searcher {
     fn pop_threat_field(&mut self, board: &Board) {
         if let Some(field) = self.threat_field.as_mut() {
             field.pop_move(board);
+        }
+    }
+
+    #[inline]
+    fn stress_threat_field_query(&mut self, board: &Board) {
+        if self.stress_threat_field {
+            if let Some(field) = self.threat_field.as_mut() {
+                let _ = field.immediate_five(board, Stone::Black);
+                let _ = field.immediate_five(board, Stone::White);
+            }
         }
     }
 
@@ -2170,6 +2226,7 @@ impl Searcher {
             board.make_move(mv);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
             self.push_threat_field(board, mv);
+            self.stress_threat_field_query(board);
             let profile_start = self.profile_start();
             let detail = inc.push_move(board, mv, self.profile.enabled);
             self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
@@ -2684,6 +2741,7 @@ impl Searcher {
             board.make_move(mv);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
             self.push_threat_field(board, mv);
+            self.stress_threat_field_query(board);
             let profile_start = self.profile_start();
             let detail = inc.push_move(board, mv, self.profile.enabled);
             self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
@@ -2936,6 +2994,7 @@ impl Searcher {
             board.make_move(mv);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
             self.push_threat_field(board, mv);
+            self.stress_threat_field_query(board);
             let profile_start = self.profile_start();
             let detail = inc.push_move(board, mv, self.profile.enabled);
             self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);

@@ -9,6 +9,12 @@ use crate::vct::{THREAT_KIND_COUNT, ThreatKind, classify_move_fast_with_flags};
 
 const SIDES: usize = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreatFieldUpdateMode {
+    Eager,
+    Lazy,
+}
+
 #[derive(Clone)]
 struct ThreatFieldFrame {
     len: u8,
@@ -40,14 +46,19 @@ impl ThreatFieldFrame {
 
 #[derive(Clone)]
 pub struct IncrementalThreatField {
+    mode: ThreatFieldUpdateMode,
     cell_kinds: Box<[[u8; NUM_CELLS]; SIDES]>,
     tier_sources: [[BitBoard; THREAT_KIND_COUNT]; SIDES],
+    dirty_cells: BitBoard,
     frames: Vec<ThreatFieldFrame>,
 }
 
-pub fn threat_field_transition_check_for_audit(moves: &[Move]) -> Result<(usize, usize), String> {
+pub fn threat_field_transition_check_for_audit(
+    moves: &[Move],
+    mode: ThreatFieldUpdateMode,
+) -> Result<(usize, usize), String> {
     let mut board = Board::new();
-    let mut field = IncrementalThreatField::new(&board);
+    let mut field = IncrementalThreatField::with_mode(&board, mode);
     let mut transitions = 0usize;
     for &mv in moves {
         if !board.is_empty(mv) {
@@ -83,9 +94,19 @@ pub fn threat_field_transition_check_for_audit(moves: &[Move]) -> Result<(usize,
 
 impl IncrementalThreatField {
     pub fn new(board: &Board) -> Self {
+        Self::with_mode(board, ThreatFieldUpdateMode::Eager)
+    }
+
+    pub fn new_lazy(board: &Board) -> Self {
+        Self::with_mode(board, ThreatFieldUpdateMode::Lazy)
+    }
+
+    pub fn with_mode(board: &Board, mode: ThreatFieldUpdateMode) -> Self {
         let mut field = Self {
+            mode,
             cell_kinds: Box::new([[ThreatKind::None as u8; NUM_CELLS]; SIDES]),
             tier_sources: [[BitBoard::EMPTY; THREAT_KIND_COUNT]; SIDES],
+            dirty_cells: BitBoard::EMPTY,
             frames: Vec::with_capacity(NUM_CELLS),
         };
         field.refresh(board);
@@ -94,6 +115,7 @@ impl IncrementalThreatField {
 
     pub fn refresh(&mut self, board: &Board) {
         self.frames.clear();
+        self.dirty_cells = BitBoard::EMPTY;
         self.cell_kinds.fill([ThreatKind::None as u8; NUM_CELLS]);
         self.tier_sources = [[BitBoard::EMPTY; THREAT_KIND_COUNT]; SIDES];
         for cell in 0..NUM_CELLS {
@@ -103,8 +125,15 @@ impl IncrementalThreatField {
 
     pub fn push_move(&mut self, board: &Board, mv: Move) {
         let frame = ThreatFieldFrame::from_move(mv);
-        for cell in frame.cells() {
-            self.recompute_cell(board, cell);
+        match self.mode {
+            ThreatFieldUpdateMode::Eager => {
+                for cell in frame.cells() {
+                    self.recompute_cell(board, cell);
+                }
+            }
+            ThreatFieldUpdateMode::Lazy => {
+                self.mark_dirty(&frame);
+            }
         }
         self.frames.push(frame);
     }
@@ -114,23 +143,33 @@ impl IncrementalThreatField {
             debug_assert!(false, "threat-field pop without matching push");
             return;
         };
-        for cell in frame.cells() {
-            self.recompute_cell(board, cell);
+        match self.mode {
+            ThreatFieldUpdateMode::Eager => {
+                for cell in frame.cells() {
+                    self.recompute_cell(board, cell);
+                }
+            }
+            ThreatFieldUpdateMode::Lazy => {
+                self.mark_dirty(&frame);
+            }
         }
     }
 
     #[inline]
-    pub fn immediate_five(&self, side: Stone) -> BitBoard {
+    pub fn immediate_five(&mut self, board: &Board, side: Stone) -> BitBoard {
+        self.materialize_pending(board);
         self.tier_sources[side_idx(side)][ThreatKind::Five as usize]
     }
 
     #[inline]
-    pub fn tier_sources(&self, side: Stone, kind: ThreatKind) -> BitBoard {
+    pub fn tier_sources(&mut self, board: &Board, side: Stone, kind: ThreatKind) -> BitBoard {
+        self.materialize_pending(board);
         self.tier_sources[side_idx(side)][kind as usize]
     }
 
     #[inline]
-    pub fn cell_kind(&self, side: Stone, cell: Move) -> ThreatKind {
+    pub fn cell_kind(&mut self, board: &Board, side: Stone, cell: Move) -> ThreatKind {
+        self.materialize_pending(board);
         threat_kind_from_u8(self.cell_kinds[side_idx(side)][cell])
     }
 
@@ -139,11 +178,17 @@ impl IncrementalThreatField {
         self.frames.len()
     }
 
-    pub fn matches_rebuild(&self, board: &Board) -> bool {
+    #[inline]
+    pub fn pending_dirty_count(&self) -> u32 {
+        self.dirty_cells.count_ones()
+    }
+
+    pub fn matches_rebuild(&mut self, board: &Board) -> bool {
         self.first_mismatch(board).is_none()
     }
 
-    pub fn first_mismatch(&self, board: &Board) -> Option<String> {
+    pub fn first_mismatch(&mut self, board: &Board) -> Option<String> {
+        self.materialize_pending(board);
         let rebuilt = IncrementalThreatField::new(board);
         for side in [Stone::Black, Stone::White] {
             let s = side_idx(side);
@@ -166,6 +211,23 @@ impl IncrementalThreatField {
             }
         }
         None
+    }
+
+    fn materialize_pending(&mut self, board: &Board) {
+        if self.dirty_cells == BitBoard::EMPTY {
+            return;
+        }
+        let dirty = self.dirty_cells;
+        self.dirty_cells = BitBoard::EMPTY;
+        for cell in dirty.iter_ones() {
+            self.recompute_cell(board, cell);
+        }
+    }
+
+    fn mark_dirty(&mut self, frame: &ThreatFieldFrame) {
+        for cell in frame.cells() {
+            self.dirty_cells.set(cell);
+        }
     }
 
     fn recompute_cell(&mut self, board: &Board, cell: Move) {
@@ -233,12 +295,16 @@ mod tests {
         board.make_move(to_idx(0, 2));
         board.make_move(to_idx(7, 6));
 
-        let field = IncrementalThreatField::new(&board);
+        let mut field = IncrementalThreatField::new(&board);
         let win = to_idx(7, 7);
-        assert_eq!(field.cell_kind(Stone::Black, win), ThreatKind::Five);
-        assert!(field.immediate_five(Stone::Black).get(win));
-        assert!(field.tier_sources(Stone::Black, ThreatKind::Five).get(win));
-        assert_eq!(field.cell_kind(Stone::White, win), ThreatKind::None);
+        assert_eq!(field.cell_kind(&board, Stone::Black, win), ThreatKind::Five);
+        assert!(field.immediate_five(&board, Stone::Black).get(win));
+        assert!(
+            field
+                .tier_sources(&board, Stone::Black, ThreatKind::Five)
+                .get(win)
+        );
+        assert_eq!(field.cell_kind(&board, Stone::White, win), ThreatKind::None);
     }
 
     #[test]
@@ -277,9 +343,27 @@ mod tests {
         let moves = [
             112, 113, 97, 98, 127, 128, 111, 114, 96, 99, 126, 129, 82, 83, 84, 85,
         ];
-        let (transitions, undos) = threat_field_transition_check_for_audit(&moves).unwrap();
+        let (transitions, undos) =
+            threat_field_transition_check_for_audit(&moves, ThreatFieldUpdateMode::Lazy).unwrap();
         assert_eq!(transitions, moves.len());
         assert_eq!(undos, moves.len());
+    }
+
+    #[test]
+    fn lazy_threat_field_defers_until_query() {
+        let moves = [112, 113, 97, 98];
+        let mut board = Board::new();
+        let mut field = IncrementalThreatField::new_lazy(&board);
+        assert_eq!(field.pending_dirty_count(), 0);
+
+        for &mv in &moves {
+            board.make_move(mv);
+            field.push_move(&board, mv);
+            assert!(field.pending_dirty_count() > 0);
+        }
+
+        assert!(field.matches_rebuild(&board));
+        assert_eq!(field.pending_dirty_count(), 0);
     }
 
     #[test]
@@ -287,7 +371,7 @@ mod tests {
     fn threat_field_100k_transition_gate() {
         let mut rng = TestRng::new(0x5870_0001);
         let mut board = Board::new();
-        let mut field = IncrementalThreatField::new(&board);
+        let mut field = IncrementalThreatField::new_lazy(&board);
         let mut transitions = 0usize;
         let mut mismatch = 0usize;
         let mut undo_fail = 0usize;

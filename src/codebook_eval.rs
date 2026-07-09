@@ -4,105 +4,16 @@
 //! correctness gate. It is deliberately feature-gated and is not wired into
 //! search by default.
 
-use serde_json::Value;
-use std::time::Instant;
-
 use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
 use crate::pattern_table::{PATTERN_NUM_IDS, swap_mapped_id};
+pub use crate::search::EvalStateStepProfile;
+use serde_json::Value;
 
 const MAX_DIRTY_CELLS: usize = 41;
 const REGIONS: usize = 9;
 pub const QUANT_EMBED_SCALE: i32 = 32;
 pub const QUANT_HEAD_SCALE: i32 = 64;
 pub const QUANT_FACTOR_SCALE: i32 = 64;
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct EvalStateStepProfile {
-    pub dirty_list_ns: u128,
-    pub dirty_list_calls: u64,
-    pub frame_write_ns: u128,
-    pub frame_write_calls: u64,
-    pub backup_ns: u128,
-    pub backup_calls: u64,
-    pub recompute_ns: u128,
-    pub recompute_calls: u64,
-    pub aggregate_ns: u128,
-    pub aggregate_calls: u64,
-    pub restore_ns: u128,
-    pub restore_calls: u64,
-    pub forward_ns: u128,
-    pub forward_calls: u64,
-    pub push_calls: u64,
-    pub pop_calls: u64,
-}
-
-impl EvalStateStepProfile {
-    #[inline]
-    fn start(profile_enabled: bool) -> Option<Instant> {
-        profile_enabled.then(Instant::now)
-    }
-
-    #[inline]
-    fn elapsed(start: Option<Instant>) -> u128 {
-        start.map(|t| t.elapsed().as_nanos()).unwrap_or(0)
-    }
-
-    #[inline]
-    fn add_backup(&mut self, start: Option<Instant>) {
-        if start.is_some() {
-            self.backup_ns += Self::elapsed(start);
-            self.backup_calls += 1;
-        }
-    }
-
-    #[inline]
-    fn add_dirty_list(&mut self, start: Option<Instant>) {
-        if start.is_some() {
-            self.dirty_list_ns += Self::elapsed(start);
-            self.dirty_list_calls += 1;
-        }
-    }
-
-    #[inline]
-    fn add_frame_write(&mut self, start: Option<Instant>) {
-        if start.is_some() {
-            self.frame_write_ns += Self::elapsed(start);
-            self.frame_write_calls += 1;
-        }
-    }
-
-    #[inline]
-    fn add_recompute(&mut self, start: Option<Instant>) {
-        if start.is_some() {
-            self.recompute_ns += Self::elapsed(start);
-            self.recompute_calls += 1;
-        }
-    }
-
-    #[inline]
-    fn add_aggregate(&mut self, start: Option<Instant>) {
-        if start.is_some() {
-            self.aggregate_ns += Self::elapsed(start);
-            self.aggregate_calls += 1;
-        }
-    }
-
-    #[inline]
-    fn add_restore(&mut self, start: Option<Instant>) {
-        if start.is_some() {
-            self.restore_ns += Self::elapsed(start);
-            self.restore_calls += 1;
-        }
-    }
-
-    #[inline]
-    fn add_forward(&mut self, start: Option<Instant>) {
-        if start.is_some() {
-            self.forward_ns += Self::elapsed(start);
-            self.forward_calls += 1;
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct CodebookWeights {

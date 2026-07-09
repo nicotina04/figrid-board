@@ -676,6 +676,93 @@ pub struct SearchResult {
     pub nodes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EvalStateStepProfile {
+    pub dirty_list_ns: u128,
+    pub dirty_list_calls: u64,
+    pub frame_write_ns: u128,
+    pub frame_write_calls: u64,
+    pub backup_ns: u128,
+    pub backup_calls: u64,
+    pub recompute_ns: u128,
+    pub recompute_calls: u64,
+    pub aggregate_ns: u128,
+    pub aggregate_calls: u64,
+    pub restore_ns: u128,
+    pub restore_calls: u64,
+    pub forward_ns: u128,
+    pub forward_calls: u64,
+    pub push_calls: u64,
+    pub pop_calls: u64,
+}
+
+impl EvalStateStepProfile {
+    #[inline]
+    pub(crate) fn start(profile_enabled: bool) -> Option<Instant> {
+        profile_enabled.then(Instant::now)
+    }
+
+    #[inline]
+    pub(crate) fn elapsed(start: Option<Instant>) -> u128 {
+        start.map(|t| t.elapsed().as_nanos()).unwrap_or(0)
+    }
+
+    #[inline]
+    pub(crate) fn add_backup(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.backup_ns += Self::elapsed(start);
+            self.backup_calls += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn add_dirty_list(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.dirty_list_ns += Self::elapsed(start);
+            self.dirty_list_calls += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn add_frame_write(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.frame_write_ns += Self::elapsed(start);
+            self.frame_write_calls += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn add_recompute(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.recompute_ns += Self::elapsed(start);
+            self.recompute_calls += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn add_aggregate(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.aggregate_ns += Self::elapsed(start);
+            self.aggregate_calls += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn add_restore(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.restore_ns += Self::elapsed(start);
+            self.restore_calls += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn add_forward(&mut self, start: Option<Instant>) {
+        if start.is_some() {
+            self.forward_ns += Self::elapsed(start);
+            self.forward_calls += 1;
+        }
+    }
+}
 #[derive(Debug, Clone, Default)]
 pub struct SearchProfileSnapshot {
     pub enabled: bool,
@@ -806,7 +893,7 @@ impl SearchProfile {
     }
 
     #[inline]
-    fn add_eval_state_detail(&mut self, detail: crate::codebook_eval::EvalStateStepProfile) {
+    fn add_eval_state_detail(&mut self, detail: EvalStateStepProfile) {
         if !self.enabled {
             return;
         }
@@ -953,23 +1040,11 @@ fn relation_score_prefers(candidate: Option<i32>, incumbent: Option<i32>) -> boo
 }
 
 trait SearchEvalState {
-    fn push_move(
-        &mut self,
-        board: &Board,
-        mv: Move,
-        profile_enabled: bool,
-    ) -> crate::codebook_eval::EvalStateStepProfile;
-    fn pop_move(&mut self, profile_enabled: bool) -> crate::codebook_eval::EvalStateStepProfile;
-    fn eval(
-        &mut self,
-        board: &Board,
-        profile_enabled: bool,
-    ) -> (i32, crate::codebook_eval::EvalStateStepProfile);
-    fn eval_base(
-        &mut self,
-        board: &Board,
-        profile_enabled: bool,
-    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
+    fn push_move(&mut self, board: &Board, mv: Move, profile_enabled: bool)
+    -> EvalStateStepProfile;
+    fn pop_move(&mut self, profile_enabled: bool) -> EvalStateStepProfile;
+    fn eval(&mut self, board: &Board, profile_enabled: bool) -> (i32, EvalStateStepProfile);
+    fn eval_base(&mut self, board: &Board, profile_enabled: bool) -> (i32, EvalStateStepProfile) {
         self.eval(board, profile_enabled)
     }
 }
@@ -993,35 +1068,27 @@ impl SearchEvalState for FlatEvalState<'_> {
         board: &Board,
         mv: Move,
         _profile_enabled: bool,
-    ) -> crate::codebook_eval::EvalStateStepProfile {
+    ) -> EvalStateStepProfile {
         self.inc.push_move(board, mv, self.weights);
-        crate::codebook_eval::EvalStateStepProfile::default()
+        EvalStateStepProfile::default()
     }
 
-    fn pop_move(&mut self, _profile_enabled: bool) -> crate::codebook_eval::EvalStateStepProfile {
+    fn pop_move(&mut self, _profile_enabled: bool) -> EvalStateStepProfile {
         self.inc.pop_move();
-        crate::codebook_eval::EvalStateStepProfile::default()
+        EvalStateStepProfile::default()
     }
 
-    fn eval(
-        &mut self,
-        board: &Board,
-        _profile_enabled: bool,
-    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
+    fn eval(&mut self, board: &Board, _profile_enabled: bool) -> (i32, EvalStateStepProfile) {
         (
             self.inc.eval(self.weights, board),
-            crate::codebook_eval::EvalStateStepProfile::default(),
+            EvalStateStepProfile::default(),
         )
     }
 
-    fn eval_base(
-        &mut self,
-        board: &Board,
-        _profile_enabled: bool,
-    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
+    fn eval_base(&mut self, board: &Board, _profile_enabled: bool) -> (i32, EvalStateStepProfile) {
         (
             self.inc.eval_base(self.weights, board),
-            crate::codebook_eval::EvalStateStepProfile::default(),
+            EvalStateStepProfile::default(),
         )
     }
 }
@@ -1059,25 +1126,18 @@ impl SearchEvalState for CodebookEvalState<'_> {
         board: &Board,
         mv: Move,
         _profile_enabled: bool,
-    ) -> crate::codebook_eval::EvalStateStepProfile {
+    ) -> EvalStateStepProfile {
         self.inc.push_move(board, mv, self.weights);
-        crate::codebook_eval::EvalStateStepProfile::default()
+        EvalStateStepProfile::default()
     }
 
-    fn pop_move(&mut self, _profile_enabled: bool) -> crate::codebook_eval::EvalStateStepProfile {
+    fn pop_move(&mut self, _profile_enabled: bool) -> EvalStateStepProfile {
         self.inc.pop_move(self.weights);
-        crate::codebook_eval::EvalStateStepProfile::default()
+        EvalStateStepProfile::default()
     }
 
-    fn eval(
-        &mut self,
-        board: &Board,
-        _profile_enabled: bool,
-    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
-        (
-            self.scaled_value(board),
-            crate::codebook_eval::EvalStateStepProfile::default(),
-        )
+    fn eval(&mut self, board: &Board, _profile_enabled: bool) -> (i32, EvalStateStepProfile) {
+        (self.scaled_value(board), EvalStateStepProfile::default())
     }
 }
 
@@ -1108,20 +1168,16 @@ impl SearchEvalState for QuantizedCodebookEvalState<'_> {
         board: &Board,
         mv: Move,
         profile_enabled: bool,
-    ) -> crate::codebook_eval::EvalStateStepProfile {
+    ) -> EvalStateStepProfile {
         self.inc
             .push_move_profiled(board, mv, self.weights, profile_enabled)
     }
 
-    fn pop_move(&mut self, profile_enabled: bool) -> crate::codebook_eval::EvalStateStepProfile {
+    fn pop_move(&mut self, profile_enabled: bool) -> EvalStateStepProfile {
         self.inc.pop_move_profiled(self.weights, profile_enabled)
     }
 
-    fn eval(
-        &mut self,
-        board: &Board,
-        profile_enabled: bool,
-    ) -> (i32, crate::codebook_eval::EvalStateStepProfile) {
+    fn eval(&mut self, board: &Board, profile_enabled: bool) -> (i32, EvalStateStepProfile) {
         let (value, detail) = self
             .inc
             .value_profiled(board, self.weights, profile_enabled);

@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "codebook-eval")]
 use figrid_board::codebook_eval::{CodebookWeights, QuantizedCodebookWeights};
 use figrid_board::{
-    Board, GOMOKU_NNUE_CONFIG, MovePickerStats, SearchProfileSnapshot, Searcher, to_idx, to_rc,
+    Board, GOMOKU_NNUE_CONFIG, MovePickerStats, SearchProfileSnapshot, SearchShapeStats,
+    Searcher, to_idx, to_rc,
 };
 use noru::network::NnueWeights;
 use serde_json::{Value, json};
@@ -183,6 +184,16 @@ fn move_picker_json(stats: MovePickerStats) -> Value {
         "quiet_skipped_nodes": stats.quiet_skipped_nodes,
     })
 }
+fn shape_json(stats: SearchShapeStats) -> Value {
+    json!({
+        "main_nodes": stats.main_nodes,
+        "qsearch_nodes": stats.qsearch_nodes,
+        "tt_probes": stats.tt_probes,
+        "tt_hits": stats.tt_hits,
+        "tt_cutoffs": stats.tt_cutoffs,
+    })
+}
+
 fn profile_json(profile: SearchProfileSnapshot) -> Value {
     json!({
         "enabled": profile.enabled,
@@ -332,6 +343,7 @@ fn main() -> Result<(), String> {
                         "nodes": result.nodes,
                         "node_limit_hit": searcher.node_limit_hit(),
                         "profile": profile_json(searcher.search_profile()),
+                        "shape": shape_json(searcher.search_shape_stats()),
                         "move_picker": move_picker_json(searcher.move_picker_stats()),
                     });
                     writeln!(out, "{row}").map_err(|e| format!("failed to write output: {e}"))?;

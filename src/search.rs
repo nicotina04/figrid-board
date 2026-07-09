@@ -828,6 +828,15 @@ pub struct MovePickerStats {
     pub quiet_skipped_nodes: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchShapeStats {
+    pub main_nodes: u64,
+    pub qsearch_nodes: u64,
+    pub tt_probes: u64,
+    pub tt_hits: u64,
+    pub tt_cutoffs: u64,
+}
+
 #[inline]
 fn move_picker_dirty_hist_bucket(dirty_cells: u32) -> usize {
     match dirty_cells {
@@ -1300,6 +1309,7 @@ pub struct Searcher {
     use_move_picker: bool,
     use_tail_threat_materialize: bool,
     move_picker_stats: MovePickerStats,
+    shape_stats: SearchShapeStats,
     threat_field: Option<IncrementalThreatField>,
 }
 
@@ -1331,6 +1341,7 @@ impl Searcher {
             use_move_picker,
             use_tail_threat_materialize,
             move_picker_stats: MovePickerStats::default(),
+            shape_stats: SearchShapeStats::default(),
         }
     }
 
@@ -1361,6 +1372,12 @@ impl Searcher {
 
     pub fn move_picker_stats(&self) -> MovePickerStats {
         self.move_picker_stats
+    }
+
+    pub fn search_shape_stats(&self) -> SearchShapeStats {
+        let mut stats = self.shape_stats;
+        stats.tt_cutoffs = self.tt_cutoffs;
+        stats
     }
 
     pub fn set_use_threat_field(&mut self, enabled: bool) {
@@ -1486,6 +1503,7 @@ impl Searcher {
         self.profile.reset(search_profile_enabled());
         self.threat_field = None;
         self.move_picker_stats = MovePickerStats::default();
+        self.shape_stats = SearchShapeStats::default();
     }
 
     fn try_root_vct(
@@ -1760,6 +1778,7 @@ impl Searcher {
         self.profile.reset(search_profile_enabled());
         self.threat_field = None;
         self.move_picker_stats = MovePickerStats::default();
+        self.shape_stats = SearchShapeStats::default();
         let root_search_decision_audit =
             crate::candidate_local_ensemble::root_search_decision_audit_enabled();
 
@@ -2080,6 +2099,7 @@ impl Searcher {
         self.tt.reset_stats();
         self.tt.clear();
         self.threat_field = None;
+        self.shape_stats = SearchShapeStats::default();
 
         self.move_picker_stats = MovePickerStats::default();
         let mut inc = FlatEvalState::new(board, weights);
@@ -2731,6 +2751,7 @@ impl Searcher {
     ) -> i32 {
         let qsearch_profile_start = self.profile_start();
         self.nodes += 1;
+        self.shape_stats.main_nodes += 1;
         if self.check_node_limit() {
             self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return 0;
@@ -2766,6 +2787,10 @@ impl Searcher {
         let original_alpha = alpha;
         let profile_start = self.profile_start();
         let tt_hit = self.tt.probe(board.zobrist);
+        self.shape_stats.tt_probes += 1;
+        if tt_hit.is_some() {
+            self.shape_stats.tt_hits += 1;
+        }
         self.profile_add(SearchProfileBucket::Tt, profile_start);
         let mut tt_move: Option<Move> = None;
         if let Some(entry) = tt_hit {
@@ -3111,6 +3136,7 @@ impl Searcher {
     ) -> i32 {
         let qsearch_profile_start = self.profile_start();
         self.nodes += 1;
+        self.shape_stats.qsearch_nodes += 1;
         if self.check_node_limit() {
             self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return 0;

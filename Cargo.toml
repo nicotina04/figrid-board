@@ -132,6 +132,10 @@ name = "rq582-search-profile"
 path = "bin/rq582_search_profile.rs"
 required-features = ["codebook-eval"]
 
+[[bin]]
+name = "rq597-tss-candidate-probe"
+path = "bin/rq597_tss_candidate_probe.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

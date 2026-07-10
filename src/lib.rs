@@ -40,12 +40,15 @@ pub use coord::{Coord, Coord15, Coord20, CoordState, Rotation};
 pub use eval::{IncrementalEval, evaluate};
 pub use features::GOMOKU_NNUE_CONFIG;
 pub use heuristic::{DIR, LineInfo, scan_line};
-pub use search::{MovePickerStats, SearchProfileSnapshot, SearchResult, SearchShapeStats, Searcher};
+pub use search::{
+    MovePickerStats, SearchProfileSnapshot, SearchResult, SearchShapeStats, Searcher,
+};
 pub use threat_field::IncrementalThreatField;
 pub use tss::{
-    DependencyCandidateArms, DependencyQuietCandidate, QuietThreatCandidate, QuietThreatConfig,
-    classify_move_with_directions, directional_aggregation_mismatches,
-    generate_dependency_quiet_candidates, generate_quiet_threat_candidates,
+    DependencyCandidateArms, DependencyQuietCandidate, Q1CandidateAttempt, Q1DefenseAttempt,
+    Q1DefenseOutcome, Q1TssConfig, Q1TssResult, Q1TssStopReason, QuietThreatCandidate,
+    QuietThreatConfig, classify_move_with_directions, directional_aggregation_mismatches,
+    generate_dependency_quiet_candidates, generate_quiet_threat_candidates, search_q1_tss_root,
 };
 pub use vct::{
     VctConfig, VctSearchResult, VctSearchStats, search_vct, search_vct_audit_json,

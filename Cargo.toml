@@ -144,6 +144,10 @@ path = "bin/rq598_tss_dependency_probe.rs"
 name = "rq599-quiet-label-classify"
 path = "bin/rq599_quiet_label_classify.rs"
 
+[[bin]]
+name = "rq602-tss-q1-solve"
+path = "bin/rq602_tss_q1_solve.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

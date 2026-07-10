@@ -5,10 +5,11 @@
 //! Proof search and main-search integration remain separate, preregistered
 //! work.
 
-use crate::board::{BitBoard, Board, Move, Stone, BOARD_SIZE, NUM_CELLS};
+use crate::board::{BOARD_SIZE, BitBoard, Board, Move, NUM_CELLS, Stone};
 use crate::heuristic::DIR;
-use crate::pattern_table::{classify_window_after_play_with_flags, read_window, WindowThreat};
-use crate::vct::{classify_move_fast_with_flags, ThreatKind};
+use crate::pattern_table::{WindowThreat, classify_window_after_play_with_flags, read_window};
+use crate::vct::{ThreatKind, VctConfig, classify_move_fast_with_flags, search_vct_with_stats};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuietThreatConfig {
@@ -47,6 +48,101 @@ pub struct DependencyQuietCandidate {
 pub struct DependencyCandidateArms {
     pub d1: Vec<DependencyQuietCandidate>,
     pub d2: Vec<DependencyQuietCandidate>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Q1DefenseOutcome {
+    Proved,
+    Exhausted,
+    Deadline,
+    NodeBudget,
+    ImmediateWin,
+}
+
+impl Q1DefenseOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proved => "proved",
+            Self::Exhausted => "exhausted",
+            Self::Deadline => "deadline",
+            Self::NodeBudget => "node_budget",
+            Self::ImmediateWin => "immediate_win",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Q1DefenseAttempt {
+    pub mv: Move,
+    pub outcome: Q1DefenseOutcome,
+    pub child_nodes: u64,
+    pub child_first_move: Option<Move>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Q1CandidateAttempt {
+    pub mv: Move,
+    pub forcing_gains: u8,
+    pub winning_gains: u8,
+    pub defenses_total: usize,
+    pub complete: bool,
+    pub defenses: Vec<Q1DefenseAttempt>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Q1TssStopReason {
+    Proved,
+    Exhausted,
+    Deadline,
+    NodeBudget,
+}
+
+impl Q1TssStopReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Proved => "proved",
+            Self::Exhausted => "exhausted",
+            Self::Deadline => "deadline",
+            Self::NodeBudget => "node_budget",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Q1TssConfig {
+    pub max_candidates: usize,
+    pub child_vct_depth: u32,
+    pub time_budget: Option<Duration>,
+    pub node_budget: Option<u64>,
+}
+
+impl Default for Q1TssConfig {
+    fn default() -> Self {
+        Self {
+            max_candidates: 8,
+            child_vct_depth: 18,
+            time_budget: Some(Duration::from_millis(1000)),
+            node_budget: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Q1TssResult {
+    pub selected_move: Option<Move>,
+    pub candidate_count: usize,
+    pub candidates_tested: usize,
+    pub child_nodes: u64,
+    pub elapsed: Duration,
+    pub stop_reason: Q1TssStopReason,
+    pub attempts: Vec<Q1CandidateAttempt>,
+}
+
+#[derive(Clone, Copy)]
+struct Q1ChildResult {
+    outcome: Q1DefenseOutcome,
+    nodes: u64,
+    first_move: Option<Move>,
 }
 
 #[derive(Clone, Copy)]
@@ -227,6 +323,194 @@ pub fn generate_dependency_quiet_candidates(
             .any(|d1_candidate| d1_candidate.mv == candidate.mv)
     }));
     DependencyCandidateArms { d1, d2 }
+}
+
+/// Try one quiet preparation move and prove every legal defender reply with
+/// the canonical root-scoped JumpThree VCT. This is an offline Stage 2B
+/// reference path; it is not connected to the main search.
+pub fn search_q1_tss_root(board: &mut Board, config: &Q1TssConfig) -> Q1TssResult {
+    search_q1_tss_root_with(
+        board,
+        config,
+        |child_board, config, time_budget, node_budget| {
+            let mut child_config = VctConfig::default();
+            child_config.max_depth = config.child_vct_depth;
+            child_config.time_budget = time_budget;
+            child_config.node_budget = node_budget;
+            child_config.enable_jump_three_attack_defense = true;
+            child_config.enable_jump_three_counter = true;
+            child_config.jump_attack_max_or_levels = 1;
+            child_config.enable_gap_four = false;
+            child_config.use_fast_classify = true;
+            child_config.use_reach_mask = true;
+
+            let result = search_vct_with_stats(child_board, &child_config);
+            let first_move = result
+                .sequence
+                .as_ref()
+                .and_then(|sequence| sequence.first().copied());
+            let outcome = if result.sequence.is_some() {
+                Q1DefenseOutcome::Proved
+            } else if result.stats.hit_node_budget() {
+                Q1DefenseOutcome::NodeBudget
+            } else if result.stats.hit_deadline() {
+                Q1DefenseOutcome::Deadline
+            } else {
+                Q1DefenseOutcome::Exhausted
+            };
+            Q1ChildResult {
+                outcome,
+                nodes: result.stats.nodes,
+                first_move,
+            }
+        },
+    )
+}
+
+fn search_q1_tss_root_with<F>(
+    board: &mut Board,
+    config: &Q1TssConfig,
+    mut prove_child: F,
+) -> Q1TssResult
+where
+    F: FnMut(&mut Board, &Q1TssConfig, Option<Duration>, Option<u64>) -> Q1ChildResult,
+{
+    let started = Instant::now();
+    let deadline = config.time_budget.map(|budget| started + budget);
+    let history_len = board.history.len();
+    let black = board.black;
+    let white = board.white;
+    let side_to_move = board.side_to_move;
+    let zobrist = board.zobrist;
+    let last_move = board.last_move;
+
+    let mut candidates = generate_quiet_threat_candidates(board, QuietThreatConfig::default());
+    candidates.truncate(config.max_candidates);
+    let candidate_count = candidates.len();
+    let mut attempts = Vec::with_capacity(candidate_count);
+    let mut child_nodes = 0u64;
+    let mut selected_move = None;
+    let mut stop_reason = Q1TssStopReason::Exhausted;
+
+    'candidate: for candidate in candidates {
+        if deadline.is_some_and(|limit| Instant::now() >= limit) {
+            stop_reason = Q1TssStopReason::Deadline;
+            break;
+        }
+        if config.node_budget.is_some_and(|limit| child_nodes >= limit) {
+            stop_reason = Q1TssStopReason::NodeBudget;
+            break;
+        }
+
+        board.make_move(candidate.mv);
+        let defenses = board.legal_moves();
+        let mut attempt = Q1CandidateAttempt {
+            mv: candidate.mv,
+            forcing_gains: candidate.forcing_gains,
+            winning_gains: candidate.winning_gains,
+            defenses_total: defenses.len(),
+            complete: false,
+            defenses: Vec::with_capacity(defenses.len()),
+        };
+
+        for defense in defenses {
+            let remaining_time = match deadline {
+                Some(limit) => {
+                    let now = Instant::now();
+                    if now >= limit {
+                        attempts.push(attempt);
+                        board.undo_move();
+                        stop_reason = Q1TssStopReason::Deadline;
+                        break 'candidate;
+                    }
+                    Some(limit.saturating_duration_since(now))
+                }
+                None => None,
+            };
+            let remaining_nodes = match config.node_budget {
+                Some(limit) => {
+                    if child_nodes >= limit {
+                        attempts.push(attempt);
+                        board.undo_move();
+                        stop_reason = Q1TssStopReason::NodeBudget;
+                        break 'candidate;
+                    }
+                    Some(limit - child_nodes)
+                }
+                None => None,
+            };
+
+            board.make_move(defense);
+            let child = if board.check_win(defense) {
+                Q1ChildResult {
+                    outcome: Q1DefenseOutcome::ImmediateWin,
+                    nodes: 0,
+                    first_move: None,
+                }
+            } else {
+                let child_history_len = board.history.len();
+                let child_zobrist = board.zobrist;
+                let result = prove_child(board, config, remaining_time, remaining_nodes);
+                debug_assert_eq!(board.history.len(), child_history_len);
+                debug_assert_eq!(board.zobrist, child_zobrist);
+                result
+            };
+            child_nodes = child_nodes.saturating_add(child.nodes);
+            attempt.defenses.push(Q1DefenseAttempt {
+                mv: defense,
+                outcome: child.outcome,
+                child_nodes: child.nodes,
+                child_first_move: child.first_move,
+            });
+            board.undo_move();
+
+            match child.outcome {
+                Q1DefenseOutcome::Proved => {}
+                Q1DefenseOutcome::Deadline => {
+                    attempts.push(attempt);
+                    board.undo_move();
+                    stop_reason = Q1TssStopReason::Deadline;
+                    break 'candidate;
+                }
+                Q1DefenseOutcome::NodeBudget => {
+                    attempts.push(attempt);
+                    board.undo_move();
+                    stop_reason = Q1TssStopReason::NodeBudget;
+                    break 'candidate;
+                }
+                Q1DefenseOutcome::Exhausted | Q1DefenseOutcome::ImmediateWin => {
+                    attempts.push(attempt);
+                    board.undo_move();
+                    continue 'candidate;
+                }
+            }
+        }
+
+        attempt.complete = attempt.defenses.len() == attempt.defenses_total;
+        debug_assert!(attempt.complete);
+        selected_move = Some(candidate.mv);
+        attempts.push(attempt);
+        board.undo_move();
+        stop_reason = Q1TssStopReason::Proved;
+        break;
+    }
+
+    debug_assert_eq!(board.history.len(), history_len);
+    debug_assert!(board.black == black);
+    debug_assert!(board.white == white);
+    debug_assert_eq!(board.side_to_move, side_to_move);
+    debug_assert_eq!(board.zobrist, zobrist);
+    debug_assert_eq!(board.last_move, last_move);
+
+    Q1TssResult {
+        selected_move,
+        candidate_count,
+        candidates_tested: attempts.len(),
+        child_nodes,
+        elapsed: started.elapsed(),
+        stop_reason,
+        attempts,
+    }
 }
 
 /// Count disagreements between the directional semantic reference and the
@@ -606,5 +890,84 @@ mod tests {
         assert!(board.black == before_black);
         assert!(board.white == before_white);
         assert_eq!(board.zobrist, before_zobrist);
+    }
+
+    #[test]
+    fn q1_full_defense_covers_every_legal_reply_and_restores_board() {
+        let mut board = Board::new();
+        board.make_move(to_idx(7, 7));
+        board.make_move(to_idx(0, 0));
+        let before = board.clone();
+        let config = Q1TssConfig {
+            max_candidates: 1,
+            time_budget: None,
+            node_budget: None,
+            ..Q1TssConfig::default()
+        };
+
+        let result =
+            search_q1_tss_root_with(&mut board, &config, |_board, _config, _time, _nodes| {
+                Q1ChildResult {
+                    outcome: Q1DefenseOutcome::Proved,
+                    nodes: 1,
+                    first_move: Some(to_idx(7, 8)),
+                }
+            });
+
+        assert_eq!(result.stop_reason, Q1TssStopReason::Proved);
+        assert!(result.selected_move.is_some());
+        assert_eq!(result.attempts.len(), 1);
+        let attempt = &result.attempts[0];
+        assert!(attempt.complete);
+        assert_eq!(attempt.defenses_total, NUM_CELLS - before.move_count - 1);
+        assert_eq!(attempt.defenses.len(), attempt.defenses_total);
+        assert!(
+            attempt
+                .defenses
+                .iter()
+                .all(|defense| defense.outcome == Q1DefenseOutcome::Proved)
+        );
+        assert_eq!(board.history, before.history);
+        assert!(board.black == before.black);
+        assert!(board.white == before.white);
+        assert_eq!(board.side_to_move, before.side_to_move);
+        assert_eq!(board.zobrist, before.zobrist);
+    }
+
+    #[test]
+    fn q1_refuted_candidates_do_not_leak_board_state() {
+        let mut board = Board::new();
+        board.make_move(to_idx(7, 7));
+        board.make_move(to_idx(0, 0));
+        let before = board.clone();
+        let config = Q1TssConfig {
+            max_candidates: 2,
+            time_budget: None,
+            node_budget: None,
+            ..Q1TssConfig::default()
+        };
+
+        let result =
+            search_q1_tss_root_with(&mut board, &config, |_board, _config, _time, _nodes| {
+                Q1ChildResult {
+                    outcome: Q1DefenseOutcome::Exhausted,
+                    nodes: 1,
+                    first_move: None,
+                }
+            });
+
+        assert_eq!(result.stop_reason, Q1TssStopReason::Exhausted);
+        assert!(result.selected_move.is_none());
+        assert_eq!(result.attempts.len(), 2);
+        assert!(result.attempts.iter().all(|attempt| {
+            !attempt.complete
+                && attempt.defenses.len() == 1
+                && attempt.defenses[0].outcome == Q1DefenseOutcome::Exhausted
+        }));
+        assert_eq!(board.history, before.history);
+        assert!(board.black == before.black);
+        assert!(board.white == before.white);
+        assert_eq!(board.side_to_move, before.side_to_move);
+        assert_eq!(board.zobrist, before.zobrist);
     }
 }

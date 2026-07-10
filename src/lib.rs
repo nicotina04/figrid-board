@@ -47,7 +47,8 @@ pub use threat_field::IncrementalThreatField;
 pub use tss::{
     DependencyCandidateArms, DependencyQuietCandidate, Q1CandidateAttempt, Q1DefenseAttempt,
     Q1DefenseOutcome, Q1TssConfig, Q1TssResult, Q1TssStopReason, QuietThreatCandidate,
-    QuietThreatConfig, classify_move_with_directions, directional_aggregation_mismatches,
+    QuietThreatConfig, ResponseRelevanceAudit, audit_quiet_response_relevance,
+    classify_move_with_directions, directional_aggregation_mismatches,
     generate_dependency_quiet_candidates, generate_quiet_threat_candidates, search_q1_tss_root,
 };
 pub use vct::{

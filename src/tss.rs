@@ -50,6 +50,23 @@ pub struct DependencyCandidateArms {
     pub d2: Vec<DependencyQuietCandidate>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResponseRelevanceAudit {
+    pub quiet_move: Move,
+    pub forcing_gains: u8,
+    pub winning_gains: u8,
+    pub gained_sources: Vec<Move>,
+    pub gained_line_count: usize,
+    pub legal_replies: Vec<Move>,
+    pub immediate_replies: Vec<Move>,
+    pub defender_forcing_replies: Vec<Move>,
+    pub footprint_replies: Vec<Move>,
+    pub causal_replies: Vec<Move>,
+    pub f1_replies: Vec<Move>,
+    pub f2_replies: Vec<Move>,
+    pub causal_outside_footprint: Vec<Move>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Q1DefenseOutcome {
     Proved,
@@ -323,6 +340,184 @@ pub fn generate_dependency_quiet_candidates(
             .any(|d1_candidate| d1_candidate.mv == candidate.mv)
     }));
     DependencyCandidateArms { d1, d2 }
+}
+
+/// Classify legal responses to one labelled quiet preparation move.
+///
+/// RQ603 is a static audit only. F1 retains replies in gained directional
+/// footprints plus global forcing counters. F2 retains replies that actually
+/// weaken a gained aggregate source plus the same global counters.
+pub fn audit_quiet_response_relevance(
+    board: &mut Board,
+    quiet_move: Move,
+    config: QuietThreatConfig,
+) -> Result<ResponseRelevanceAudit, &'static str> {
+    if quiet_move >= NUM_CELLS || !board.is_empty(quiet_move) {
+        return Err("quiet move is not legal");
+    }
+
+    let attacker = board.side_to_move;
+    let history_len = board.history.len();
+    let black = board.black;
+    let white = board.white;
+    let zobrist = board.zobrist;
+    let last_move = board.last_move;
+    let base = classify_all(board, attacker, config);
+    if base[quiet_move].is_forcing() {
+        return Err("labelled move is already forcing");
+    }
+    let base_directions = classify_all_directions(board, attacker, config);
+
+    board.make_move(quiet_move);
+    if has_immediate_five(board, attacker.opponent(), config) {
+        board.undo_move();
+        return Err("quiet move leaves an immediate opponent five");
+    }
+
+    let after = classify_all(board, attacker, config);
+    let after_directions = classify_all_directions(board, attacker, config);
+    let mut forcing_gains = 0u8;
+    let mut winning_gains = 0u8;
+    let mut gained_sources = Vec::new();
+    let mut gained_source_kinds = Vec::new();
+    let mut gained_footprint = BitBoard::EMPTY;
+    let mut gained_line_count = 0usize;
+
+    for source in 0..NUM_CELLS {
+        let before_kind = base[source];
+        let after_kind = after[source];
+        if !after_kind.is_forcing() || threat_strength(after_kind) <= threat_strength(before_kind) {
+            continue;
+        }
+        forcing_gains = forcing_gains.saturating_add(1);
+        if after_kind.is_winning() && !before_kind.is_winning() {
+            winning_gains = winning_gains.saturating_add(1);
+        }
+        gained_sources.push(source);
+        gained_source_kinds.push((source, after_kind));
+
+        for dir_idx in 0..DIR.len() {
+            let before_line = base_directions[source][dir_idx];
+            let after_line = after_directions[source][dir_idx];
+            if direction_is_forcing(after_line)
+                && direction_strength(after_line) > direction_strength(before_line)
+            {
+                let line = make_threat_line(
+                    source,
+                    dir_idx,
+                    &if attacker == Stone::Black {
+                        black
+                    } else {
+                        white
+                    },
+                );
+                gained_footprint.lo |= line.footprint.lo;
+                gained_footprint.hi |= line.footprint.hi;
+                gained_line_count += 1;
+            }
+        }
+    }
+
+    if forcing_gains == 0 {
+        board.undo_move();
+        return Err("labelled move has no forcing gain");
+    }
+
+    let defender = board.side_to_move;
+    let legal_replies = board.legal_moves();
+    let mut immediate_replies = Vec::new();
+    let mut defender_forcing_replies = Vec::new();
+    let mut footprint_replies = Vec::new();
+    let mut causal_replies = Vec::new();
+    let mut f1_replies = Vec::new();
+    let mut f2_replies = Vec::new();
+    let mut causal_outside_footprint = Vec::new();
+
+    for &reply in &legal_replies {
+        let defender_kind = classify_move_fast_with_flags(
+            board,
+            reply,
+            defender,
+            config.enable_jump_three,
+            config.enable_gap_four,
+        );
+        let defender_forcing = defender_kind.is_forcing();
+        let in_footprint = gained_footprint.get(reply);
+
+        board.make_move(reply);
+        let immediate = board.check_win(reply);
+        let weakens_gain = gained_source_kinds.iter().any(|&(source, expected)| {
+            if !board.is_empty(source) {
+                return true;
+            }
+            let actual = classify_move_fast_with_flags(
+                board,
+                source,
+                attacker,
+                config.enable_jump_three,
+                config.enable_gap_four,
+            );
+            threat_strength(actual) < threat_strength(expected)
+        });
+        board.undo_move();
+
+        if immediate {
+            immediate_replies.push(reply);
+        }
+        if defender_forcing {
+            defender_forcing_replies.push(reply);
+        }
+        if in_footprint {
+            footprint_replies.push(reply);
+        }
+        if weakens_gain {
+            causal_replies.push(reply);
+            if !in_footprint {
+                causal_outside_footprint.push(reply);
+            }
+        }
+        if immediate || defender_forcing || in_footprint {
+            f1_replies.push(reply);
+        }
+        if immediate || defender_forcing || weakens_gain {
+            f2_replies.push(reply);
+        }
+    }
+
+    debug_assert!(
+        immediate_replies
+            .iter()
+            .all(|reply| f1_replies.contains(reply) && f2_replies.contains(reply))
+    );
+    debug_assert!(
+        defender_forcing_replies
+            .iter()
+            .all(|reply| f1_replies.contains(reply) && f2_replies.contains(reply))
+    );
+
+    board.undo_move();
+    debug_assert_eq!(board.history.len(), history_len);
+    debug_assert!(board.black == black);
+    debug_assert!(board.white == white);
+    debug_assert_eq!(board.side_to_move, attacker);
+    debug_assert_eq!(board.zobrist, zobrist);
+    debug_assert_eq!(board.last_move, last_move);
+
+    Ok(ResponseRelevanceAudit {
+        quiet_move,
+        forcing_gains,
+        winning_gains,
+        gained_sources,
+        gained_line_count,
+        legal_replies,
+        immediate_replies,
+        defender_forcing_replies,
+        footprint_replies,
+        causal_replies,
+        f1_replies,
+        f2_replies,
+        causal_outside_footprint,
+    })
 }
 
 /// Try one quiet preparation move and prove every legal defender reply with
@@ -964,6 +1159,38 @@ mod tests {
                 && attempt.defenses.len() == 1
                 && attempt.defenses[0].outcome == Q1DefenseOutcome::Exhausted
         }));
+        assert_eq!(board.history, before.history);
+        assert!(board.black == before.black);
+        assert!(board.white == before.white);
+        assert_eq!(board.side_to_move, before.side_to_move);
+        assert_eq!(board.zobrist, before.zobrist);
+    }
+
+    #[test]
+    fn response_relevance_includes_global_counters_and_restores_board() {
+        let mut board = Board::new();
+        board.make_move(to_idx(7, 7));
+        board.make_move(to_idx(0, 0));
+        let before = board.clone();
+
+        let audit =
+            audit_quiet_response_relevance(&mut board, to_idx(7, 8), QuietThreatConfig::default())
+                .unwrap();
+
+        assert!(audit.forcing_gains > 0);
+        assert!(!audit.gained_sources.is_empty());
+        assert!(!audit.f1_replies.is_empty());
+        assert!(!audit.f2_replies.is_empty());
+        assert!(
+            audit.immediate_replies.iter().all(|reply| {
+                audit.f1_replies.contains(reply) && audit.f2_replies.contains(reply)
+            })
+        );
+        assert!(
+            audit.defender_forcing_replies.iter().all(|reply| {
+                audit.f1_replies.contains(reply) && audit.f2_replies.contains(reply)
+            })
+        );
         assert_eq!(board.history, before.history);
         assert!(board.black == before.black);
         assert!(board.white == before.white);

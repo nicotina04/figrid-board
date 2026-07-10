@@ -148,6 +148,10 @@ path = "bin/rq599_quiet_label_classify.rs"
 name = "rq602-tss-q1-solve"
 path = "bin/rq602_tss_q1_solve.rs"
 
+[[bin]]
+name = "rq603-response-relevance"
+path = "bin/rq603_response_relevance.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

@@ -252,6 +252,29 @@ pub fn directional_aggregation_mismatches(board: &Board, config: QuietThreatConf
         .sum()
 }
 
+/// Return the production-equivalent aggregate kind and its four directional
+/// components for one legal empty move. Intended for offline label audits.
+pub fn classify_move_with_directions(
+    board: &Board,
+    mv: Move,
+    side: Stone,
+    config: QuietThreatConfig,
+) -> (ThreatKind, [WindowThreat; 4]) {
+    let directions = classify_directions(board, mv, side, config);
+    let aggregate = aggregate_directional(directions, config);
+    debug_assert_eq!(
+        aggregate,
+        classify_move_fast_with_flags(
+            board,
+            mv,
+            side,
+            config.enable_jump_three,
+            config.enable_gap_four,
+        )
+    );
+    (aggregate, directions)
+}
+
 fn classify_all(board: &Board, side: Stone, config: QuietThreatConfig) -> [ThreatKind; NUM_CELLS] {
     let mut kinds = [ThreatKind::None; NUM_CELLS];
     for (cell, kind) in kinds.iter_mut().enumerate() {

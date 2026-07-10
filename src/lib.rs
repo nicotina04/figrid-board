@@ -44,8 +44,8 @@ pub use search::{MovePickerStats, SearchProfileSnapshot, SearchResult, SearchSha
 pub use threat_field::IncrementalThreatField;
 pub use tss::{
     DependencyCandidateArms, DependencyQuietCandidate, QuietThreatCandidate, QuietThreatConfig,
-    directional_aggregation_mismatches, generate_dependency_quiet_candidates,
-    generate_quiet_threat_candidates,
+    classify_move_with_directions, directional_aggregation_mismatches,
+    generate_dependency_quiet_candidates, generate_quiet_threat_candidates,
 };
 pub use vct::{
     VctConfig, VctSearchResult, VctSearchStats, search_vct, search_vct_audit_json,

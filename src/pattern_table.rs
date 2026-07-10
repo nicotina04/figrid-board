@@ -326,6 +326,35 @@ fn classify_window_anchor_mine_rule(
     }
 }
 
+/// Classify one directional window after a hypothetical move at its empty
+/// anchor. This is the semantic reference used by offline TSS relation probes;
+/// hot search paths continue to use the mapped-ID lookup tables.
+pub(crate) fn classify_window_after_play_with_flags(
+    current: &LineWindow,
+    rule_set: RuleSet,
+    side: Stone,
+    enable_jump_three: bool,
+    enable_gap_four: bool,
+) -> WindowThreat {
+    debug_assert_eq!(current[5], 0, "candidate move cell must be empty");
+    let mut w = *current;
+    w[5] = 1;
+    let mut threat = classify_window_anchor_mine_rule(&w, rule_set, side);
+    if enable_gap_four
+        && !matches!(
+            threat,
+            WindowThreat::Five | WindowThreat::OpenFour | WindowThreat::ClosedFour
+        )
+        && window_has_gap_four(&w)
+    {
+        threat = WindowThreat::ClosedFour;
+    }
+    if !enable_jump_three && threat == WindowThreat::JumpThree {
+        threat = WindowThreat::None;
+    }
+    threat
+}
+
 pub(crate) fn window_has_jump_three(w: &LineWindow) -> bool {
     // Open broken-three shapes produced by the anchor move:
     // .X.XX. and .XX.X.  The segment must include the anchor (index 5), so

@@ -136,6 +136,10 @@ required-features = ["codebook-eval"]
 name = "rq597-tss-candidate-probe"
 path = "bin/rq597_tss_candidate_probe.rs"
 
+[[bin]]
+name = "rq598-tss-dependency-probe"
+path = "bin/rq598_tss_dependency_probe.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

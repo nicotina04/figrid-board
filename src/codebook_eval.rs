@@ -703,6 +703,68 @@ impl IncrementalQuantizedCodebookEval {
         (value, profile)
     }
 
+    /// Materialize the quantized 9x16 cache and return its D4-invariant
+    /// corner/edge/center orbit sums from an explicit color perspective.
+    ///
+    /// This deliberately does not consult side-to-move: the White root
+    /// ordering model scores the position after a candidate White move, when
+    /// the child itself is Black-to-move.
+    pub(crate) fn explicit_orbit48(
+        &mut self,
+        weights: &QuantizedCodebookWeights,
+        perspective: Stone,
+    ) -> Result<[i64; 48], String> {
+        if weights.dim != 16 {
+            return Err(format!(
+                "white root ordering requires codebook dim 16, got {}",
+                weights.dim
+            ));
+        }
+        if weights.embedding_scale != QUANT_EMBED_SCALE || weights.embedding_scale != 32 {
+            return Err(format!(
+                "white root ordering requires embedding scale 32, got {}",
+                weights.embedding_scale
+            ));
+        }
+        let expected_features = REGIONS * 16;
+        if self.features_black.len() != expected_features
+            || self.features_white.len() != expected_features
+            || self.cell_black.len() != NUM_CELLS * 16
+            || self.cell_white.len() != NUM_CELLS * 16
+            || weights.feature_len() != expected_features
+            || weights.embeddings.len() != PATTERN_NUM_IDS * 16
+        {
+            return Err("white root ordering codebook shape mismatch".to_string());
+        }
+
+        let _ = self.materialize_pending(weights, false);
+        let features = match perspective {
+            Stone::Black => &self.features_black,
+            Stone::White => &self.features_white,
+        };
+        let mut result = [0i64; 48];
+        const CORNERS: [usize; 4] = [0, 2, 6, 8];
+        const EDGES: [usize; 4] = [1, 3, 5, 7];
+        for dim in 0..16 {
+            let mut corner = 0i64;
+            for region in CORNERS {
+                corner = corner
+                    .checked_add(i64::from(features[region * 16 + dim]))
+                    .ok_or_else(|| format!("corner orbit overflow at dimension {dim}"))?;
+            }
+            let mut edge = 0i64;
+            for region in EDGES {
+                edge = edge
+                    .checked_add(i64::from(features[region * 16 + dim]))
+                    .ok_or_else(|| format!("edge orbit overflow at dimension {dim}"))?;
+            }
+            result[dim] = corner;
+            result[16 + dim] = edge;
+            result[32 + dim] = i64::from(features[4 * 16 + dim]);
+        }
+        Ok(result)
+    }
+
     pub fn last_dirty_cells(&self) -> usize {
         self.last_dirty_cells
     }

@@ -30,6 +30,8 @@ pub mod threat_field;
 pub mod transposition;
 pub mod tss;
 pub mod vct;
+#[cfg(feature = "codebook-eval")]
+pub(crate) mod white_root_order;
 
 pub mod legacy;
 

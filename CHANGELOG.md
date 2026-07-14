@@ -1,5 +1,26 @@
 # Changes
 
+## 0.8.1 (2026-07-14)
+* **Add built-in Freestyle White root quiet-move ordering for the shipped
+  quantized codebook evaluator.** The model refines maximal quiet runs while preserving
+  the engine's baseline-rank anchor and treating PV, killer, tactical,
+  terminal, forced-defense, Black-root, and non-root moves as hard barriers.
+  It is self-contained in `pbrain-figrid`, defaults to `auto`, and can be
+  rolled back with `FIGRID_WHITE_ROOT_ORDER=off`. Custom or floating-point
+  codebooks and non-Freestyle rules remain on the 0.8.0 ordering path.
+* **Small measured arena lift, with no inflated strength claim.** In a fixed
+  2-second paired A/B run of 4,000 games, the new ordering moved overall score
+  from 797/2,000 to 811/2,000 games (39.85% to 40.55%). White score
+  moved from 4.8% to 6.0%, Black from 74.9% to 75.1%, with 0 protocol errors.
+* **Sanitize the embedded codebook asset.** Training-only metadata and local
+  paths are no longer embedded in release binaries. A deterministic verifier
+  and Rust integration test freeze both loader-visible f32 values and the
+  deployed quantized weights, so this packaging cleanup does not alter eval.
+* **Make the published `embed-weights` feature self-contained.** The compressed
+  deployment weight is now included in the crates.io package while raw model
+  files remain excluded, so downstream feature builds no longer depend on a
+  repository-only asset.
+
 ## 0.8.0 (2026-07-08)
 * **Promote the swap-closed quantized codebook evaluator to the pbrain default
   when built with `codebook-eval`.** The `pbrain-figrid` adapter now embeds

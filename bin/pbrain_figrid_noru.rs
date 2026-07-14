@@ -92,7 +92,18 @@ const EMBEDDED_CODEBOOK_JSON: &[u8] =
 #[cfg(feature = "codebook-eval")]
 enum CodebookRuntimeWeights {
     Float(CodebookWeights),
-    Quantized(QuantizedCodebookWeights),
+    Quantized {
+        weights: QuantizedCodebookWeights,
+        embedded: bool,
+    },
+}
+
+#[cfg(feature = "codebook-eval")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WhiteRootOrderMode {
+    Auto,
+    On,
+    Off,
 }
 
 #[cfg(feature = "codebook-eval")]
@@ -129,16 +140,197 @@ fn codebook_eval_enabled() -> bool {
     })
 }
 
+#[cfg(not(feature = "codebook-eval"))]
+fn reject_explicit_white_root_order_without_codebook() -> Result<(), String> {
+    let Some(raw) = std::env::var_os("FIGRID_WHITE_ROOT_ORDER") else {
+        return Ok(());
+    };
+    let value = raw
+        .to_str()
+        .ok_or_else(|| "FIGRID_WHITE_ROOT_ORDER is not valid Unicode".to_string())?
+        .trim();
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("auto")
+        || value == "0"
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("no")
+    {
+        return Ok(());
+    }
+    if value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("on")
+        || value.eq_ignore_ascii_case("yes")
+    {
+        return Err(
+            "FIGRID_WHITE_ROOT_ORDER=on requires a build with the codebook-eval feature"
+                .to_string(),
+        );
+    }
+    Err(format!(
+        "invalid FIGRID_WHITE_ROOT_ORDER value `{value}`; expected auto, on, or off"
+    ))
+}
+
+#[cfg(feature = "codebook-eval")]
+fn parse_white_root_order_mode(raw: Option<&str>) -> Result<WhiteRootOrderMode, String> {
+    let Some(raw) = raw else {
+        return Ok(WhiteRootOrderMode::Auto);
+    };
+    let value = raw.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("auto") {
+        Ok(WhiteRootOrderMode::Auto)
+    } else if value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("on")
+        || value.eq_ignore_ascii_case("yes")
+    {
+        Ok(WhiteRootOrderMode::On)
+    } else if value == "0"
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("no")
+    {
+        Ok(WhiteRootOrderMode::Off)
+    } else {
+        Err(format!(
+            "invalid FIGRID_WHITE_ROOT_ORDER value `{raw}`; expected auto, on, or off"
+        ))
+    }
+}
+
+#[cfg(feature = "codebook-eval")]
+fn configure_white_root_order(
+    searcher: &mut Searcher,
+    codebook: &Option<CodebookRuntimeWeights>,
+) -> Result<(), String> {
+    let configured = std::env::var_os("FIGRID_WHITE_ROOT_ORDER");
+    let configured = configured
+        .as_deref()
+        .map(|value| {
+            value
+                .to_str()
+                .ok_or_else(|| "FIGRID_WHITE_ROOT_ORDER is not valid Unicode".to_string())
+        })
+        .transpose()?;
+    let mode = parse_white_root_order_mode(configured)?;
+    configure_white_root_order_mode(searcher, codebook, mode)
+}
+
+#[cfg(feature = "codebook-eval")]
+fn configure_white_root_order_mode(
+    searcher: &mut Searcher,
+    codebook: &Option<CodebookRuntimeWeights>,
+    mode: WhiteRootOrderMode,
+) -> Result<(), String> {
+    let supported = matches!(
+        codebook,
+        Some(CodebookRuntimeWeights::Quantized { embedded: true, .. })
+    );
+    match mode {
+        WhiteRootOrderMode::Auto if supported => {
+            // Auto mode is conservative: an independently configured root
+            // rank/replace/veto hook keeps the established path unchanged.
+            match searcher.set_white_root_order_enabled(true) {
+                Ok(()) => Ok(()),
+                Err(error) if error.starts_with("white root ordering conflicts with ") => {
+                    searcher.set_white_root_order_enabled(false)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        WhiteRootOrderMode::Auto | WhiteRootOrderMode::Off => {
+            searcher.set_white_root_order_enabled(false)
+        }
+        WhiteRootOrderMode::On if supported => searcher.set_white_root_order_enabled(true),
+        WhiteRootOrderMode::On => Err(
+            "FIGRID_WHITE_ROOT_ORDER=on requires the embedded quantized codebook evaluator"
+                .to_string(),
+        ),
+    }
+}
+
+#[cfg(all(test, feature = "codebook-eval"))]
+mod white_root_order_tests {
+    use super::*;
+
+    fn embedded_quantized() -> Option<CodebookRuntimeWeights> {
+        Some(CodebookRuntimeWeights::Quantized {
+            weights: CodebookWeights::deterministic(16, 8).quantize_i16_s32_s64(),
+            embedded: true,
+        })
+    }
+
+    #[test]
+    fn mode_parser_accepts_public_values_and_rejects_unknown_values() {
+        assert_eq!(
+            parse_white_root_order_mode(None).unwrap(),
+            WhiteRootOrderMode::Auto
+        );
+        assert_eq!(
+            parse_white_root_order_mode(Some("auto")).unwrap(),
+            WhiteRootOrderMode::Auto
+        );
+        assert_eq!(
+            parse_white_root_order_mode(Some("ON")).unwrap(),
+            WhiteRootOrderMode::On
+        );
+        assert_eq!(
+            parse_white_root_order_mode(Some("0")).unwrap(),
+            WhiteRootOrderMode::Off
+        );
+        assert!(parse_white_root_order_mode(Some("maybe")).is_err());
+    }
+
+    #[test]
+    fn auto_enables_only_the_embedded_quantized_path() {
+        let embedded = embedded_quantized();
+        let mut searcher = Searcher::new();
+        configure_white_root_order_mode(&mut searcher, &embedded, WhiteRootOrderMode::Auto)
+            .unwrap();
+        assert!(searcher.white_root_order_enabled());
+
+        let custom = match embedded_quantized().unwrap() {
+            CodebookRuntimeWeights::Quantized { weights, .. } => {
+                Some(CodebookRuntimeWeights::Quantized {
+                    weights,
+                    embedded: false,
+                })
+            }
+            CodebookRuntimeWeights::Float(_) => unreachable!(),
+        };
+        let mut custom_searcher = Searcher::new();
+        configure_white_root_order_mode(&mut custom_searcher, &custom, WhiteRootOrderMode::Auto)
+            .unwrap();
+        assert!(!custom_searcher.white_root_order_enabled());
+        assert!(
+            configure_white_root_order_mode(&mut custom_searcher, &custom, WhiteRootOrderMode::On,)
+                .is_err()
+        );
+    }
+}
+
 #[cfg(feature = "codebook-eval")]
 fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
     if !codebook_eval_enabled() {
         return Ok(None);
     }
 
-    let configured_path = std::env::var("FIGRID_CODEBOOK_WEIGHTS")
-        .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_MODEL"))
-        .ok();
-    let bytes = match configured_path.as_deref().map(str::trim) {
+    let configured_path = match std::env::var_os("FIGRID_CODEBOOK_WEIGHTS") {
+        Some(path) => Some(
+            path.into_string()
+                .map_err(|_| "FIGRID_CODEBOOK_WEIGHTS is not valid Unicode".to_string())?,
+        ),
+        None => match std::env::var_os("NORU_CODEBOOK_EVAL_MODEL") {
+            Some(path) => Some(
+                path.into_string()
+                    .map_err(|_| "NORU_CODEBOOK_EVAL_MODEL is not valid Unicode".to_string())?,
+            ),
+            None => None,
+        },
+    };
+    let (bytes, embedded) = match configured_path.as_deref().map(str::trim) {
         Some("") => return Ok(None),
         Some("0") => return Ok(None),
         Some(path)
@@ -148,17 +340,21 @@ fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
         {
             return Ok(None);
         }
-        Some(path) => std::fs::read(path)
-            .map_err(|e| format!("failed to read codebook weights from `{path}`: {e}"))?,
-        None => EMBEDDED_CODEBOOK_JSON.to_vec(),
+        Some(path) => (
+            std::fs::read(path)
+                .map_err(|e| format!("failed to read codebook weights from `{path}`: {e}"))?,
+            false,
+        ),
+        None => (EMBEDDED_CODEBOOK_JSON.to_vec(), true),
     };
 
     let weights = CodebookWeights::from_json_bytes(&bytes)
         .map_err(|e| format!("failed to parse codebook weights: {e}"))?;
     if codebook_quantized_enabled() {
-        Ok(Some(CodebookRuntimeWeights::Quantized(
-            weights.quantize_i16_s32_s64(),
-        )))
+        Ok(Some(CodebookRuntimeWeights::Quantized {
+            weights: weights.quantize_i16_s32_s64(),
+            embedded,
+        }))
     } else {
         Ok(Some(CodebookRuntimeWeights::Float(weights)))
     }
@@ -347,15 +543,23 @@ struct Engine {
 
 impl Engine {
     fn new() -> Result<Self, String> {
+        #[cfg(not(feature = "codebook-eval"))]
+        reject_explicit_white_root_order_without_codebook()?;
         let bytes = load_weights_bytes()?;
         let weights = NnueWeights::load_from_bytes(&bytes, Some(GOMOKU_NNUE_CONFIG))
             .map_err(|e| format!("failed to parse weights: {e}"))?;
+        #[cfg(feature = "codebook-eval")]
+        let codebook_weights = load_codebook_weights()?;
+        #[allow(unused_mut)]
+        let mut searcher = Searcher::new();
+        #[cfg(feature = "codebook-eval")]
+        configure_white_root_order(&mut searcher, &codebook_weights)?;
         Ok(Self {
             board: Board::new(),
             weights,
             #[cfg(feature = "codebook-eval")]
-            codebook_weights: load_codebook_weights()?,
-            searcher: Searcher::new(),
+            codebook_weights,
+            searcher,
             info: ProtocolInfo::new(),
             started: false,
         })
@@ -412,15 +616,16 @@ impl Engine {
                     time_limit,
                 )
             }
-            Some(CodebookRuntimeWeights::Quantized(codebook_weights)) => {
-                self.searcher.search_codebook_eval_quantized(
-                    &mut self.board,
-                    &self.weights,
-                    codebook_weights,
-                    max_depth,
-                    time_limit,
-                )
-            }
+            Some(CodebookRuntimeWeights::Quantized {
+                weights: codebook_weights,
+                ..
+            }) => self.searcher.search_codebook_eval_quantized(
+                &mut self.board,
+                &self.weights,
+                codebook_weights,
+                max_depth,
+                time_limit,
+            ),
             None => self
                 .searcher
                 .search(&mut self.board, &self.weights, max_depth, time_limit),

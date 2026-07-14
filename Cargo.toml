@@ -1,6 +1,6 @@
 [package]
 name = "figrid-board"
-version = "0.8.0"
+version = "0.8.1"
 authors = [
     "nicotina04 <devherdson@gmail.com>",
     "wuwbobo2021 <wuwbobo@outlook.com>",
@@ -16,12 +16,11 @@ A library for the Five-in-a-Row (Gomoku) game, powered by noru (Rust NNUE librar
 keywords = ["game", "board", "gomoku"]
 categories = ["data-structures", "game-development"]
 
-# crates.io 10MB upload limit — NNUE weights (~15MB raw, ~9MB gzip) are
-# distributed via GitHub Releases, not embedded by default. Enable the
-# `embed-weights` feature when building a self-contained tournament binary.
+# Keep raw NNUE weights out of crates.io. The compressed deployment weight is
+# packaged so the advertised `embed-weights` feature also builds downstream;
+# it remains disabled by default and keeps the crate below the 10 MB limit.
 exclude = [
     "models/*.bin",
-    "models/*.bin.gz",
     "experiments/**",
 ]
 
@@ -158,3 +157,6 @@ codegen-units = 1
 lto = true
 strip = true
 panic = "abort"
+
+# Keep this crate standalone when checked out inside a larger Cargo workspace.
+[workspace]

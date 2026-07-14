@@ -1,3 +1,5 @@
+#[cfg(feature = "codebook-eval")]
+use crate::board::RuleSet;
 /// ????????ㅻ깹???????????????袁ｋ쨨?? ??????轅붽틓?????(NNUE ???)
 ///
 /// - ?????獄쏅챶留덌┼???????????(Iterative Deepening)
@@ -15,6 +17,8 @@ use crate::heuristic::{DIR, scan_line};
 use crate::threat_field::{IncrementalThreatField, ThreatFieldUpdateMode};
 use crate::transposition::{Bound, TranspositionTable, TtStats};
 use crate::vct::{THREAT_KIND_COUNT, ThreatKind, VctConfig, classify_move_fast, search_vct};
+#[cfg(feature = "codebook-eval")]
+use crate::white_root_order::WhiteRootOrder;
 use noru::network::NnueWeights;
 use serde_json::json;
 use std::fs::OpenOptions;
@@ -72,6 +76,80 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
                 || trimmed.eq_ignore_ascii_case("no"))
         })
         .unwrap_or(default)
+}
+
+#[cfg(feature = "codebook-eval")]
+fn validate_white_root_order_hook_exclusivity() -> Result<(), String> {
+    const PATH_HOOKS: [&str; 13] = [
+        "NORU_CANDIDATE_RANKER",
+        "NORU_DEF_RELATION_SIDECAR",
+        "NORU_CODEBOOK_SIDECAR",
+        "NORU_RELATION_LITE_SIDECAR",
+        "NORU_RELATION_FUSION_RERANKER",
+        "NORU_CANDIDATE_LOCAL_ENSEMBLE",
+        "NORU_CANDIDATE_LOCAL_ROOT_RISK_MODEL",
+        "NORU_CANDIDATE_LOCAL_ROOT_COMMITMENT_CRITIC_MODEL",
+        "NORU_CANDIDATE_LOCAL_ROOT_TRUST_MODEL",
+        "NORU_CANDIDATE_LOCAL_ROOT_VETO_MODEL",
+        "NORU_CANDIDATE_LOCAL_ROOT_SECONDARY_VETO_MODEL",
+        "NORU_RQ423_ROOT_ACCEPT_MODEL",
+        "NORU_RQ423_ROOT_ACCEPT_HEADONLY_MODEL",
+    ];
+    const BOOLEAN_HOOKS: [&str; 4] = [
+        "NORU_CANDIDATE_LOCAL_ROOT_ORDER_TIEBREAK",
+        "NORU_CANDIDATE_LOCAL_ROOT_TIEBREAK",
+        "NORU_CANDIDATE_LOCAL_ROOT_AB_PROBE",
+        "NORU_ROOT_DEFENSIVE_VCT_VETO",
+    ];
+
+    let disabled = |value: &str| {
+        value.is_empty()
+            || value == "0"
+            || value.eq_ignore_ascii_case("false")
+            || value.eq_ignore_ascii_case("off")
+            || value.eq_ignore_ascii_case("no")
+    };
+    for name in PATH_HOOKS {
+        if std::env::var_os(name).is_some_and(|raw| {
+            raw.to_str()
+                .map(|text| !disabled(text.trim()))
+                .unwrap_or(true)
+        }) {
+            return Err(format!(
+                "white root ordering conflicts with configured root hook {name}"
+            ));
+        }
+    }
+    for name in BOOLEAN_HOOKS {
+        if std::env::var_os(name).is_some_and(|raw| {
+            raw.to_str()
+                .map(|text| !disabled(text.trim()))
+                .unwrap_or(true)
+        }) {
+            return Err(format!(
+                "white root ordering conflicts with enabled root hook {name}"
+            ));
+        }
+    }
+    if let Some(raw) = std::env::var_os("NORU_RELATION_LITE_MODE") {
+        let value = raw
+            .to_str()
+            .ok_or_else(|| "NORU_RELATION_LITE_MODE is not valid Unicode".to_string())?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "root" | "rerank" | "tiebreak" | "tie-break" | "both" | "all" => {
+                return Err(format!(
+                    "white root ordering conflicts with root-enabled NORU_RELATION_LITE_MODE={value:?}"
+                ));
+            }
+            "" | "0" | "false" | "off" | "no" | "1" | "true" | "on" | "leaf" | "eval" => {}
+            other => {
+                return Err(format!(
+                    "invalid NORU_RELATION_LITE_MODE={other:?} while white root ordering is enabled"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn root_defensive_vct_veto_enabled() -> bool {
@@ -1281,6 +1359,34 @@ fn root_relation_strict_gate() -> bool {
     })
 }
 
+#[cfg(feature = "codebook-eval")]
+#[derive(Clone, Copy, Debug)]
+struct WhiteRootOrderEntry {
+    residual: f32,
+    quiet_ongoing: bool,
+}
+
+#[cfg(feature = "codebook-eval")]
+#[derive(Clone, Debug)]
+struct WhiteRootOrderCache {
+    root_zobrist: u64,
+    entries: [Option<WhiteRootOrderEntry>; NUM_CELLS],
+}
+
+#[cfg(feature = "codebook-eval")]
+impl WhiteRootOrderCache {
+    fn new(root_zobrist: u64) -> Self {
+        Self {
+            root_zobrist,
+            entries: [None; NUM_CELLS],
+        }
+    }
+
+    fn entry(&self, mv: Move) -> Option<WhiteRootOrderEntry> {
+        self.entries.get(mv).copied().flatten()
+    }
+}
+
 pub struct Searcher {
     pub nodes: u64,
     /// TT cutoff ?????????용맧硅 ??probe()?????????ル??????遺얘턁???????꿔꺂????釉먯춱?entry???????ル??? depth/bound ???汝뷴젆?琉??誘↔덱?????????????源낅???    /// ????븐뼐????傭?끆?????Β?ｊ콞?轅붽틓?????⑸걦???score ?????獄쏅챶留덌┼?????????????????용맧硅. TT ??????????????????븐뼐???????????????????븐뼐????????
@@ -1311,6 +1417,10 @@ pub struct Searcher {
     move_picker_stats: MovePickerStats,
     shape_stats: SearchShapeStats,
     threat_field: Option<IncrementalThreatField>,
+    #[cfg(feature = "codebook-eval")]
+    white_root_order: Option<WhiteRootOrder>,
+    #[cfg(feature = "codebook-eval")]
+    white_root_order_cache: Option<WhiteRootOrderCache>,
 }
 
 impl Searcher {
@@ -1342,7 +1452,31 @@ impl Searcher {
             use_tail_threat_materialize,
             move_picker_stats: MovePickerStats::default(),
             shape_stats: SearchShapeStats::default(),
+            #[cfg(feature = "codebook-eval")]
+            white_root_order: None,
+            #[cfg(feature = "codebook-eval")]
+            white_root_order_cache: None,
         }
+    }
+
+    /// Enable the shipped White root quiet-move ordering model.
+    ///
+    /// The model is defined for the quantized evaluator bundled with the
+    /// tournament engine. The pbrain adapter enables it automatically only
+    /// for that exact embedded path; library callers must opt in explicitly.
+    #[cfg(feature = "codebook-eval")]
+    pub fn set_white_root_order_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        if enabled {
+            validate_white_root_order_hook_exclusivity()?;
+        }
+        self.white_root_order = enabled.then(WhiteRootOrder::production);
+        self.white_root_order_cache = None;
+        Ok(())
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    pub fn white_root_order_enabled(&self) -> bool {
+        self.white_root_order.is_some()
     }
 
     /// TT ????븐뼐?????????????筌뤾퍓愿??????????獄쏅챶留덌┼?????????search() ???耀붾굝????????????븐뼐???????????遺얘턁??????????????ル?????
@@ -1504,6 +1638,149 @@ impl Searcher {
         self.threat_field = None;
         self.move_picker_stats = MovePickerStats::default();
         self.shape_stats = SearchShapeStats::default();
+        #[cfg(feature = "codebook-eval")]
+        {
+            self.white_root_order_cache = None;
+        }
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    fn prepare_white_root_order_cache(
+        &mut self,
+        board: &Board,
+        weights: &QuantizedCodebookWeights,
+    ) -> Result<(), String> {
+        let Some(policy) = self.white_root_order.as_ref() else {
+            return Ok(());
+        };
+        validate_white_root_order_hook_exclusivity()?;
+        if board.effective_rule_set() != RuleSet::Freestyle
+            || board.side_to_move != Stone::White
+            || board.game_result() != GameResult::Ongoing
+        {
+            return Ok(());
+        }
+
+        let opponent = board.side_to_move.opponent();
+        let forced_defense_root = board
+            .legal_moves()
+            .into_iter()
+            .any(|mv| classify_move_fast(board, mv, opponent) == ThreatKind::Five);
+        if forced_defense_root {
+            return Ok(());
+        }
+
+        let mut cache = WhiteRootOrderCache::new(board.zobrist);
+        let mut scratch = board.clone();
+        let mut extractor = IncrementalQuantizedCodebookEval::new(weights);
+        extractor.refresh(&scratch, weights);
+        for mv in board.candidate_moves() {
+            let attack = classify_move_fast(board, mv, board.side_to_move);
+            let block = classify_move_fast(board, mv, opponent);
+            scratch.make_move(mv);
+            extractor.push_move(&scratch, mv, weights);
+            let quiet_ongoing = scratch.game_result() == GameResult::Ongoing
+                && attack == ThreatKind::None
+                && block == ThreatKind::None;
+            let residual = if quiet_ongoing {
+                let orbit = extractor.explicit_orbit48(weights, Stone::White)?;
+                policy.score_orbit48(&orbit)?
+            } else {
+                0.0
+            };
+            extractor.pop_move(weights);
+            scratch.undo_move();
+            cache.entries[mv] = Some(WhiteRootOrderEntry {
+                residual,
+                quiet_ongoing,
+            });
+        }
+
+        if scratch.black != board.black
+            || scratch.white != board.white
+            || scratch.side_to_move != board.side_to_move
+            || scratch.history != board.history
+            || scratch.zobrist != board.zobrist
+            || scratch.line_pattern_ids.as_ref() != board.line_pattern_ids.as_ref()
+        {
+            return Err("white root ordering scratch state did not restore the root".to_string());
+        }
+        self.white_root_order_cache = Some(cache);
+        Ok(())
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    fn apply_white_root_order(
+        &self,
+        board: &Board,
+        moves: &mut [(Move, bool)],
+        previous_pv: Option<Move>,
+    ) {
+        let Some(policy) = self.white_root_order.as_ref() else {
+            return;
+        };
+        let Some(cache) = self.white_root_order_cache.as_ref() else {
+            return;
+        };
+        if board.effective_rule_set() != RuleSet::Freestyle
+            || board.side_to_move != Stone::White
+            || board.game_result() != GameResult::Ongoing
+        {
+            return;
+        }
+        assert_eq!(
+            cache.root_zobrist, board.zobrist,
+            "white root ordering cache does not match the current root"
+        );
+
+        let root_killers = self.killers[0];
+        let original_position: [usize; NUM_CELLS] = {
+            let mut positions = [usize::MAX; NUM_CELLS];
+            for (index, &(mv, _)) in moves.iter().enumerate() {
+                positions[mv] = index;
+            }
+            positions
+        };
+        let eligible = |mv: Move| {
+            cache.entry(mv).is_some_and(|entry| {
+                entry.quiet_ongoing
+                    && Some(mv) != previous_pv
+                    && Some(mv) != root_killers[0]
+                    && Some(mv) != root_killers[1]
+            })
+        };
+
+        let mut start = 0usize;
+        while start < moves.len() {
+            if !eligible(moves[start].0) {
+                start += 1;
+                continue;
+            }
+            let mut end = start + 1;
+            while end < moves.len() && eligible(moves[end].0) {
+                end += 1;
+            }
+            if end - start >= 2 {
+                let mut score_by_move = [0.0f32; NUM_CELLS];
+                for (run_index, &(mv, _)) in moves[start..end].iter().enumerate() {
+                    let residual = cache
+                        .entry(mv)
+                        .expect("eligible move must be cached")
+                        .residual;
+                    score_by_move[mv] = policy
+                        .add_anchor_to_residual(residual, run_index, end - start)
+                        .unwrap_or_else(|error| {
+                            panic!("invalid white root ordering score: {error}")
+                        });
+                }
+                moves[start..end].sort_by(|&(a, _), &(b, _)| {
+                    score_by_move[b]
+                        .total_cmp(&score_by_move[a])
+                        .then_with(|| original_position[a].cmp(&original_position[b]))
+                });
+            }
+            start = end;
+        }
     }
 
     fn try_root_vct(
@@ -1756,6 +2033,11 @@ impl Searcher {
         max_depth: u32,
         time_limit: Option<Duration>,
     ) -> SearchResult {
+        #[cfg(feature = "codebook-eval")]
+        assert!(
+            self.white_root_order.is_none(),
+            "white root ordering requires the quantized codebook search path"
+        );
         self.nodes = 0;
         self.tt_cutoffs = 0;
         self.aborted = false;
@@ -1779,6 +2061,10 @@ impl Searcher {
         self.threat_field = None;
         self.move_picker_stats = MovePickerStats::default();
         self.shape_stats = SearchShapeStats::default();
+        #[cfg(feature = "codebook-eval")]
+        {
+            self.white_root_order_cache = None;
+        }
         let root_search_decision_audit =
             crate::candidate_local_ensemble::root_search_decision_audit_enabled();
 
@@ -2035,6 +2321,10 @@ impl Searcher {
         max_depth: u32,
         time_limit: Option<Duration>,
     ) -> SearchResult {
+        assert!(
+            self.white_root_order.is_none(),
+            "white root ordering cannot run on the float codebook search path"
+        );
         self.reset_for_search(time_limit);
         let root_search_decision_audit =
             crate::candidate_local_ensemble::root_search_decision_audit_enabled();
@@ -2067,6 +2357,8 @@ impl Searcher {
         if let Some(result) = self.try_root_vct(board, time_limit, root_search_decision_audit) {
             return result;
         }
+        self.prepare_white_root_order_cache(board, codebook_weights)
+            .unwrap_or_else(|error| panic!("invalid white root ordering state: {error}"));
         let scale = codebook_eval_scale();
         let mut inc = QuantizedCodebookEvalState::new(board, codebook_weights, scale);
         self.search_with_eval_state(
@@ -2088,6 +2380,11 @@ impl Searcher {
         max_depth: u32,
         time_limit: Option<Duration>,
     ) -> RootSearchAudit {
+        #[cfg(feature = "codebook-eval")]
+        assert!(
+            self.white_root_order.is_none(),
+            "white root ordering requires the quantized codebook search path"
+        );
         self.nodes = 0;
         self.tt_cutoffs = 0;
         self.aborted = false;
@@ -2100,6 +2397,10 @@ impl Searcher {
         self.tt.clear();
         self.threat_field = None;
         self.shape_stats = SearchShapeStats::default();
+        #[cfg(feature = "codebook-eval")]
+        {
+            self.white_root_order_cache = None;
+        }
 
         self.move_picker_stats = MovePickerStats::default();
         let mut inc = FlatEvalState::new(board, weights);
@@ -2339,6 +2640,8 @@ impl Searcher {
 
         let profile_start = self.profile_start();
         let mut moves = self.order_moves(board, 0, weights);
+        #[cfg(feature = "codebook-eval")]
+        self.apply_white_root_order(board, &mut moves, prev_best);
         self.profile_add(SearchProfileBucket::MovegenOrder, profile_start);
         let relation_fusion_order = if crate::relation_fusion_gate::enabled_for(board) {
             Some(moves.clone())
@@ -4196,6 +4499,185 @@ mod tests {
     use super::*;
     use crate::board::{Board, to_idx};
     use crate::features::GOMOKU_NNUE_CONFIG;
+
+    #[cfg(feature = "codebook-eval")]
+    fn install_white_root_order_entries(
+        searcher: &mut Searcher,
+        board: &Board,
+        entries: &[(Move, f32, bool)],
+    ) {
+        searcher.white_root_order = Some(WhiteRootOrder::production());
+        let mut cache = WhiteRootOrderCache::new(board.zobrist);
+        for &(mv, residual, quiet_ongoing) in entries {
+            cache.entries[mv] = Some(WhiteRootOrderEntry {
+                residual,
+                quiet_ongoing,
+            });
+        }
+        searcher.white_root_order_cache = Some(cache);
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    #[test]
+    fn white_root_order_preserves_barriers_and_reorders_only_quiet_runs() {
+        let mut board = Board::new();
+        board.make_move(to_idx(7, 7));
+        assert_eq!(board.side_to_move, Stone::White);
+
+        let mut searcher = Searcher::new();
+        searcher.killers[0][0] = Some(54);
+        install_white_root_order_entries(
+            &mut searcher,
+            &board,
+            &[
+                (50, 0.0, true),
+                (51, 2.0, true),
+                (52, 9.0, true),
+                (53, 8.0, false),
+                (54, 7.0, true),
+                (55, 0.0, true),
+                (56, 2.0, true),
+            ],
+        );
+        let mut moves = (50..=56).map(|mv| (mv, false)).collect::<Vec<_>>();
+        searcher.apply_white_root_order(&board, &mut moves, Some(52));
+        assert_eq!(
+            moves.iter().map(|&(mv, _)| mv).collect::<Vec<_>>(),
+            vec![51, 50, 52, 53, 54, 56, 55]
+        );
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    #[test]
+    fn white_root_order_builds_one_reusable_cache_for_a_white_root() {
+        let mut board = Board::new();
+        board.make_move(to_idx(7, 7));
+        let ordering = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let codebook = CodebookWeights::deterministic(16, 8).quantize_i16_s32_s64();
+        let mut searcher = Searcher::new();
+        searcher.set_white_root_order_enabled(true).unwrap();
+        searcher
+            .prepare_white_root_order_cache(&board, &codebook)
+            .unwrap();
+
+        let cache = searcher.white_root_order_cache.as_ref().unwrap();
+        assert_eq!(cache.root_zobrist, board.zobrist);
+        assert!(
+            board
+                .candidate_moves()
+                .into_iter()
+                .any(|mv| cache.entry(mv).is_some_and(|entry| entry.quiet_ongoing))
+        );
+        let baseline = searcher.order_moves(&board, 0, &ordering);
+        let mut first = baseline.clone();
+        let mut repeated = baseline;
+        searcher.apply_white_root_order(&board, &mut first, None);
+        searcher.apply_white_root_order(&board, &mut repeated, None);
+        assert_eq!(first, repeated);
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    #[test]
+    fn white_root_order_is_unobservable_on_black_forced_and_terminal_roots() {
+        let weights = CodebookWeights::deterministic(16, 8).quantize_i16_s32_s64();
+
+        let black = Board::new();
+        let mut black_searcher = Searcher::new();
+        black_searcher.set_white_root_order_enabled(true).unwrap();
+        black_searcher
+            .prepare_white_root_order_cache(&black, &weights)
+            .unwrap();
+        assert!(black_searcher.white_root_order_cache.is_none());
+
+        let mut standard = Board::new();
+        standard.set_rule_set(RuleSet::Standard);
+        standard.make_move(to_idx(7, 7));
+        let mut standard_searcher = Searcher::new();
+        standard_searcher
+            .set_white_root_order_enabled(true)
+            .unwrap();
+        standard_searcher
+            .prepare_white_root_order_cache(&standard, &weights)
+            .unwrap();
+        assert!(standard_searcher.white_root_order_cache.is_none());
+
+        let mut forced = Board::new();
+        for mv in [
+            to_idx(7, 3),
+            to_idx(0, 0),
+            to_idx(7, 4),
+            to_idx(0, 2),
+            to_idx(7, 5),
+            to_idx(0, 4),
+            to_idx(7, 6),
+        ] {
+            forced.make_move(mv);
+        }
+        let mut forced_searcher = Searcher::new();
+        forced_searcher.set_white_root_order_enabled(true).unwrap();
+        forced_searcher
+            .prepare_white_root_order_cache(&forced, &weights)
+            .unwrap();
+        assert!(forced_searcher.white_root_order_cache.is_none());
+
+        let mut terminal = Board::new();
+        for mv in [
+            to_idx(7, 3),
+            to_idx(0, 0),
+            to_idx(7, 4),
+            to_idx(0, 2),
+            to_idx(7, 5),
+            to_idx(0, 4),
+            to_idx(7, 6),
+            to_idx(0, 6),
+            to_idx(7, 7),
+        ] {
+            terminal.make_move(mv);
+        }
+        assert_ne!(terminal.game_result(), GameResult::Ongoing);
+        let mut terminal_searcher = Searcher::new();
+        terminal_searcher
+            .set_white_root_order_enabled(true)
+            .unwrap();
+        terminal_searcher
+            .prepare_white_root_order_cache(&terminal, &weights)
+            .unwrap();
+        assert!(terminal_searcher.white_root_order_cache.is_none());
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    #[test]
+    #[should_panic(expected = "requires the quantized codebook search path")]
+    fn white_root_order_rejects_generic_nnue_search() {
+        let mut board = Board::new();
+        let ordering = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let mut searcher = Searcher::new();
+        searcher.set_white_root_order_enabled(true).unwrap();
+        let _ = searcher.search(&mut board, &ordering, 1, None);
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    #[test]
+    #[should_panic(expected = "cannot run on the float codebook search path")]
+    fn white_root_order_rejects_float_codebook_search() {
+        let mut board = Board::new();
+        let ordering = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let codebook = CodebookWeights::deterministic(16, 8);
+        let mut searcher = Searcher::new();
+        searcher.set_white_root_order_enabled(true).unwrap();
+        let _ = searcher.search_codebook_eval(&mut board, &ordering, &codebook, 1, None);
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    #[test]
+    #[should_panic(expected = "requires the quantized codebook search path")]
+    fn white_root_order_rejects_flat_root_candidate_audit() {
+        let mut board = Board::new();
+        let ordering = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let mut searcher = Searcher::new();
+        searcher.set_white_root_order_enabled(true).unwrap();
+        let _ = searcher.audit_root_candidates(&mut board, &ordering, 1, None);
+    }
 
     #[test]
     fn test_search_finds_winning_move() {

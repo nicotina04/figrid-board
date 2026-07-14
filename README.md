@@ -32,6 +32,11 @@
 - Rule support: Freestyle and Standard (exact-five). Renju and Caro currently rejected at the protocol layer.
 - Optional `avx512` cargo feature: opportunistic ~2× evaluation speedup on AVX-512 hardware, with automatic AVX-2 runtime fallback. Requires Rust ≥ 1.89; off by default so library users on older toolchains and crates.io itself can build.
 - Optional `embed-weights` feature: bake the flat NNUE weights into the binary at build time. For the 0.8 deployment evaluator, also enable `codebook-eval`; that embeds the swap-closed codebook model and uses the quantized codebook evaluator by default.
+- Built-in Freestyle White root quiet-move ordering for the embedded quantized codebook.
+  It refines only eligible quiet runs and leaves tactical/PV/killer boundaries
+  intact. Set `FIGRID_WHITE_ROOT_ORDER=off` for the 0.8.0 ordering path;
+  custom and floating-point codebooks, plus non-Freestyle rules, disable it
+  automatically.
 
 ## Quick start
 
@@ -46,6 +51,10 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release --bin pbrain-figrid --fea
 Add `target/release/pbrain-figrid` (or `.exe` on Windows) to Piskvork as an AI player. With `embed-weights,codebook-eval`, the flat NNUE ordering weights and the quantized codebook evaluator are both available without external model files.
 
 If you build without `embed-weights`, set `FIGRID_WEIGHTS=path/to/weights.bin` or place the file at `./models/` so the binary can locate the flat ordering weights at startup. To force the old flat evaluator in a `codebook-eval` build, set `FIGRID_CODEBOOK_EVAL=off` or `FIGRID_CODEBOOK_WEIGHTS=off`.
+
+`FIGRID_WHITE_ROOT_ORDER` accepts `auto` (default), `on`, or `off`. Explicit
+`on` fails closed unless the embedded quantized codebook is active and no
+other root rank/replace/veto hook is configured.
 
 ### Use as a library
 

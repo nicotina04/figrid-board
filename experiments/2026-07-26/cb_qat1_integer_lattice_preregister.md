@@ -5,6 +5,14 @@ Date: 2026-07-26 KST
 Status: **preregistered before CB-QAT1 implementation, headroom census, paired
 fine-tuning, validation, artifact construction, timing, or games.**
 
+Pre-implementation factual erratum: the initial preregistration commit
+`55aee08` correctly recorded the `Cargo.lock` SHA-256 but incorrectly copied
+its byte length as 20,498. The committed git blob and current byte-identical
+file are 11,841 bytes. This revision corrects only that provenance field
+before any production-corpus P0 run, fitting, artifact construction, timing,
+or games; no question, input, statistic, threshold, seed, or decision rule
+changes.
+
 ## Question and claim boundary
 
 The accepted 0.8.2 product representation remains the flat swap-closed
@@ -694,7 +702,7 @@ compile-time source and embedded-input hashes, executable hash, CPU identity,
 and compiled/runtime AVX2, BMI2, and FMA availability. AVX2 and BMI2 are
 required. The registered toolchain is rustc 1.88.0 commit
 `6b00bc3880198600130e1cf62b8f8a93494488cc`, LLVM 20.1.5, and cargo 1.88.0
-commit `873a06493`. `Cargo.lock` is 20,498 bytes, SHA-256
+commit `873a06493`. `Cargo.lock` is 11,841 bytes, SHA-256
 `3F90AA762C0D7B1F0172C22397588835C79B9C924BB5A931D162B2A5714A202C`;
 it locks noru 2.2.0 with registry checksum
 `83654c4f008197f515f315b6760a4781c6f734a6f0205e522b90119a8e1d29f2`.

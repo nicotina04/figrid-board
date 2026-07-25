@@ -979,11 +979,19 @@ fn manifest_dir() -> Result<PathBuf, String> {
     })
 }
 
+fn git_safe_directory(manifest: &Path) -> String {
+    let rendered = manifest.to_string_lossy().replace('\\', "/");
+    if let Some(unc) = rendered.strip_prefix("//?/UNC/") {
+        format!("//{unc}")
+    } else if let Some(drive_path) = rendered.strip_prefix("//?/") {
+        drive_path.to_string()
+    } else {
+        rendered
+    }
+}
+
 fn invoke_git(manifest: &Path, args: &[&str]) -> Result<String, String> {
-    let safe = format!(
-        "safe.directory={}",
-        manifest.to_string_lossy().replace('\\', "/")
-    );
+    let safe = format!("safe.directory={}", git_safe_directory(manifest));
     let output = Command::new("git")
         .arg("-c")
         .arg(safe)
@@ -3369,6 +3377,30 @@ mod tests {
         assert!(parse_args_from(["--out-report", "--other"]).is_err());
         assert!(parse_args_from(["--out-report", "a", "--out-report", "b"]).is_err());
         assert!(parse_args_from(["new.json"]).is_err());
+    }
+
+    #[test]
+    fn git_safe_directory_normalizes_windows_verbatim_paths() {
+        assert_eq!(
+            git_safe_directory(Path::new(r"\\?\C:\work\figrid")),
+            "C:/work/figrid"
+        );
+        assert_eq!(
+            git_safe_directory(Path::new(r"\\?\UNC\server\share\figrid")),
+            "//server/share/figrid"
+        );
+        assert_eq!(
+            git_safe_directory(Path::new(r"C:\work\figrid")),
+            "C:/work/figrid"
+        );
+    }
+
+    #[test]
+    fn git_safe_directory_allows_the_canonical_manifest() {
+        let manifest = manifest_dir().unwrap();
+        let head = invoke_git(&manifest, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.len(), 40);
+        assert!(head.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[test]

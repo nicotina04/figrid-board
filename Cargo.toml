@@ -170,6 +170,11 @@ name = "cb-voc1-census"
 path = "bin/cb_voc1_census.rs"
 required-features = ["codebook-eval"]
 
+[[bin]]
+name = "cb-gh0-precondition"
+path = "bin/cb_gh0_precondition.rs"
+required-features = ["codebook-eval"]
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

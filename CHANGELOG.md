@@ -1,5 +1,20 @@
 # Changes
 
+## Unreleased
+* **Promote exact directional deltas for the quantized codebook evaluator.**
+  Incremental make/undo now updates only changed `(cell, direction)`
+  embeddings and applies one ReLU/region delta per affected cell. On the
+  frozen 1,022-root product trace, deterministic VCT-OFF wall time fell
+  19.68% and the sealed product VCT-ON rerun fell 9.25%, with identical best
+  moves, scores, depths, and node counts in both comparisons. At two and
+  30 seconds the engine visited 21.58% and 18.77% more nodes without median
+  depth regression. A 100,000-operation mixed make/undo audit and a separate
+  100,000-transition deployed-model audit had zero mismatches.
+* The shipped pbrain enables this path by default. Library `Searcher` callers
+  remain opt-in, and `NORU_CODEBOOK_DIRECTIONAL_DELTA=off` provides immediate
+  product rollback. No model, feature, pooling, move-order, or proof rule
+  changed.
+
 ## 0.8.2 (2026-07-25)
 * **Promote packed Pattern4 windows in `pbrain-figrid`.** Make/undo now
   changes the affected two-bit slots instead of rereading every 11-cell

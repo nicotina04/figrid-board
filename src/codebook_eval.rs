@@ -10,6 +10,18 @@ pub use crate::search::EvalStateStepProfile;
 use serde_json::Value;
 
 const MAX_DIRTY_CELLS: usize = 41;
+// Per component, a cell is the sum of four i16 embeddings. A region contains
+// 25 cells. The wider intermediate bounds also cover one replacement delta
+// and one activation delta before the exact invariant is restored.
+const _: () = {
+    let raw_abs_bound = 4 * (i16::MAX as i64 + 1);
+    let replacement_delta_abs_bound = i16::MAX as i64 - i16::MIN as i64;
+    let raw_intermediate_abs_bound = raw_abs_bound + replacement_delta_abs_bound;
+    let region_abs_bound = 25 * raw_abs_bound;
+    let region_intermediate_abs_bound = region_abs_bound + raw_abs_bound;
+    assert!(raw_intermediate_abs_bound <= i32::MAX as i64);
+    assert!(region_intermediate_abs_bound <= i32::MAX as i64);
+};
 const REGIONS: usize = 9;
 pub const QUANT_EMBED_SCALE: i32 = 32;
 pub const QUANT_HEAD_SCALE: i32 = 64;
@@ -401,6 +413,8 @@ pub struct IncrementalQuantizedCodebookEval {
     stack: Vec<QuantUndoRecord>,
     stack_len: usize,
     last_dirty_cells: usize,
+    last_direction_deltas: usize,
+    directional_delta: Option<QuantDirectionalDeltaState>,
 }
 
 struct QuantUndoRecord {
@@ -408,19 +422,42 @@ struct QuantUndoRecord {
     materialized: bool,
     cells: [usize; MAX_DIRTY_CELLS],
     pattern_ids: [[u16; 4]; MAX_DIRTY_CELLS],
+    old_pattern_ids: [[u16; 4]; MAX_DIRTY_CELLS],
     black: Vec<i32>,
     white: Vec<i32>,
 }
 
-impl QuantUndoRecord {
+struct QuantDirectionalDeltaState {
+    raw_black: Vec<i32>,
+    raw_white: Vec<i32>,
+    logical_pattern_ids: Box<[[u16; 4]; NUM_CELLS]>,
+}
+
+impl QuantDirectionalDeltaState {
     fn new(dim: usize) -> Self {
+        Self {
+            raw_black: vec![0; NUM_CELLS * dim],
+            raw_white: vec![0; NUM_CELLS * dim],
+            logical_pattern_ids: Box::new([[0u16; 4]; NUM_CELLS]),
+        }
+    }
+}
+
+impl QuantUndoRecord {
+    fn new(dim: usize, store_cell_backups: bool) -> Self {
+        let backup_len = if store_cell_backups {
+            MAX_DIRTY_CELLS * dim
+        } else {
+            0
+        };
         Self {
             len: 0,
             materialized: false,
             cells: [0; MAX_DIRTY_CELLS],
             pattern_ids: [[0u16; 4]; MAX_DIRTY_CELLS],
-            black: vec![0; MAX_DIRTY_CELLS * dim],
-            white: vec![0; MAX_DIRTY_CELLS * dim],
+            old_pattern_ids: [[0u16; 4]; MAX_DIRTY_CELLS],
+            black: vec![0; backup_len],
+            white: vec![0; backup_len],
         }
     }
 
@@ -432,6 +469,13 @@ impl QuantUndoRecord {
 
 impl IncrementalQuantizedCodebookEval {
     pub fn new(weights: &QuantizedCodebookWeights) -> Self {
+        Self::new_with_directional_delta(weights, false)
+    }
+
+    pub fn new_with_directional_delta(
+        weights: &QuantizedCodebookWeights,
+        directional_delta: bool,
+    ) -> Self {
         weights.validate();
         Self {
             cell_black: vec![0; NUM_CELLS * weights.dim],
@@ -439,11 +483,18 @@ impl IncrementalQuantizedCodebookEval {
             features_black: vec![0; weights.feature_len()],
             features_white: vec![0; weights.feature_len()],
             stack: (0..NUM_CELLS)
-                .map(|_| QuantUndoRecord::new(weights.dim))
+                .map(|_| QuantUndoRecord::new(weights.dim, !directional_delta))
                 .collect(),
             stack_len: 0,
             last_dirty_cells: 0,
+            last_direction_deltas: 0,
+            directional_delta: directional_delta
+                .then(|| QuantDirectionalDeltaState::new(weights.dim)),
         }
+    }
+
+    pub fn directional_delta_enabled(&self) -> bool {
+        self.directional_delta.is_some()
     }
 
     pub fn refresh(&mut self, board: &Board, weights: &QuantizedCodebookWeights) {
@@ -485,8 +536,29 @@ impl IncrementalQuantizedCodebookEval {
             );
         }
 
+        if let Some(state) = self.directional_delta.as_mut() {
+            state
+                .logical_pattern_ids
+                .copy_from_slice(board.line_pattern_ids.as_ref());
+            for cell in 0..NUM_CELLS {
+                compute_cell_quantized_raw_from_pattern_ids(
+                    &board.line_pattern_ids[cell],
+                    weights,
+                    Stone::Black,
+                    quant_cell_slice_mut(&mut state.raw_black, cell, weights.dim),
+                );
+                compute_cell_quantized_raw_from_pattern_ids(
+                    &board.line_pattern_ids[cell],
+                    weights,
+                    Stone::White,
+                    quant_cell_slice_mut(&mut state.raw_white, cell, weights.dim),
+                );
+            }
+        }
+
         self.stack_len = 0;
         self.last_dirty_cells = 0;
+        self.last_direction_deltas = 0;
     }
 
     pub fn push_move(&mut self, board: &Board, mv: Move, weights: &QuantizedCodebookWeights) {
@@ -501,6 +573,9 @@ impl IncrementalQuantizedCodebookEval {
         _profile_enabled: bool,
     ) -> EvalStateStepProfile {
         weights.validate();
+        if self.directional_delta.is_some() {
+            return self.push_move_directional(board, mv, weights, _profile_enabled);
+        }
         let mut profile = EvalStateStepProfile {
             push_calls: 1,
             ..EvalStateStepProfile::default()
@@ -530,11 +605,70 @@ impl IncrementalQuantizedCodebookEval {
         profile
     }
 
+    fn push_move_directional(
+        &mut self,
+        board: &Board,
+        mv: Move,
+        weights: &QuantizedCodebookWeights,
+        profile_enabled: bool,
+    ) -> EvalStateStepProfile {
+        weights.validate();
+        let mut profile = EvalStateStepProfile {
+            push_calls: 1,
+            ..EvalStateStepProfile::default()
+        };
+        let start = EvalStateStepProfile::start(profile_enabled);
+        let dirty = dirty_cells_for_move(mv);
+        profile.add_dirty_list(start);
+        debug_assert!(dirty.len() <= MAX_DIRTY_CELLS);
+        debug_assert!(
+            self.stack_len < self.stack.len(),
+            "quantized codebook undo stack overflow"
+        );
+
+        let undo = &mut self.stack[self.stack_len];
+        undo.clear();
+        let state = self
+            .directional_delta
+            .as_mut()
+            .expect("directional delta state enabled");
+        let start = EvalStateStepProfile::start(profile_enabled);
+        let mut direction_deltas = 0usize;
+        for cell in dirty.iter().copied() {
+            let old_ids = state.logical_pattern_ids[cell];
+            let new_ids = board.line_pattern_ids[cell];
+            let changed = old_ids
+                .iter()
+                .zip(new_ids.iter())
+                .filter(|(old, new)| old != new)
+                .count();
+            if changed == 0 {
+                continue;
+            }
+            let undo_idx = undo.len;
+            undo.cells[undo_idx] = cell;
+            undo.old_pattern_ids[undo_idx] = old_ids;
+            undo.pattern_ids[undo_idx] = new_ids;
+            undo.len += 1;
+            direction_deltas += changed;
+            state.logical_pattern_ids[cell] = new_ids;
+        }
+        profile.add_frame_write(start);
+
+        self.last_dirty_cells = dirty.len();
+        self.last_direction_deltas = direction_deltas;
+        self.stack_len += 1;
+        profile
+    }
+
     fn materialize_pending(
         &mut self,
         weights: &QuantizedCodebookWeights,
         profile_enabled: bool,
     ) -> EvalStateStepProfile {
+        if self.directional_delta.is_some() {
+            return self.materialize_pending_directional(weights, profile_enabled);
+        }
         let mut profile = EvalStateStepProfile::default();
         for frame_idx in 0..self.stack_len {
             if self.stack[frame_idx].materialized {
@@ -612,6 +746,74 @@ impl IncrementalQuantizedCodebookEval {
         profile
     }
 
+    fn materialize_pending_directional(
+        &mut self,
+        weights: &QuantizedCodebookWeights,
+        profile_enabled: bool,
+    ) -> EvalStateStepProfile {
+        let mut profile = EvalStateStepProfile::default();
+        let Self {
+            cell_black,
+            cell_white,
+            features_black,
+            features_white,
+            stack,
+            stack_len,
+            directional_delta,
+            ..
+        } = self;
+        let state = directional_delta
+            .as_mut()
+            .expect("directional delta state enabled");
+
+        for undo in stack.iter_mut().take(*stack_len) {
+            if undo.materialized {
+                continue;
+            }
+            for undo_idx in 0..undo.len {
+                let cell = undo.cells[undo_idx];
+                let old_ids = &undo.old_pattern_ids[undo_idx];
+                let new_ids = &undo.pattern_ids[undo_idx];
+
+                let start = EvalStateStepProfile::start(profile_enabled);
+                apply_quantized_pattern_delta_to_raw(
+                    old_ids,
+                    new_ids,
+                    weights,
+                    Stone::Black,
+                    quant_cell_slice_mut(&mut state.raw_black, cell, weights.dim),
+                );
+                apply_quantized_pattern_delta_to_raw(
+                    old_ids,
+                    new_ids,
+                    weights,
+                    Stone::White,
+                    quant_cell_slice_mut(&mut state.raw_white, cell, weights.dim),
+                );
+                profile.add_recompute(start);
+
+                let start = EvalStateStepProfile::start(profile_enabled);
+                refresh_quantized_cell_activation(
+                    &state.raw_black,
+                    cell_black,
+                    features_black,
+                    cell,
+                    weights.dim,
+                );
+                refresh_quantized_cell_activation(
+                    &state.raw_white,
+                    cell_white,
+                    features_white,
+                    cell,
+                    weights.dim,
+                );
+                profile.add_aggregate(start);
+            }
+            undo.materialized = true;
+        }
+        profile
+    }
+
     pub fn pop_move(&mut self, weights: &QuantizedCodebookWeights) {
         let _ = self.pop_move_profiled(weights, false);
     }
@@ -627,6 +829,9 @@ impl IncrementalQuantizedCodebookEval {
         };
         if self.stack_len == 0 {
             return profile;
+        }
+        if self.directional_delta.is_some() {
+            return self.pop_move_directional(weights, profile_enabled, profile);
         }
         self.stack_len -= 1;
         let undo = &self.stack[self.stack_len];
@@ -679,6 +884,79 @@ impl IncrementalQuantizedCodebookEval {
             profile.add_aggregate(start);
         }
         self.last_dirty_cells = 0;
+        profile
+    }
+
+    fn pop_move_directional(
+        &mut self,
+        weights: &QuantizedCodebookWeights,
+        profile_enabled: bool,
+        mut profile: EvalStateStepProfile,
+    ) -> EvalStateStepProfile {
+        self.stack_len -= 1;
+        let Self {
+            cell_black,
+            cell_white,
+            features_black,
+            features_white,
+            stack,
+            stack_len,
+            directional_delta,
+            ..
+        } = self;
+        let undo = &stack[*stack_len];
+        let state = directional_delta
+            .as_mut()
+            .expect("directional delta state enabled");
+
+        if undo.materialized {
+            for undo_idx in (0..undo.len).rev() {
+                let cell = undo.cells[undo_idx];
+                let old_ids = &undo.old_pattern_ids[undo_idx];
+                let new_ids = &undo.pattern_ids[undo_idx];
+
+                let start = EvalStateStepProfile::start(profile_enabled);
+                apply_quantized_pattern_delta_to_raw(
+                    new_ids,
+                    old_ids,
+                    weights,
+                    Stone::Black,
+                    quant_cell_slice_mut(&mut state.raw_black, cell, weights.dim),
+                );
+                apply_quantized_pattern_delta_to_raw(
+                    new_ids,
+                    old_ids,
+                    weights,
+                    Stone::White,
+                    quant_cell_slice_mut(&mut state.raw_white, cell, weights.dim),
+                );
+                profile.add_restore(start);
+
+                let start = EvalStateStepProfile::start(profile_enabled);
+                refresh_quantized_cell_activation(
+                    &state.raw_black,
+                    cell_black,
+                    features_black,
+                    cell,
+                    weights.dim,
+                );
+                refresh_quantized_cell_activation(
+                    &state.raw_white,
+                    cell_white,
+                    features_white,
+                    cell,
+                    weights.dim,
+                );
+                profile.add_aggregate(start);
+            }
+        }
+
+        for undo_idx in (0..undo.len).rev() {
+            let cell = undo.cells[undo_idx];
+            state.logical_pattern_ids[cell] = undo.old_pattern_ids[undo_idx];
+        }
+        self.last_dirty_cells = 0;
+        self.last_direction_deltas = 0;
         profile
     }
 
@@ -768,6 +1046,10 @@ impl IncrementalQuantizedCodebookEval {
     pub fn last_dirty_cells(&self) -> usize {
         self.last_dirty_cells
     }
+
+    pub fn last_direction_deltas(&self) -> usize {
+        self.last_direction_deltas
+    }
 }
 
 pub fn evaluate_full_quantized(board: &Board, weights: &QuantizedCodebookWeights) -> f32 {
@@ -846,6 +1128,18 @@ fn compute_cell_quantized_from_pattern_ids(
     perspective: Stone,
     out: &mut [i32],
 ) {
+    compute_cell_quantized_raw_from_pattern_ids(pattern_ids, weights, perspective, out);
+    for x in out {
+        *x = (*x).max(0);
+    }
+}
+
+fn compute_cell_quantized_raw_from_pattern_ids(
+    pattern_ids: &[u16; 4],
+    weights: &QuantizedCodebookWeights,
+    perspective: Stone,
+    out: &mut [i32],
+) {
     out.fill(0);
     let swap = perspective == Stone::White;
     for &pid in pattern_ids {
@@ -855,8 +1149,56 @@ fn compute_cell_quantized_from_pattern_ids(
             out[d] += weights.embeddings[emb_base + d] as i32;
         }
     }
-    for x in out {
-        *x = (*x).max(0);
+}
+
+fn apply_quantized_pattern_delta_to_raw(
+    old_pattern_ids: &[u16; 4],
+    new_pattern_ids: &[u16; 4],
+    weights: &QuantizedCodebookWeights,
+    perspective: Stone,
+    raw: &mut [i32],
+) {
+    let swap = perspective == Stone::White;
+    for dir_idx in 0..4 {
+        let old_pid = old_pattern_ids[dir_idx];
+        let new_pid = new_pattern_ids[dir_idx];
+        if old_pid == new_pid {
+            continue;
+        }
+        let old_pid = if swap {
+            swap_mapped_id(old_pid)
+        } else {
+            old_pid
+        };
+        let new_pid = if swap {
+            swap_mapped_id(new_pid)
+        } else {
+            new_pid
+        };
+        let old_base = old_pid as usize * weights.dim;
+        let new_base = new_pid as usize * weights.dim;
+        for d in 0..weights.dim {
+            raw[d] +=
+                weights.embeddings[new_base + d] as i32 - weights.embeddings[old_base + d] as i32;
+        }
+    }
+}
+
+fn refresh_quantized_cell_activation(
+    raw_cells: &[i32],
+    activated_cells: &mut [i32],
+    features: &mut [i32],
+    cell: usize,
+    dim: usize,
+) {
+    let region = region_of_cell(cell);
+    let cell_base = cell * dim;
+    let feature_base = region * dim;
+    for d in 0..dim {
+        let new_value = raw_cells[cell_base + d].max(0);
+        let old_value = activated_cells[cell_base + d];
+        activated_cells[cell_base + d] = new_value;
+        features[feature_base + d] += new_value - old_value;
     }
 }
 
@@ -1112,6 +1454,149 @@ mod tests {
     }
 
     #[test]
+    fn quantized_directional_delta_matches_legacy_and_full_smoke() {
+        let weights = CodebookWeights::deterministic(16, 8).quantize_i16_s32_s64();
+        let moves = [
+            112, 113, 97, 98, 127, 128, 111, 114, 96, 99, 126, 129, 82, 83, 84, 85, 100, 101, 115,
+            116,
+        ];
+        let mut board = Board::new();
+        let mut legacy = IncrementalQuantizedCodebookEval::new(&weights);
+        let mut delta =
+            IncrementalQuantizedCodebookEval::new_with_directional_delta(&weights, true);
+        legacy.refresh(&board, &weights);
+        delta.refresh(&board, &weights);
+        assert!(delta.directional_delta_enabled());
+        assert_quantized_directional_state(&board, &mut delta, &weights);
+
+        for (ply, &mv) in moves.iter().enumerate() {
+            if !board.is_empty(mv) {
+                continue;
+            }
+            board.make_move(mv);
+            legacy.push_move(&board, mv, &weights);
+            delta.push_move(&board, mv, &weights);
+            assert_eq!(
+                delta
+                    .directional_delta
+                    .as_ref()
+                    .unwrap()
+                    .logical_pattern_ids
+                    .as_ref(),
+                board.line_pattern_ids.as_ref()
+            );
+            if ply % 3 == 2 {
+                assert_eq!(
+                    delta.value(&board, &weights).to_bits(),
+                    legacy.value(&board, &weights).to_bits()
+                );
+                assert_quantized_directional_state(&board, &mut delta, &weights);
+            }
+        }
+        assert_quantized_directional_state(&board, &mut delta, &weights);
+
+        for ply in (0..moves.len()).rev() {
+            if board.history.is_empty() {
+                break;
+            }
+            board.undo_move();
+            legacy.pop_move(&weights);
+            delta.pop_move(&weights);
+            assert_eq!(
+                delta
+                    .directional_delta
+                    .as_ref()
+                    .unwrap()
+                    .logical_pattern_ids
+                    .as_ref(),
+                board.line_pattern_ids.as_ref()
+            );
+            if ply % 4 == 0 {
+                assert_eq!(
+                    delta.value(&board, &weights).to_bits(),
+                    legacy.value(&board, &weights).to_bits()
+                );
+                assert_quantized_directional_state(&board, &mut delta, &weights);
+            }
+        }
+        assert_quantized_directional_state(&board, &mut delta, &weights);
+    }
+
+    #[test]
+    #[ignore = "CB-D1 release gate: run explicitly with --release --ignored"]
+    fn quantized_directional_delta_100k_mixed_make_undo_full_rebuild_equality() {
+        const OPERATIONS: usize = 100_000;
+        const FULL_REBUILD_PERIOD: usize = 97;
+
+        let weights = CodebookWeights::deterministic(16, 8).quantize_i16_s32_s64();
+        let mut board = Board::new();
+        let mut legacy = IncrementalQuantizedCodebookEval::new(&weights);
+        let mut delta =
+            IncrementalQuantizedCodebookEval::new_with_directional_delta(&weights, true);
+        legacy.refresh(&board, &weights);
+        delta.refresh(&board, &weights);
+        let mut rng = TestRng::new(0xCBD1_2026_0725_0001);
+        let mut makes = 0usize;
+        let mut undos = 0usize;
+        let mut materializations = 0usize;
+        let mut direction_deltas = 0usize;
+
+        for operation in 1..=OPERATIONS {
+            let should_undo =
+                !board.history.is_empty() && (board.move_count >= 180 || rng.usize(4) == 0);
+            if should_undo {
+                board.undo_move();
+                legacy.pop_move(&weights);
+                delta.pop_move(&weights);
+                undos += 1;
+            } else {
+                let moves = board.legal_moves();
+                let mv = moves[rng.usize(moves.len())];
+                board.make_move(mv);
+                legacy.push_move(&board, mv, &weights);
+                delta.push_move(&board, mv, &weights);
+                direction_deltas += delta.last_direction_deltas();
+                makes += 1;
+            }
+
+            let state = delta.directional_delta.as_ref().unwrap();
+            assert_eq!(
+                state.logical_pattern_ids.as_ref(),
+                board.line_pattern_ids.as_ref(),
+                "logical Pattern4 IDs at operation {operation}"
+            );
+
+            if rng.usize(8) == 0 || operation % FULL_REBUILD_PERIOD == 0 || operation == OPERATIONS
+            {
+                assert_eq!(
+                    delta.value(&board, &weights).to_bits(),
+                    legacy.value(&board, &weights).to_bits(),
+                    "legacy value at operation {operation}"
+                );
+                materializations += 1;
+            }
+            if operation % FULL_REBUILD_PERIOD == 0 || operation == OPERATIONS {
+                assert_quantized_directional_state(&board, &mut delta, &weights);
+            }
+        }
+
+        while !board.history.is_empty() {
+            board.undo_move();
+            legacy.pop_move(&weights);
+            delta.pop_move(&weights);
+        }
+        assert_quantized_directional_state(&board, &mut delta, &weights);
+        assert_eq!(
+            delta.value(&board, &weights).to_bits(),
+            legacy.value(&board, &weights).to_bits()
+        );
+        eprintln!(
+            "CB-D1 operations={OPERATIONS} makes={makes} undos={undos} \
+             materializations={materializations} direction_deltas={direction_deltas}"
+        );
+    }
+
+    #[test]
     #[ignore = "RQ542 gate: run explicitly with --release --features codebook-eval"]
     fn codebook_incremental_100k_transition_gate() {
         let weights = CodebookWeights::deterministic(16, 8);
@@ -1266,6 +1751,65 @@ mod tests {
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() <= TOL
+    }
+
+    fn assert_quantized_directional_state(
+        board: &Board,
+        delta: &mut IncrementalQuantizedCodebookEval,
+        weights: &QuantizedCodebookWeights,
+    ) {
+        let actual_value = delta.value(board, weights);
+        let full = {
+            let mut full = IncrementalQuantizedCodebookEval::new(weights);
+            full.refresh(board, weights);
+            full
+        };
+        assert_eq!(
+            actual_value.to_bits(),
+            quant_value_from_features(
+                match board.side_to_move {
+                    Stone::Black => &full.features_black,
+                    Stone::White => &full.features_white,
+                },
+                weights
+            )
+            .to_bits()
+        );
+        assert_eq!(delta.cell_black, full.cell_black);
+        assert_eq!(delta.cell_white, full.cell_white);
+        assert_eq!(delta.features_black, full.features_black);
+        assert_eq!(delta.features_white, full.features_white);
+
+        let state = delta.directional_delta.as_ref().unwrap();
+        assert_eq!(
+            state.logical_pattern_ids.as_ref(),
+            board.line_pattern_ids.as_ref()
+        );
+        let mut expected = vec![0i32; weights.dim];
+        for cell in 0..NUM_CELLS {
+            compute_cell_quantized_raw_from_pattern_ids(
+                &board.line_pattern_ids[cell],
+                weights,
+                Stone::Black,
+                &mut expected,
+            );
+            assert_eq!(
+                quant_cell_slice(&state.raw_black, cell, weights.dim),
+                expected.as_slice(),
+                "Black raw cell {cell}"
+            );
+            compute_cell_quantized_raw_from_pattern_ids(
+                &board.line_pattern_ids[cell],
+                weights,
+                Stone::White,
+                &mut expected,
+            );
+            assert_eq!(
+                quant_cell_slice(&state.raw_white, cell, weights.dim),
+                expected.as_slice(),
+                "White raw cell {cell}"
+            );
+        }
     }
 
     struct TestRng(u64);

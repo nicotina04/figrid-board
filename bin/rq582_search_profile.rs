@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "codebook-eval")]
 use figrid_board::codebook_eval::{CodebookWeights, QuantizedCodebookWeights};
 use figrid_board::{
-    Board, GOMOKU_NNUE_CONFIG, MovePickerStats, SearchProfileSnapshot, SearchShapeStats,
-    Searcher, to_idx, to_rc,
+    Board, GOMOKU_NNUE_CONFIG, MovePickerStats, SearchProfileSnapshot, SearchShapeStats, Searcher,
+    to_idx, to_rc,
 };
 use noru::network::NnueWeights;
 use serde_json::{Value, json};
@@ -26,6 +26,8 @@ struct Args {
     stress_threat_field: bool,
     use_move_picker: bool,
     use_tail_threat_materialize: bool,
+    product_defaults: bool,
+    directional_delta: bool,
 }
 
 impl Args {
@@ -44,6 +46,8 @@ impl Args {
 
         let mut use_move_picker = false;
         let mut use_tail_threat_materialize = false;
+        let mut product_defaults = false;
+        let mut directional_delta = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -106,6 +110,8 @@ impl Args {
                     use_move_picker = true;
                     use_tail_threat_materialize = true;
                 }
+                "--product-defaults" => product_defaults = true,
+                "--directional-delta" => directional_delta = true,
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument `{other}`\n{}", usage())),
             }
@@ -129,6 +135,8 @@ impl Args {
             stress_threat_field,
             use_move_picker,
             use_tail_threat_materialize,
+            product_defaults,
+            directional_delta,
         })
     }
 }
@@ -137,7 +145,8 @@ fn usage() -> String {
     "usage: rq582-search-profile --input games.jsonl [--output out.jsonl] \
      [--eval flat|codebook-quant] [--depth N] [--time-ms MS] [--node-budget N] [--limit N] \
      [--sample-every N] [--use-threat-field|--use-lazy-threat-field|--no-threat-field] \
-     [--stress-threat-field] [--use-move-picker] [--use-tail-threat-materialize]\n\
+     [--stress-threat-field] [--use-move-picker] [--use-tail-threat-materialize] \
+     [--product-defaults] [--directional-delta]\n\
      Set NORU_SEARCH_PROFILE=1 to record profile buckets."
         .to_string()
 }
@@ -298,6 +307,17 @@ fn main() -> Result<(), String> {
                     searcher.set_stress_threat_field(args.stress_threat_field);
                     searcher.set_use_move_picker(args.use_move_picker);
                     searcher.set_use_tail_threat_materialize(args.use_tail_threat_materialize);
+                    if args.product_defaults {
+                        searcher.set_use_packed_line_windows(true);
+                        searcher.set_use_candidate_frontier(true);
+                    }
+                    #[cfg(feature = "codebook-eval")]
+                    {
+                        searcher.set_use_codebook_directional_delta(args.directional_delta);
+                        if args.product_defaults && args.eval == "codebook-quant" {
+                            searcher.set_white_root_order_enabled(true)?;
+                        }
+                    }
                     searcher.set_node_limit(args.node_budget);
                     let started = Instant::now();
                     let result = match args.eval.as_str() {
@@ -317,7 +337,9 @@ fn main() -> Result<(), String> {
                         ),
                         other => return Err(format!("unknown eval arm `{other}`")),
                     };
-                    let elapsed_ms = started.elapsed().as_millis();
+                    let elapsed = started.elapsed();
+                    let elapsed_ns = elapsed.as_nanos();
+                    let elapsed_ms = elapsed.as_millis();
                     let shape_stats = searcher.search_shape_stats();
                     let completed_nodes = result.nodes;
                     let actual_visited_nodes = shape_stats
@@ -357,6 +379,9 @@ fn main() -> Result<(), String> {
                         "stress_threat_field": args.stress_threat_field,
                         "use_move_picker": args.use_move_picker,
                         "use_tail_threat_materialize": args.use_tail_threat_materialize,
+                        "product_defaults": args.product_defaults,
+                        "directional_delta": args.directional_delta,
+                        "elapsed_ns": elapsed_ns,
                         "elapsed_ms": elapsed_ms,
                         "best_move": best_move,
                         "score": result.score,

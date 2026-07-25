@@ -1,0 +1,93 @@
+{
+  "format": "cb-d1-profile-summary-v1",
+  "positions": 16,
+  "wall_a_ns": 822196000,
+  "wall_b_ns": 535209300,
+  "wall_ratio_b_over_a": 0.650950989788323,
+  "buckets": {
+    "eval_state_dirty_list_ns": {
+      "a_ns": 5910300,
+      "b_ns": 5804000,
+      "ratio_b_over_a": 0.9820144493511328,
+      "a_wall_share": 0.007188431955397497,
+      "b_wall_share": 0.010844355656749611
+    },
+    "eval_state_frame_write_ns": {
+      "a_ns": 2088100,
+      "b_ns": 4569700,
+      "ratio_b_over_a": 2.188448829079067,
+      "a_wall_share": 0.0025396620757094416,
+      "b_wall_share": 0.008538155073164834
+    },
+    "eval_state_backup_ns": {
+      "a_ns": 37415000,
+      "b_ns": 0,
+      "ratio_b_over_a": 0.0,
+      "a_wall_share": 0.04550618100793485,
+      "b_wall_share": 0.0
+    },
+    "eval_state_recompute_ns": {
+      "a_ns": 102449600,
+      "b_ns": 47875400,
+      "ratio_b_over_a": 0.4673068513688682,
+      "a_wall_share": 0.12460483874891146,
+      "b_wall_share": 0.08945173411598042
+    },
+    "eval_state_aggregate_ns": {
+      "a_ns": 166347400,
+      "b_ns": 84841000,
+      "ratio_b_over_a": 0.5100230000589129,
+      "a_wall_share": 0.20232085780032985,
+      "b_wall_share": 0.15851929329329667
+    },
+    "eval_state_restore_ns": {
+      "a_ns": 35994200,
+      "b_ns": 46978000,
+      "ratio_b_over_a": 1.3051547193714543,
+      "a_wall_share": 0.04377812589698807,
+      "b_wall_share": 0.0877750068991701
+    },
+    "eval_state_forward_ns": {
+      "a_ns": 37811400,
+      "b_ns": 38515800,
+      "ratio_b_over_a": 1.0186293022739175,
+      "a_wall_share": 0.04598830449187299,
+      "b_wall_share": 0.07196399614132265
+    },
+    "eval_state_push_pop_ns": {
+      "a_ns": 236461500,
+      "b_ns": 175518400,
+      "ratio_b_over_a": 0.7422705176106893,
+      "a_wall_share": 0.2875974828386419,
+      "b_wall_share": 0.32794347930800155
+    },
+    "eval_ns": {
+      "a_ns": 414924100,
+      "b_ns": 199998400,
+      "ratio_b_over_a": 0.48201201135340177,
+      "a_wall_share": 0.5046535132742072,
+      "b_wall_share": 0.3736825948278552
+    },
+    "make_undo_ns": {
+      "a_ns": 274935600,
+      "b_ns": 213639600,
+      "ratio_b_over_a": 0.7770532444688866,
+      "a_wall_share": 0.334391799522255,
+      "b_wall_share": 0.3991701937914756
+    },
+    "board_make_undo_ns": {
+      "a_ns": 30638200,
+      "b_ns": 30050900,
+      "ratio_b_over_a": 0.9808311193216311,
+      "a_wall_share": 0.037263864090800736,
+      "b_wall_share": 0.05614794062808699
+    },
+    "total_ns": {
+      "a_ns": 817961600,
+      "b_ns": 532661300,
+      "ratio_b_over_a": 0.6512057534241216,
+      "a_wall_share": 0.9948498898072966,
+      "b_wall_share": 0.9952392456558584
+    }
+  }
+}

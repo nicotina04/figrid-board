@@ -139,6 +139,18 @@ fn candidate_frontier_enabled() -> bool {
     })
 }
 
+/// CB-D1 exact directional-delta evaluator is promoted for the pbrain.
+/// Set `NORU_CODEBOOK_DIRECTIONAL_DELTA=off` for immediate rollback.
+#[cfg(feature = "codebook-eval")]
+fn codebook_directional_delta_enabled() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("NORU_CODEBOOK_DIRECTIONAL_DELTA")
+            .map(|raw| env_bool_default(&raw, true))
+            .unwrap_or(true)
+    })
+}
+
 #[cfg(feature = "codebook-eval")]
 fn codebook_quantized_enabled() -> bool {
     static VALUE: OnceLock<bool> = OnceLock::new();
@@ -575,6 +587,8 @@ impl Engine {
         let mut searcher = Searcher::new();
         #[cfg(feature = "codebook-eval")]
         configure_white_root_order(&mut searcher, &codebook_weights)?;
+        #[cfg(feature = "codebook-eval")]
+        searcher.set_use_codebook_directional_delta(codebook_directional_delta_enabled());
         searcher.set_use_candidate_frontier(candidate_frontier_enabled());
         searcher.set_use_packed_line_windows(packed_line_windows_enabled());
         let board = Board::new();

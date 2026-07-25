@@ -151,6 +151,11 @@ path = "bin/rq602_tss_q1_solve.rs"
 name = "rq603-response-relevance"
 path = "bin/rq603_response_relevance.rs"
 
+[[bin]]
+name = "cb-d1-ab"
+path = "bin/cb_d1_ab.rs"
+required-features = ["codebook-eval"]
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

@@ -1270,8 +1270,16 @@ struct QuantizedCodebookEvalState<'a> {
 
 #[cfg(feature = "codebook-eval")]
 impl<'a> QuantizedCodebookEvalState<'a> {
-    fn new(board: &Board, weights: &'a QuantizedCodebookWeights, scale: f32) -> Self {
-        let mut inc = IncrementalQuantizedCodebookEval::new(weights);
+    fn new(
+        board: &Board,
+        weights: &'a QuantizedCodebookWeights,
+        scale: f32,
+        use_directional_delta: bool,
+    ) -> Self {
+        let mut inc = IncrementalQuantizedCodebookEval::new_with_directional_delta(
+            weights,
+            use_directional_delta,
+        );
         inc.refresh(board, weights);
         Self {
             weights,
@@ -1425,6 +1433,11 @@ pub struct Searcher {
     /// Enable packed Pattern4 window maintenance in search-local sidecar
     /// state. Keeping this out of `Board` preserves its public layout.
     use_packed_line_windows: bool,
+    /// Exact quantized-codebook `(cell, direction)` embedding deltas.
+    ///
+    /// Experimental and OFF by default until the CB-D1 release gates pass.
+    #[cfg(feature = "codebook-eval")]
+    use_codebook_directional_delta: bool,
     /// Per-search incremental state. It is rebuilt at the root and dropped
     /// before returning so protocol moves cannot leave it stale.
     board_search_state: Option<BoardSearchState>,
@@ -1466,6 +1479,8 @@ impl Searcher {
             use_tail_threat_materialize,
             use_candidate_frontier: false,
             use_packed_line_windows: false,
+            #[cfg(feature = "codebook-eval")]
+            use_codebook_directional_delta: false,
             board_search_state: None,
             move_picker_stats: MovePickerStats::default(),
             shape_stats: SearchShapeStats::default(),
@@ -1592,6 +1607,12 @@ impl Searcher {
     /// remain layout- and behavior-compatible for library callers.
     pub fn set_use_packed_line_windows(&mut self, enabled: bool) {
         self.use_packed_line_windows = enabled;
+    }
+
+    /// Enable the experimental exact directional-delta quantized evaluator.
+    #[cfg(feature = "codebook-eval")]
+    pub fn set_use_codebook_directional_delta(&mut self, enabled: bool) {
+        self.use_codebook_directional_delta = enabled;
     }
 
     fn begin_board_search_state(&mut self, board: &Board) {
@@ -1762,7 +1783,10 @@ impl Searcher {
 
         let mut cache = WhiteRootOrderCache::new(board.zobrist);
         let mut scratch = board.clone();
-        let mut extractor = IncrementalQuantizedCodebookEval::new(weights);
+        let mut extractor = IncrementalQuantizedCodebookEval::new_with_directional_delta(
+            weights,
+            self.use_codebook_directional_delta,
+        );
         extractor.refresh(&scratch, weights);
         let candidates = self.board_candidate_moves(board);
         for mv in candidates {
@@ -2479,7 +2503,12 @@ impl Searcher {
         self.prepare_white_root_order_cache(board, codebook_weights)
             .unwrap_or_else(|error| panic!("invalid white root ordering state: {error}"));
         let scale = codebook_eval_scale();
-        let mut inc = QuantizedCodebookEvalState::new(board, codebook_weights, scale);
+        let mut inc = QuantizedCodebookEvalState::new(
+            board,
+            codebook_weights,
+            scale,
+            self.use_codebook_directional_delta,
+        );
         let result = self.search_with_eval_state(
             board,
             ordering_weights,

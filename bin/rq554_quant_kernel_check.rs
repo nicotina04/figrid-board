@@ -17,6 +17,7 @@ struct Args {
     out_json: PathBuf,
     max_transitions: usize,
     runtime_scale: f64,
+    directional_delta: bool,
 }
 
 #[derive(Default)]
@@ -30,6 +31,7 @@ struct Stats {
     full_diffs_cp: Vec<f64>,
     dequant_diffs_cp: Vec<f64>,
     dirty_counts: Vec<usize>,
+    direction_delta_counts: Vec<usize>,
 }
 
 fn main() -> Result<(), String> {
@@ -55,7 +57,10 @@ fn main() -> Result<(), String> {
             }
             stats.games += 1;
             let mut board = Board::new();
-            let mut inc = IncrementalQuantizedCodebookEval::new(&quant);
+            let mut inc = IncrementalQuantizedCodebookEval::new_with_directional_delta(
+                &quant,
+                args.directional_delta,
+            );
             inc.refresh(&board, &quant);
             let mut played = 0usize;
             for &mv in game {
@@ -68,6 +73,11 @@ fn main() -> Result<(), String> {
                 board.make_move(mv);
                 inc.push_move(&board, mv, &quant);
                 stats.dirty_counts.push(inc.last_dirty_cells());
+                if args.directional_delta {
+                    stats
+                        .direction_delta_counts
+                        .push(inc.last_direction_deltas());
+                }
                 stats.transitions += 1;
                 played += 1;
                 record_position(&mut stats, &args, &board, &mut inc, &quant, &dequant);
@@ -87,6 +97,7 @@ fn main() -> Result<(), String> {
     stats.full_diffs_cp.sort_by(|a, b| a.total_cmp(b));
     stats.dequant_diffs_cp.sort_by(|a, b| a.total_cmp(b));
     stats.dirty_counts.sort_unstable();
+    stats.direction_delta_counts.sort_unstable();
 
     let report = json!({
         "format": "rq554-quant-kernel-check-v1",
@@ -94,6 +105,7 @@ fn main() -> Result<(), String> {
         "games_jsonl": args.games_jsonl,
         "max_transitions": args.max_transitions,
         "runtime_scale": args.runtime_scale,
+        "directional_delta": args.directional_delta,
         "quant": {
             "embeddings": "i16_s32",
             "head": "i16_s64",
@@ -108,6 +120,7 @@ fn main() -> Result<(), String> {
             "quant_full_diff_cp": describe(&stats.full_diffs_cp),
             "fake_dequant_diff_cp": describe(&stats.dequant_diffs_cp),
             "dirty_cells": describe_usize(&stats.dirty_counts),
+            "direction_deltas": describe_usize(&stats.direction_delta_counts),
         }
     });
 
@@ -156,6 +169,7 @@ fn parse_args() -> Result<Args, String> {
     let mut out_json = None;
     let mut max_transitions = 100_000usize;
     let mut runtime_scale = 22.97f64;
+    let mut directional_delta = false;
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -176,6 +190,7 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("bad --runtime-scale: {e}"))?;
             }
+            "--directional-delta" => directional_delta = true,
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown arg `{arg}`\n{}", usage())),
         }
@@ -186,11 +201,12 @@ fn parse_args() -> Result<Args, String> {
         out_json: out_json.ok_or_else(usage)?,
         max_transitions,
         runtime_scale,
+        directional_delta,
     })
 }
 
 fn usage() -> String {
-    "usage: rq554-quant-kernel-check --model MODEL.json --games-jsonl games.jsonl --out-json out.json [--max-transitions N] [--runtime-scale CP]".to_string()
+    "usage: rq554-quant-kernel-check --model MODEL.json --games-jsonl games.jsonl --out-json out.json [--max-transitions N] [--runtime-scale CP] [--directional-delta]".to_string()
 }
 
 fn load_trace_games(path: &PathBuf) -> Result<Vec<Vec<Move>>, String> {

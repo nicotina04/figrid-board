@@ -1,0 +1,30 @@
+{
+  "format": "cb-d1-abba-v1",
+  "mode": "fixed-depth",
+  "games": 64,
+  "positions": 1022,
+  "wall_a_ns": 23220836350.0,
+  "wall_b_ns": 18651948150.0,
+  "wall_ratio_b_over_a": 0.8032418759111577,
+  "wall_saving": 0.1967581240888423,
+  "one_sided_95_bootstrap_upper": 0.8071664842381213,
+  "nodes_a": 4488455.0,
+  "nodes_b": 4488455.0,
+  "node_ratio_b_over_a": 1.0,
+  "actual_visited_nps_ratio_b_over_a": 1.244955012916439,
+  "searched_depth_p50_a": 4.0,
+  "searched_depth_p50_b": 4.0,
+  "decision_mismatches": 0,
+  "result_mismatches": 0,
+  "node_mismatches": 0,
+  "gate": {
+    "wall_threshold": 0.99,
+    "correctness_mismatch_zero": true,
+    "wall_ratio_lte_threshold": true,
+    "one_sided_95_upper_lt_1": true,
+    "nps_ratio_gt_1": true,
+    "node_ratio_gte_1": true,
+    "median_depth_non_regression": true,
+    "pass": true
+  }
+}

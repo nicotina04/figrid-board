@@ -184,6 +184,11 @@ name = "cb-gh0-hash-cost"
 path = "bin/cb_gh0_hash_cost.rs"
 required-features = ["codebook-eval"]
 
+[[bin]]
+name = "cb-gh1-graph-census"
+path = "bin/cb_gh1_graph_census.rs"
+required-features = ["codebook-eval"]
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

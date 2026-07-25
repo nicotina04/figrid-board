@@ -6,7 +6,9 @@ use crate::board::RuleSet;
 /// - ????????ㅻ깹???????????????袁ｋ쨨?? ???????ル???????븐뼐???????????筌뤾퍓愿?????????ъ몴??/// - ??????????뀀?????? ????????????????????遺얘턁????????????(4??????? ???????ル????)
 /// - ?????????+ ????????⑤벡????????????????????????紐껊짍
 /// - ??????????????
-use crate::board::{BOARD_SIZE, BitBoard, Board, GameResult, Move, NUM_CELLS, Stone, to_rc};
+use crate::board::{
+    BOARD_SIZE, BitBoard, Board, BoardSearchState, GameResult, Move, NUM_CELLS, Stone, to_rc,
+};
 #[cfg(feature = "codebook-eval")]
 use crate::codebook_eval::{
     CodebookWeights, IncrementalCodebookEval, IncrementalQuantizedCodebookEval,
@@ -16,7 +18,10 @@ use crate::eval::IncrementalEval;
 use crate::heuristic::{DIR, scan_line};
 use crate::threat_field::{IncrementalThreatField, ThreatFieldUpdateMode};
 use crate::transposition::{Bound, TranspositionTable, TtStats};
-use crate::vct::{THREAT_KIND_COUNT, ThreatKind, VctConfig, classify_move_fast, search_vct};
+use crate::vct::{
+    THREAT_KIND_COUNT, ThreatKind, VctConfig, classify_move_fast, search_vct,
+    search_vct_with_board_search_state,
+};
 #[cfg(feature = "codebook-eval")]
 use crate::white_root_order::WhiteRootOrder;
 use noru::network::NnueWeights;
@@ -1414,6 +1419,15 @@ pub struct Searcher {
     stress_threat_field: bool,
     use_move_picker: bool,
     use_tail_threat_materialize: bool,
+    /// Enable the incremental candidate frontier only after root VCT has
+    /// failed, so VCT nodes that do not consume it pay no maintenance.
+    use_candidate_frontier: bool,
+    /// Enable packed Pattern4 window maintenance in search-local sidecar
+    /// state. Keeping this out of `Board` preserves its public layout.
+    use_packed_line_windows: bool,
+    /// Per-search incremental state. It is rebuilt at the root and dropped
+    /// before returning so protocol moves cannot leave it stale.
+    board_search_state: Option<BoardSearchState>,
     move_picker_stats: MovePickerStats,
     shape_stats: SearchShapeStats,
     threat_field: Option<IncrementalThreatField>,
@@ -1450,6 +1464,9 @@ impl Searcher {
             threat_field: None,
             use_move_picker,
             use_tail_threat_materialize,
+            use_candidate_frontier: false,
+            use_packed_line_windows: false,
+            board_search_state: None,
             move_picker_stats: MovePickerStats::default(),
             shape_stats: SearchShapeStats::default(),
             #[cfg(feature = "codebook-eval")]
@@ -1561,6 +1578,79 @@ impl Searcher {
         if enabled {
             self.set_use_move_picker(true);
         }
+    }
+
+    /// Enable exact-order incremental candidate generation for the main
+    /// alpha-beta search. Root VCT stays on the legacy board path.
+    pub fn set_use_candidate_frontier(&mut self, enabled: bool) {
+        self.use_candidate_frontier = enabled;
+    }
+
+    /// Enable packed Pattern4 windows for search make/undo operations.
+    ///
+    /// The state is search-local; ordinary `Board` construction and mutation
+    /// remain layout- and behavior-compatible for library callers.
+    pub fn set_use_packed_line_windows(&mut self, enabled: bool) {
+        self.use_packed_line_windows = enabled;
+    }
+
+    fn begin_board_search_state(&mut self, board: &Board) {
+        if !self.use_packed_line_windows && !self.use_candidate_frontier {
+            self.board_search_state = None;
+            return;
+        }
+        let state = self
+            .board_search_state
+            .get_or_insert_with(BoardSearchState::new);
+        state.synchronize(board);
+        state.set_packed_line_windows_enabled(board, self.use_packed_line_windows);
+        // A3 starts only after root VCT fails.
+        state.set_candidate_frontier_enabled(board, false);
+    }
+
+    #[inline]
+    fn enable_main_search_candidate_frontier(&mut self, board: &Board) {
+        if let Some(state) = self.board_search_state.as_mut() {
+            state.set_candidate_frontier_enabled(board, self.use_candidate_frontier);
+        }
+    }
+
+    #[inline]
+    fn end_board_search_state(&mut self, board: &Board) {
+        if let Some(state) = self.board_search_state.as_mut() {
+            // A3 is profitable only inside the main search. Retain synchronized
+            // A2 state for repeated searches of an unchanged root.
+            state.set_candidate_frontier_enabled(board, false);
+            if !state.packed_line_windows_enabled() {
+                self.board_search_state = None;
+            }
+        }
+    }
+
+    #[inline]
+    fn make_board_move(&mut self, board: &mut Board, mv: Move) {
+        if let Some(state) = self.board_search_state.as_mut() {
+            state.make_move_synchronized(board, mv);
+        } else {
+            board.make_move(mv);
+        }
+    }
+
+    #[inline]
+    fn undo_board_move(&mut self, board: &mut Board) {
+        if let Some(state) = self.board_search_state.as_mut() {
+            state.undo_move_synchronized(board);
+        } else {
+            board.undo_move();
+        }
+    }
+
+    #[inline]
+    fn board_candidate_moves(&self, board: &Board) -> Vec<Move> {
+        self.board_search_state.as_ref().map_or_else(
+            || board.candidate_moves(),
+            |state| state.candidate_moves_synchronized(board),
+        )
     }
     #[inline]
     pub fn use_threat_field(&self) -> bool {
@@ -1674,10 +1764,15 @@ impl Searcher {
         let mut scratch = board.clone();
         let mut extractor = IncrementalQuantizedCodebookEval::new(weights);
         extractor.refresh(&scratch, weights);
-        for mv in board.candidate_moves() {
+        let candidates = self.board_candidate_moves(board);
+        for mv in candidates {
             let attack = classify_move_fast(board, mv, board.side_to_move);
             let block = classify_move_fast(board, mv, opponent);
-            scratch.make_move(mv);
+            if let Some(state) = self.board_search_state.as_mut() {
+                state.make_move_synchronized(&mut scratch, mv);
+            } else {
+                scratch.make_move(mv);
+            }
             extractor.push_move(&scratch, mv, weights);
             let quiet_ongoing = scratch.game_result() == GameResult::Ongoing
                 && attack == ThreatKind::None
@@ -1689,7 +1784,11 @@ impl Searcher {
                 0.0
             };
             extractor.pop_move(weights);
-            scratch.undo_move();
+            if let Some(state) = self.board_search_state.as_mut() {
+                state.undo_move_synchronized(&mut scratch);
+            } else {
+                scratch.undo_move();
+            }
             cache.entries[mv] = Some(WhiteRootOrderEntry {
                 residual,
                 quiet_ongoing,
@@ -1817,7 +1916,11 @@ impl Searcher {
             use_vct_scratch_buffers: false,
         };
         let profile_start = self.profile_start();
-        let seq = search_vct(board, &vct_cfg);
+        let seq = if let Some(state) = self.board_search_state.as_mut() {
+            search_vct_with_board_search_state(board, &vct_cfg, state)
+        } else {
+            search_vct(board, &vct_cfg)
+        };
         self.profile_add(SearchProfileBucket::RootVct, profile_start);
         if let Some(seq) = seq {
             if let Some(&first) = seq.first() {
@@ -2065,6 +2168,7 @@ impl Searcher {
         {
             self.white_root_order_cache = None;
         }
+        self.begin_board_search_state(board);
         let root_search_decision_audit =
             crate::candidate_local_ensemble::root_search_decision_audit_enabled();
 
@@ -2096,7 +2200,11 @@ impl Searcher {
                 use_vct_scratch_buffers: false,
             };
             let profile_start = self.profile_start();
-            let seq = search_vct(board, &vct_cfg);
+            let seq = if let Some(state) = self.board_search_state.as_mut() {
+                search_vct_with_board_search_state(board, &vct_cfg, state)
+            } else {
+                search_vct(board, &vct_cfg)
+            };
             self.profile_add(SearchProfileBucket::RootVct, profile_start);
             if let Some(seq) = seq {
                 if let Some(&first) = seq.first() {
@@ -2119,11 +2227,13 @@ impl Searcher {
                         );
                     }
                     self.profile.finish();
+                    self.end_board_search_state(board);
                     return result;
                 }
             }
         }
 
+        self.enable_main_search_candidate_frontier(board);
         let mut best_result = SearchResult {
             best_move: None,
             score: 0,
@@ -2309,6 +2419,7 @@ impl Searcher {
         }
 
         self.profile.finish();
+        self.end_board_search_state(board);
         best_result
     }
 
@@ -2326,20 +2437,25 @@ impl Searcher {
             "white root ordering cannot run on the float codebook search path"
         );
         self.reset_for_search(time_limit);
+        self.begin_board_search_state(board);
         let root_search_decision_audit =
             crate::candidate_local_ensemble::root_search_decision_audit_enabled();
         if let Some(result) = self.try_root_vct(board, time_limit, root_search_decision_audit) {
+            self.end_board_search_state(board);
             return result;
         }
+        self.enable_main_search_candidate_frontier(board);
         let scale = codebook_eval_scale();
         let mut inc = CodebookEvalState::new(board, codebook_weights, scale);
-        self.search_with_eval_state(
+        let result = self.search_with_eval_state(
             board,
             ordering_weights,
             &mut inc,
             max_depth,
             root_search_decision_audit,
-        )
+        );
+        self.end_board_search_state(board);
+        result
     }
 
     #[cfg(feature = "codebook-eval")]
@@ -2352,22 +2468,27 @@ impl Searcher {
         time_limit: Option<Duration>,
     ) -> SearchResult {
         self.reset_for_search(time_limit);
+        self.begin_board_search_state(board);
         let root_search_decision_audit =
             crate::candidate_local_ensemble::root_search_decision_audit_enabled();
         if let Some(result) = self.try_root_vct(board, time_limit, root_search_decision_audit) {
+            self.end_board_search_state(board);
             return result;
         }
+        self.enable_main_search_candidate_frontier(board);
         self.prepare_white_root_order_cache(board, codebook_weights)
             .unwrap_or_else(|error| panic!("invalid white root ordering state: {error}"));
         let scale = codebook_eval_scale();
         let mut inc = QuantizedCodebookEvalState::new(board, codebook_weights, scale);
-        self.search_with_eval_state(
+        let result = self.search_with_eval_state(
             board,
             ordering_weights,
             &mut inc,
             max_depth,
             root_search_decision_audit,
-        )
+        );
+        self.end_board_search_state(board);
+        result
     }
 
     /// Search normally, but keep the root candidate table from the last
@@ -2403,8 +2524,7 @@ impl Searcher {
         }
 
         self.move_picker_stats = MovePickerStats::default();
-        let mut inc = FlatEvalState::new(board, weights);
-        self.reset_threat_field(board);
+        self.begin_board_search_state(board);
 
         if root_vct_enabled() {
             let vct_budget = match time_limit {
@@ -2431,9 +2551,14 @@ impl Searcher {
                 use_fast_immediate_five: false,
                 use_vct_scratch_buffers: false,
             };
-            if let Some(seq) = search_vct(board, &vct_cfg) {
+            let seq = if let Some(state) = self.board_search_state.as_mut() {
+                search_vct_with_board_search_state(board, &vct_cfg, state)
+            } else {
+                search_vct(board, &vct_cfg)
+            };
+            if let Some(seq) = seq {
                 if let Some(&first) = seq.first() {
-                    return RootSearchAudit {
+                    let audit = RootSearchAudit {
                         result: SearchResult {
                             best_move: Some(first),
                             score: WIN_SCORE,
@@ -2442,9 +2567,15 @@ impl Searcher {
                         },
                         candidates: Vec::new(),
                     };
+                    self.end_board_search_state(board);
+                    return audit;
                 }
             }
         }
+
+        self.enable_main_search_candidate_frontier(board);
+        let mut inc = FlatEvalState::new(board, weights);
+        self.reset_threat_field(board);
 
         let mut best_result = SearchResult {
             best_move: None,
@@ -2547,10 +2678,12 @@ impl Searcher {
             prev_score = Some(score);
         }
 
-        RootSearchAudit {
+        let audit = RootSearchAudit {
             result: best_result,
             candidates: best_candidates,
-        }
+        };
+        self.end_board_search_state(board);
+        audit
     }
 
     /// ??iteration??root-level PVS ?????
@@ -2693,7 +2826,7 @@ impl Searcher {
 
             let make_undo_profile_start = self.profile_start();
             let profile_start = self.profile_start();
-            board.make_move(mv);
+            self.make_board_move(board, mv);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
             self.push_threat_field(board, mv);
             self.stress_threat_field_query(board);
@@ -2743,7 +2876,7 @@ impl Searcher {
             self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
             self.profile.add_eval_state_detail(detail);
             let profile_start = self.profile_start();
-            board.undo_move();
+            self.undo_board_move(board);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
             self.pop_threat_field(board);
             self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
@@ -3333,7 +3466,7 @@ impl Searcher {
 
         let make_undo_profile_start = self.profile_start();
         let profile_start = self.profile_start();
-        board.make_move(mv);
+        self.make_board_move(board, mv);
         self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
         self.push_threat_field(board, mv);
         self.stress_threat_field_query(board);
@@ -3381,7 +3514,7 @@ impl Searcher {
         self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
         self.profile.add_eval_state_detail(detail);
         let profile_start = self.profile_start();
-        board.undo_move();
+        self.undo_board_move(board);
         self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
         self.pop_threat_field(board);
         self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
@@ -3484,7 +3617,7 @@ impl Searcher {
             alpha = stand_pat;
         }
 
-        let candidates = board.candidate_moves();
+        let candidates = self.board_candidate_moves(board);
         if candidates.is_empty() {
             self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
@@ -3555,7 +3688,7 @@ impl Searcher {
         for &(mv, _) in &forcing {
             let make_undo_profile_start = self.profile_start();
             let profile_start = self.profile_start();
-            board.make_move(mv);
+            self.make_board_move(board, mv);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
             self.push_threat_field(board, mv);
             self.stress_threat_field_query(board);
@@ -3571,7 +3704,7 @@ impl Searcher {
             self.profile_add(SearchProfileBucket::EvalStatePushPop, profile_start);
             self.profile.add_eval_state_detail(detail);
             let profile_start = self.profile_start();
-            board.undo_move();
+            self.undo_board_move(board);
             self.profile_add(SearchProfileBucket::BoardMakeUndo, profile_start);
             self.pop_threat_field(board);
             self.profile_add(SearchProfileBucket::MakeUndo, make_undo_profile_start);
@@ -3734,7 +3867,7 @@ impl Searcher {
         let us = board.side_to_move;
         let them = us.opponent();
         let mut packed = Vec::new();
-        for mv in board.candidate_moves() {
+        for mv in self.board_candidate_moves(board) {
             if emitted[mv] {
                 continue;
             }
@@ -3764,7 +3897,7 @@ impl Searcher {
         emitted: &mut [bool; NUM_CELLS],
     ) -> Vec<(Move, bool)> {
         let mut packed = Vec::new();
-        for mv in board.candidate_moves() {
+        for mv in self.board_candidate_moves(board) {
             if emitted[mv] {
                 continue;
             }
@@ -3812,7 +3945,7 @@ impl Searcher {
         emitted: &mut [bool; NUM_CELLS],
     ) -> Vec<(Move, bool)> {
         let mut packed = Vec::new();
-        for mv in board.candidate_moves() {
+        for mv in self.board_candidate_moves(board) {
             if emitted[mv] {
                 continue;
             }
@@ -3846,7 +3979,7 @@ impl Searcher {
         Some((score, mv, is_forcing))
     }
     fn order_moves(&self, board: &Board, ply: usize, weights: &NnueWeights) -> Vec<(Move, bool)> {
-        let candidates = board.candidate_moves();
+        let candidates = self.board_candidate_moves(board);
         let side = board.side_to_move as usize;
 
         let (my, opp) = match board.side_to_move {
@@ -4713,6 +4846,73 @@ mod tests {
         let mut searcher = Searcher::new();
         let result = searcher.search(&mut board, &weights, 1, None);
         assert!(result.best_move.is_some());
+    }
+
+    #[test]
+    fn audit_root_candidates_resynchronizes_retained_sidecar_for_replacement_board() {
+        let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let mut accelerated = Searcher::new();
+        accelerated.set_use_packed_line_windows(true);
+        accelerated.set_use_candidate_frontier(true);
+
+        // Seed a retained A2 sidecar for a different root.
+        let mut first_root = Board::new();
+        let _ = accelerated.search(&mut first_root, &weights, 1, None);
+        assert!(
+            accelerated
+                .board_search_state
+                .as_ref()
+                .is_some_and(|state| state.is_synchronized(&first_root))
+        );
+
+        let mut replacement = Board::new();
+        for mv in [to_idx(7, 7), to_idx(0, 0), to_idx(14, 14), to_idx(0, 14)] {
+            replacement.make_move(mv);
+        }
+        let expected_root = replacement.clone();
+        let mut baseline_board = replacement.clone();
+        let mut baseline_searcher = Searcher::new();
+
+        let actual = accelerated.audit_root_candidates(&mut replacement, &weights, 2, None);
+        let expected =
+            baseline_searcher.audit_root_candidates(&mut baseline_board, &weights, 2, None);
+
+        assert_eq!(actual.result.best_move, expected.result.best_move);
+        assert_eq!(actual.result.score, expected.result.score);
+        assert_eq!(actual.result.depth, expected.result.depth);
+        assert_eq!(actual.result.nodes, expected.result.nodes);
+        let signature = |audit: &RootSearchAudit| {
+            audit
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.mv,
+                        candidate.search_score,
+                        candidate.relation_score,
+                        candidate.candidate_rank_score,
+                        candidate.codebook_score,
+                        candidate.is_forcing,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(signature(&actual), signature(&expected));
+
+        assert!(replacement.black == expected_root.black);
+        assert!(replacement.white == expected_root.white);
+        assert_eq!(replacement.side_to_move, expected_root.side_to_move);
+        assert_eq!(replacement.move_count, expected_root.move_count);
+        assert_eq!(replacement.last_move, expected_root.last_move);
+        assert_eq!(replacement.history, expected_root.history);
+        assert_eq!(replacement.zobrist, expected_root.zobrist);
+        assert_eq!(replacement.line_pattern_ids, expected_root.line_pattern_ids);
+        let retained = accelerated
+            .board_search_state
+            .as_ref()
+            .expect("A2 sidecar should remain retained");
+        assert!(retained.is_synchronized(&replacement));
+        assert!(!retained.candidate_frontier_enabled());
     }
 
     #[test]

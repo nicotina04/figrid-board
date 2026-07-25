@@ -18,7 +18,9 @@
 //! 승리 Threat(Five/OpenFour/DoubleFour/FourThree/DoubleThree)을 만들면 해당
 //! 수를 반환하고 즉시 성공. 그 외 Forcing Threat(ClosedFour/OpenThree)은 재귀.
 
-use crate::board::{BOARD_SIZE, BitBoard, Board, Move, NUM_CELLS, RuleSet, Stone};
+use crate::board::{
+    BOARD_SIZE, BitBoard, Board, BoardSearchState, Move, NUM_CELLS, RuleSet, Stone,
+};
 use crate::heuristic::{DIR, scan_line};
 use crate::pattern_table::{
     PATTERN_RARE_ID, WindowThreat, pattern_threat_after_my_play, pattern_threat_after_my_play_caro,
@@ -822,26 +824,57 @@ fn line_pattern_dirty_cells(mv: Move) -> Vec<usize> {
 }
 
 fn make_vct_move(board: &mut Board, threat_index: &mut Option<VctThreatIndex>, mv: Move) {
+    make_vct_move_with_board_search_state(board, threat_index, None, mv);
+}
+
+fn make_vct_move_with_board_search_state(
+    board: &mut Board,
+    threat_index: &mut Option<VctThreatIndex>,
+    board_search_state: Option<&mut BoardSearchState>,
+    mv: Move,
+) {
     if let Some(index) = threat_index {
         let dirty = line_pattern_dirty_cells(mv);
         index.clear_cells(&dirty);
-        board.make_move(mv);
+        if let Some(state) = board_search_state {
+            state.make_move_synchronized(board, mv);
+        } else {
+            board.make_move(mv);
+        }
         index.recompute_cells(board, &dirty);
+    } else if let Some(state) = board_search_state {
+        state.make_move_synchronized(board, mv);
     } else {
         board.make_move(mv);
     }
 }
 
 fn undo_vct_move(board: &mut Board, threat_index: &mut Option<VctThreatIndex>) {
+    undo_vct_move_with_board_search_state(board, threat_index, None);
+}
+
+fn undo_vct_move_with_board_search_state(
+    board: &mut Board,
+    threat_index: &mut Option<VctThreatIndex>,
+    board_search_state: Option<&mut BoardSearchState>,
+) {
     if let Some(index) = threat_index {
         if let Some(mv) = board.last_move {
             let dirty = line_pattern_dirty_cells(mv);
             index.clear_cells(&dirty);
-            board.undo_move();
+            if let Some(state) = board_search_state {
+                state.undo_move_synchronized(board);
+            } else {
+                board.undo_move();
+            }
             index.recompute_cells(board, &dirty);
+        } else if let Some(state) = board_search_state {
+            state.undo_move_synchronized(board);
         } else {
             board.undo_move();
         }
+    } else if let Some(state) = board_search_state {
+        state.undo_move_synchronized(board);
     } else {
         board.undo_move();
     }
@@ -850,11 +883,12 @@ fn undo_vct_move(board: &mut Board, threat_index: &mut Option<VctThreatIndex>) {
 fn make_vct_move_profiled(
     board: &mut Board,
     threat_index: &mut Option<VctThreatIndex>,
+    board_search_state: Option<&mut BoardSearchState>,
     mv: Move,
     stats: &mut VctSearchStats,
 ) {
     let start = profile_start(stats);
-    make_vct_move(board, threat_index, mv);
+    make_vct_move_with_board_search_state(board, threat_index, board_search_state, mv);
     if let Some(start) = start {
         stats.profile.make_move_calls += 1;
         stats.profile.make_move_ns += start.elapsed().as_nanos();
@@ -864,10 +898,11 @@ fn make_vct_move_profiled(
 fn undo_vct_move_profiled(
     board: &mut Board,
     threat_index: &mut Option<VctThreatIndex>,
+    board_search_state: Option<&mut BoardSearchState>,
     stats: &mut VctSearchStats,
 ) {
     let start = profile_start(stats);
-    undo_vct_move(board, threat_index);
+    undo_vct_move_with_board_search_state(board, threat_index, board_search_state);
     if let Some(start) = start {
         stats.profile.undo_move_calls += 1;
         stats.profile.undo_move_ns += start.elapsed().as_nanos();
@@ -1139,6 +1174,24 @@ pub fn search_vct(board: &mut Board, cfg: &VctConfig) -> Option<Vec<Move>> {
 }
 
 pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchResult {
+    search_vct_with_stats_internal(board, cfg, None)
+}
+
+/// Search entry used by the main engine when it owns a search-local board
+/// sidecar. Public VCT callers keep the legacy `Board`-only API.
+pub(crate) fn search_vct_with_board_search_state(
+    board: &mut Board,
+    cfg: &VctConfig,
+    board_search_state: &mut BoardSearchState,
+) -> Option<Vec<Move>> {
+    search_vct_with_stats_internal(board, cfg, Some(board_search_state)).sequence
+}
+
+fn search_vct_with_stats_internal(
+    board: &mut Board,
+    cfg: &VctConfig,
+    mut board_search_state: Option<&mut BoardSearchState>,
+) -> VctSearchResult {
     let deadline = cfg.time_budget.map(|d| Instant::now() + d);
     let attacker = board.side_to_move;
     let mut sequence = Vec::with_capacity(cfg.max_depth as usize * 2);
@@ -1160,6 +1213,7 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
         deadline,
         cfg.node_budget,
         flags,
+        &mut board_search_state,
         &mut threat_index,
         &mut sequence,
         &mut tt,
@@ -1269,6 +1323,7 @@ fn vct_or(
     deadline: Option<Instant>,
     node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
+    board_search_state: &mut Option<&mut BoardSearchState>,
     threat_index: &mut Option<VctThreatIndex>,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
@@ -1405,7 +1460,13 @@ fn vct_or(
             continue;
         }
         sequence.push(mv);
-        make_vct_move_profiled(board, threat_index, mv, stats);
+        make_vct_move_profiled(
+            board,
+            threat_index,
+            board_search_state.as_deref_mut(),
+            mv,
+            stats,
+        );
         let won = vct_and(
             board,
             attacker,
@@ -1415,13 +1476,19 @@ fn vct_or(
             deadline,
             node_budget,
             jump_three,
+            board_search_state,
             threat_index,
             sequence,
             tt,
             stats,
             scratch,
         );
-        undo_vct_move_profiled(board, threat_index, stats);
+        undo_vct_move_profiled(
+            board,
+            threat_index,
+            board_search_state.as_deref_mut(),
+            stats,
+        );
         if stats.hit_stop() {
             sequence.pop();
             scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
@@ -1476,6 +1543,7 @@ fn vct_and(
     deadline: Option<Instant>,
     node_budget: Option<u64>,
     jump_three: VctJumpThreeFlags,
+    board_search_state: &mut Option<&mut BoardSearchState>,
     threat_index: &mut Option<VctThreatIndex>,
     sequence: &mut Vec<Move>,
     tt: &mut TransTable,
@@ -1552,7 +1620,13 @@ fn vct_and(
         sequence.truncate(checkpoint);
         sequence.push(mv);
 
-        make_vct_move_profiled(board, threat_index, mv, stats);
+        make_vct_move_profiled(
+            board,
+            threat_index,
+            board_search_state.as_deref_mut(),
+            mv,
+            stats,
+        );
         let attacker_still_wins = vct_or(
             board,
             attacker,
@@ -1561,13 +1635,19 @@ fn vct_and(
             deadline,
             node_budget,
             jump_three,
+            board_search_state,
             threat_index,
             sequence,
             tt,
             stats,
             scratch,
         );
-        undo_vct_move_profiled(board, threat_index, stats);
+        undo_vct_move_profiled(
+            board,
+            threat_index,
+            board_search_state.as_deref_mut(),
+            stats,
+        );
         if stats.hit_stop() {
             sequence.truncate(checkpoint);
             scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
@@ -1764,7 +1844,7 @@ fn vct_or_audit(
             continue;
         }
         sequence.push(mv);
-        make_vct_move_profiled(board, threat_index, mv, stats);
+        make_vct_move_profiled(board, threat_index, None, mv, stats);
         let won = vct_and_audit(
             board,
             attacker,
@@ -1781,7 +1861,7 @@ fn vct_or_audit(
             stats,
             scratch,
         );
-        undo_vct_move_profiled(board, threat_index, stats);
+        undo_vct_move_profiled(board, threat_index, None, stats);
         if stats.hit_stop() {
             sequence.pop();
             scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
@@ -1935,7 +2015,7 @@ fn vct_and_audit(
         sequence.push(mv);
 
         let tt_before = audit.tt_hit_count;
-        make_vct_move_profiled(board, threat_index, mv, stats);
+        make_vct_move_profiled(board, threat_index, None, mv, stats);
         let attacker_still_wins = vct_or_audit(
             board,
             attacker,
@@ -1951,7 +2031,7 @@ fn vct_and_audit(
             stats,
             scratch,
         );
-        undo_vct_move_profiled(board, threat_index, stats);
+        undo_vct_move_profiled(board, threat_index, None, stats);
         if stats.hit_stop() {
             sequence.truncate(checkpoint);
             scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);

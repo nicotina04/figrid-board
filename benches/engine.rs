@@ -32,6 +32,7 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 use noru::network::NnueWeights;
 
+use figrid_board::board::BoardSearchState;
 use figrid_board::pattern_table::{PATTERN_NUM_IDS, swap_mapped_id};
 use figrid_board::vct::classify_move_fast;
 use figrid_board::{
@@ -343,10 +344,47 @@ fn region_of_cell(cell: usize) -> usize {
 }
 
 fn bench_movegen(c: &mut Criterion) {
-    let board = midgame_board();
-    c.bench_function("movegen/candidate_moves", |b| {
-        b.iter(|| black_box(black_box(&board).candidate_moves()));
-    });
+    let mut group = c.benchmark_group("candidate_frontier");
+
+    for (tag, board) in [("p14", midgame_board()), ("p60", dense_board(60))] {
+        let mv = (0..NUM_CELLS)
+            .filter(|&cell| board.is_empty(cell))
+            .min_by_key(|&cell| {
+                let row = cell / BOARD_SIZE;
+                let col = cell % BOARD_SIZE;
+                row.abs_diff(7) + col.abs_diff(7)
+            })
+            .expect("benchmark board has an empty cell");
+
+        for (mode, enabled) in [("legacy", false), ("incremental", true)] {
+            let mut subject = board.clone();
+            let mut search_state = BoardSearchState::new();
+            search_state.set_candidate_frontier_enabled(&subject, enabled);
+            group.bench_function(format!("query/{mode}/{tag}"), |b| {
+                b.iter(|| black_box(black_box(&search_state).candidate_moves(black_box(&subject))));
+            });
+            group.bench_function(format!("make_undo/{mode}/{tag}"), |b| {
+                b.iter(|| {
+                    search_state.make_move(&mut subject, black_box(mv));
+                    search_state.undo_move(&mut subject);
+                    black_box(search_state.candidate_moves(&subject).len());
+                });
+            });
+        }
+
+        group.bench_function(format!("enable_root/{tag}"), |b| {
+            b.iter_batched(
+                || (board.clone(), BoardSearchState::new()),
+                |(subject, mut search_state)| {
+                    search_state.set_candidate_frontier_enabled(&subject, true);
+                    black_box(search_state.candidate_moves(&subject).len());
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
 }
 
 fn bench_pattern(c: &mut Criterion) {
@@ -362,6 +400,48 @@ fn bench_pattern(c: &mut Criterion) {
             black_box(acc)
         });
     });
+}
+
+fn bench_packed_window(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pattern_window_update");
+
+    for (tag, board) in [("p14", midgame_board()), ("p60", dense_board(60))] {
+        let mv = (0..NUM_CELLS)
+            .filter(|&cell| board.is_empty(cell))
+            .min_by_key(|&cell| {
+                let row = cell / BOARD_SIZE;
+                let col = cell % BOARD_SIZE;
+                row.abs_diff(7) + col.abs_diff(7)
+            })
+            .expect("benchmark board has an empty cell");
+
+        for (mode, enabled) in [("legacy", false), ("packed", true)] {
+            let mut subject = board.clone();
+            let mut search_state = BoardSearchState::new();
+            search_state.set_packed_line_windows_enabled(&subject, enabled);
+            group.bench_function(format!("{mode}/{tag}"), |b| {
+                b.iter(|| {
+                    search_state.make_move(&mut subject, black_box(mv));
+                    black_box(subject.line_pattern_ids[mv]);
+                    search_state.undo_move(&mut subject);
+                    black_box(subject.line_pattern_ids[mv]);
+                });
+            });
+        }
+
+        group.bench_function(format!("packed_enable_root/{tag}"), |b| {
+            b.iter_batched(
+                || (board.clone(), BoardSearchState::new()),
+                |(subject, mut search_state)| {
+                    search_state.set_packed_line_windows_enabled(&subject, true);
+                    black_box(search_state.packed_line_window(mv, 0));
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
 }
 
 fn bench_search(c: &mut Criterion) {
@@ -387,6 +467,7 @@ criterion_group!(
     bench_codebook_eval,
     bench_movegen,
     bench_pattern,
+    bench_packed_window,
     bench_search
 );
 criterion_main!(benches);

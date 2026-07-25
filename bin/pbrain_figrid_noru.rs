@@ -106,7 +106,6 @@ enum WhiteRootOrderMode {
     Off,
 }
 
-#[cfg(feature = "codebook-eval")]
 fn env_bool_default(raw: &str, default: bool) -> bool {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -116,6 +115,28 @@ fn env_bool_default(raw: &str, default: bool) -> bool {
         || trimmed.eq_ignore_ascii_case("false")
         || trimmed.eq_ignore_ascii_case("off")
         || trimmed.eq_ignore_ascii_case("no"))
+}
+
+/// Packed Pattern4 windows are the 0.8.2 product default. Setting
+/// `NORU_PACKED_LINE_WINDOWS=off` restores the 0.8.1 updater.
+fn packed_line_windows_enabled() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("NORU_PACKED_LINE_WINDOWS")
+            .map(|raw| env_bool_default(&raw, true))
+            .unwrap_or(true)
+    })
+}
+
+/// Exact-order candidate-frontier maintenance is the 0.8.2 product default.
+/// Setting `NORU_CANDIDATE_FRONTIER=off` restores the A2-only path.
+fn candidate_frontier_enabled() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("NORU_CANDIDATE_FRONTIER")
+            .map(|raw| env_bool_default(&raw, true))
+            .unwrap_or(true)
+    })
 }
 
 #[cfg(feature = "codebook-eval")]
@@ -554,8 +575,11 @@ impl Engine {
         let mut searcher = Searcher::new();
         #[cfg(feature = "codebook-eval")]
         configure_white_root_order(&mut searcher, &codebook_weights)?;
+        searcher.set_use_candidate_frontier(candidate_frontier_enabled());
+        searcher.set_use_packed_line_windows(packed_line_windows_enabled());
+        let board = Board::new();
         Ok(Self {
-            board: Board::new(),
+            board,
             weights,
             #[cfg(feature = "codebook-eval")]
             codebook_weights,

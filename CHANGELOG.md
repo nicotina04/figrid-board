@@ -1,5 +1,30 @@
 # Changes
 
+## 0.8.2 (2026-07-25)
+* **Promote packed Pattern4 windows in `pbrain-figrid`.** Make/undo now
+  changes the affected two-bit slots instead of rereading every 11-cell
+  window. The hot update is about 15.3x faster; the registered fixed-depth
+  product wall ratio was `0.78885` (21.11% less time, one-sided 95% upper
+  `0.79932`). Two- and 30-second actual-visited NPS improved by 1.2796x and
+  1.2957x respectively. The 100,000-operation full-rebuild audit had zero
+  mismatches.
+* **Add exact-order incremental candidate generation after root VCT.** On top
+  of packed windows, the final product fixed-depth wall ratio was `0.98685`
+  (1.31% additional saving, one-sided 95% upper `0.99157`) with identical
+  best moves, results, depths, and node counts over 1,022 held-out roots.
+  At 30 seconds it visited 3.28% more nodes at 3.33% higher NPS while
+  preserving median depth 12. A same-binary 30-game sanity finished 17-13
+  for the combined path with zero protocol errors.
+* **Preserve the 0.8.1 `Board` API and add independent rollback.** The exact
+  ten-field public `Board` layout remains unchanged, including compatibility
+  with downstream exhaustive struct literals. Optional A2/A3 state now lives
+  in a `Searcher` sidecar; the shipped pbrain enables both optimizations by
+  default.
+  `NORU_PACKED_LINE_WINDOWS=off` restores the 0.8.1 Pattern4 updater and
+  `NORU_CANDIDATE_FRONTIER=off` restores legacy candidate generation.
+  Evaluator weights, feature mapping, VCT proof rules, and move ordering are
+  unchanged.
+
 ## 0.8.1 (2026-07-14)
 * **Add built-in Freestyle White root quiet-move ordering for the shipped
   quantized codebook evaluator.** The model refines maximal quiet runs while preserving

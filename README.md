@@ -37,6 +37,11 @@
   intact. Set `FIGRID_WHITE_ROOT_ORDER=off` for the 0.8.0 ordering path;
   custom and floating-point codebooks, plus non-Freestyle rules, disable it
   automatically.
+- Incremental packed Pattern4 windows and exact-order candidate-frontier
+  maintenance in `pbrain-figrid`. They reduce repeated board scanning without
+  changing evaluation or move order. Search acceleration lives in an optional
+  `Searcher` sidecar, leaving the public `Board` layout unchanged from 0.8.1;
+  the shipped pbrain enables both paths by default.
 
 ## Quick start
 
@@ -55,6 +60,12 @@ If you build without `embed-weights`, set `FIGRID_WEIGHTS=path/to/weights.bin` o
 `FIGRID_WHITE_ROOT_ORDER` accepts `auto` (default), `on`, or `off`. Explicit
 `on` fails closed unless the embedded quantized codebook is active and no
 other root rank/replace/veto hook is configured.
+
+The 0.8.2 state-update optimizations have independent rollback switches:
+
+- `NORU_PACKED_LINE_WINDOWS=off` restores the 0.8.1 Pattern4 updater.
+- `NORU_CANDIDATE_FRONTIER=off` keeps packed windows but restores legacy
+  candidate generation.
 
 ### Use as a library
 

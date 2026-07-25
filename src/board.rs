@@ -225,6 +225,282 @@ pub const fn zobrist_stone_key(stone: Stone, cell: usize) -> u64 {
 /// 단계에서 처리).
 pub type LinePatternState = Box<[[u16; 4]; NUM_CELLS]>;
 
+const NO_CANDIDATE_SOURCE: u8 = u8::MAX;
+
+/// Optional radius-2 candidate frontier.
+///
+/// `by_min_source[s]` contains exactly the empty candidates whose lowest
+/// occupied radius-2 neighbor is `s`. Iterating non-empty buckets and then
+/// their bits in ascending order reproduces the legacy discovery order.
+#[derive(Clone)]
+struct CandidateFrontierState {
+    radius2_count: [u8; NUM_CELLS],
+    candidates: BitBoard,
+    min_source: [u8; NUM_CELLS],
+    by_min_source: [BitBoard; NUM_CELLS],
+    nonempty_sources: BitBoard,
+}
+
+impl CandidateFrontierState {
+    fn empty() -> Self {
+        Self {
+            radius2_count: [0; NUM_CELLS],
+            candidates: BitBoard::EMPTY,
+            min_source: [NO_CANDIDATE_SOURCE; NUM_CELLS],
+            by_min_source: [BitBoard::EMPTY; NUM_CELLS],
+            nonempty_sources: BitBoard::EMPTY,
+        }
+    }
+
+    #[inline]
+    fn bucket_insert(&mut self, source: usize, cell: usize) {
+        let bucket = &mut self.by_min_source[source];
+        let was_empty = bucket.lo == 0 && bucket.hi == 0;
+        bucket.set(cell);
+        if was_empty {
+            self.nonempty_sources.set(source);
+        }
+    }
+
+    #[inline]
+    fn bucket_remove(&mut self, source: usize, cell: usize) {
+        let bucket = &mut self.by_min_source[source];
+        debug_assert!(bucket.get(cell));
+        bucket.clear(cell);
+        if bucket.lo == 0 && bucket.hi == 0 {
+            self.nonempty_sources.clear(source);
+        }
+    }
+
+    #[inline]
+    fn candidate_insert(&mut self, source: usize, cell: usize) {
+        debug_assert!(!self.candidates.get(cell));
+        debug_assert_eq!(self.min_source[cell], NO_CANDIDATE_SOURCE);
+        self.candidates.set(cell);
+        self.min_source[cell] = source as u8;
+        self.bucket_insert(source, cell);
+    }
+
+    #[inline]
+    fn candidate_remove(&mut self, cell: usize) {
+        debug_assert!(self.candidates.get(cell));
+        let source = self.min_source[cell] as usize;
+        debug_assert!(source < NUM_CELLS);
+        self.bucket_remove(source, cell);
+        self.candidates.clear(cell);
+        self.min_source[cell] = NO_CANDIDATE_SOURCE;
+    }
+
+    #[inline]
+    fn candidate_rekey(&mut self, new_source: usize, cell: usize) {
+        debug_assert!(self.candidates.get(cell));
+        let old_source = self.min_source[cell] as usize;
+        debug_assert!(old_source < NUM_CELLS);
+        self.bucket_remove(old_source, cell);
+        self.min_source[cell] = new_source as u8;
+        self.bucket_insert(new_source, cell);
+    }
+}
+
+/// Incrementally maintained raw 22-bit Pattern4 windows.
+///
+/// Entries use the same black-relative layout as `pack_window`: window
+/// index 0 occupies bits 21..20 and index 10 occupies bits 1..0.
+pub type LinePackedWindowState = Box<[[u32; 4]; NUM_CELLS]>;
+
+/// Search-only acceleration state kept outside [`Board`].
+///
+/// This sidecar deliberately preserves the exact public `Board` field shape
+/// from figrid-board 0.8.1, so downstream exhaustive struct literals remain
+/// source-compatible. Callers that opt in must route every searched
+/// make/undo through this state while it is enabled.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct BoardSearchState {
+    line_packed_windows: Option<LinePackedWindowState>,
+    candidate_frontier: Option<Box<CandidateFrontierState>>,
+    synchronized_position: Option<(u64, usize)>,
+}
+
+impl BoardSearchState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether every enabled cache describes the supplied board position.
+    #[inline]
+    pub fn is_synchronized(&self, board: &Board) -> bool {
+        if self.line_packed_windows.is_none() && self.candidate_frontier.is_none() {
+            true
+        } else {
+            self.synchronized_position == Some((board.zobrist, board.move_count))
+        }
+    }
+
+    /// Rebuild all currently enabled caches if the board changed outside the
+    /// sidecar (for example, between two searches).
+    pub fn synchronize(&mut self, board: &Board) {
+        if self.is_synchronized(board) {
+            return;
+        }
+        let packed_enabled = self.line_packed_windows.is_some();
+        let frontier_enabled = self.candidate_frontier.is_some();
+        self.line_packed_windows = None;
+        self.candidate_frontier = None;
+        self.synchronized_position = None;
+        if packed_enabled {
+            self.set_packed_line_windows_enabled(board, true);
+        }
+        if frontier_enabled {
+            self.set_candidate_frontier_enabled(board, true);
+        }
+    }
+
+    #[inline]
+    fn record_position(&mut self, board: &Board) {
+        self.synchronized_position = (self.line_packed_windows.is_some()
+            || self.candidate_frontier.is_some())
+        .then_some((board.zobrist, board.move_count));
+    }
+
+    /// Enable or disable incremental packed Pattern4 windows.
+    ///
+    /// Enabling performs one full rebuild at the supplied root. Descendant
+    /// make/undo operations routed through this sidecar then update only one
+    /// 2-bit slot per affected window.
+    pub fn set_packed_line_windows_enabled(&mut self, board: &Board, enabled: bool) {
+        self.synchronize(board);
+        if enabled {
+            if self.line_packed_windows.is_none() {
+                let mut windows = Box::new([[0u32; 4]; NUM_CELLS]);
+                const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+                for cell in 0..NUM_CELLS {
+                    let row = (cell / BOARD_SIZE) as i32;
+                    let col = (cell % BOARD_SIZE) as i32;
+                    for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
+                        let window = crate::pattern_table::read_window(
+                            &board.black,
+                            &board.white,
+                            row,
+                            col,
+                            dr,
+                            dc,
+                        );
+                        let packed = crate::pattern_table::pack_window(&window);
+                        debug_assert_eq!(
+                            board.line_pattern_ids[cell][dir_idx],
+                            crate::pattern_table::lookup_mapped_id(packed),
+                            "line pattern ID stale before packed-window enable"
+                        );
+                        windows[cell][dir_idx] = packed;
+                    }
+                }
+                self.line_packed_windows = Some(windows);
+            }
+        } else {
+            self.line_packed_windows = None;
+        }
+        self.record_position(board);
+    }
+
+    #[inline]
+    pub fn packed_line_windows_enabled(&self) -> bool {
+        self.line_packed_windows.is_some()
+    }
+
+    /// Expose one packed value for correctness and audit harnesses.
+    #[inline]
+    pub fn packed_line_window(&self, cell: usize, dir_idx: usize) -> Option<u32> {
+        self.line_packed_windows
+            .as_ref()
+            .map(|windows| windows[cell][dir_idx])
+    }
+
+    /// Enable or disable the exact-order incremental candidate frontier.
+    ///
+    /// Enabling performs one full rebuild at the supplied root.
+    pub fn set_candidate_frontier_enabled(&mut self, board: &Board, enabled: bool) {
+        self.synchronize(board);
+        if enabled {
+            if self.candidate_frontier.is_none() {
+                self.candidate_frontier = Some(board.rebuild_candidate_frontier());
+            }
+        } else {
+            self.candidate_frontier = None;
+        }
+        self.record_position(board);
+    }
+
+    #[inline]
+    pub fn candidate_frontier_enabled(&self) -> bool {
+        self.candidate_frontier.is_some()
+    }
+
+    /// Generate candidates in exactly the legacy discovery order.
+    pub fn candidate_moves(&self, board: &Board) -> Vec<Move> {
+        if !self.is_synchronized(board) {
+            return board.candidate_moves();
+        }
+        self.candidate_moves_synchronized(board)
+    }
+
+    #[inline]
+    pub(crate) fn candidate_moves_synchronized(&self, board: &Board) -> Vec<Move> {
+        debug_assert!(
+            self.is_synchronized(board),
+            "BoardSearchState is stale for candidate generation"
+        );
+        if board.move_count == 0 {
+            return vec![to_idx(7, 7)];
+        }
+        let Some(frontier) = self.candidate_frontier.as_ref() else {
+            return board.candidate_moves();
+        };
+        board.candidate_moves_from_frontier(frontier)
+    }
+
+    /// Apply a move while maintaining every enabled sidecar cache.
+    #[inline]
+    pub fn make_move(&mut self, board: &mut Board, mv: Move) {
+        self.synchronize(board);
+        self.make_move_synchronized(board, mv);
+    }
+
+    #[inline]
+    pub(crate) fn make_move_synchronized(&mut self, board: &mut Board, mv: Move) {
+        debug_assert!(
+            self.is_synchronized(board),
+            "BoardSearchState is stale before make_move"
+        );
+        board.make_move_with_search_state(
+            mv,
+            self.line_packed_windows.as_deref_mut(),
+            self.candidate_frontier.as_deref_mut(),
+        );
+        self.record_position(board);
+    }
+
+    /// Undo a move while maintaining every enabled sidecar cache.
+    #[inline]
+    pub fn undo_move(&mut self, board: &mut Board) {
+        self.synchronize(board);
+        self.undo_move_synchronized(board);
+    }
+
+    #[inline]
+    pub(crate) fn undo_move_synchronized(&mut self, board: &mut Board) {
+        debug_assert!(
+            self.is_synchronized(board),
+            "BoardSearchState is stale before undo_move"
+        );
+        board.undo_move_with_search_state(
+            self.line_packed_windows.as_deref_mut(),
+            self.candidate_frontier.as_deref_mut(),
+        );
+        self.record_position(board);
+    }
+}
+
 #[derive(Clone)]
 pub struct Board {
     pub black: BitBoard,
@@ -343,13 +619,53 @@ impl Board {
         moves
     }
 
-    /// 빈 칸 주변(2칸 이내)만 후보로 생성 — 탐색 효율화
-    pub fn candidate_moves(&self) -> Vec<Move> {
-        if self.move_count == 0 {
-            // 첫 수: 천원
-            return vec![to_idx(7, 7)];
+    #[inline]
+    fn for_radius2_neighbors(cell: usize, mut f: impl FnMut(usize)) {
+        let (row, col) = to_rc(cell);
+        let row_start = row.saturating_sub(2);
+        let row_end = (row + 2).min(BOARD_SIZE - 1);
+        let col_start = col.saturating_sub(2);
+        let col_end = (col + 2).min(BOARD_SIZE - 1);
+        for neighbor_row in row_start..=row_end {
+            for neighbor_col in col_start..=col_end {
+                let neighbor = to_idx(neighbor_row, neighbor_col);
+                if neighbor != cell {
+                    f(neighbor);
+                }
+            }
         }
+    }
 
+    #[inline]
+    fn first_radius2_source(occupied: &BitBoard, cell: usize) -> Option<usize> {
+        let mut first = None;
+        Self::for_radius2_neighbors(cell, |neighbor| {
+            if first.is_none() && occupied.get(neighbor) {
+                first = Some(neighbor);
+            }
+        });
+        first
+    }
+
+    fn rebuild_candidate_frontier(&self) -> Box<CandidateFrontierState> {
+        let occupied = self.black.or(&self.white);
+        let mut state = Box::new(CandidateFrontierState::empty());
+        for source in occupied.iter_ones() {
+            Self::for_radius2_neighbors(source, |cell| {
+                state.radius2_count[cell] += 1;
+            });
+        }
+        for cell in 0..NUM_CELLS {
+            if !occupied.get(cell) && state.radius2_count[cell] > 0 {
+                let source = Self::first_radius2_source(&occupied, cell)
+                    .expect("positive radius-2 count must have a source");
+                state.candidate_insert(source, cell);
+            }
+        }
+        state
+    }
+
+    fn candidate_moves_legacy(&self) -> Vec<Move> {
         let occupied = self.black.or(&self.white);
         let mut seen = [false; NUM_CELLS];
         let mut moves = Vec::with_capacity(64);
@@ -381,8 +697,97 @@ impl Board {
         moves
     }
 
+    /// 빈 칸 주변(2칸 이내)만 후보로 생성 — 탐색 효율화
+    pub fn candidate_moves(&self) -> Vec<Move> {
+        if self.move_count == 0 {
+            // 첫 수: 천원
+            return vec![to_idx(7, 7)];
+        }
+        return self.candidate_moves_legacy();
+    }
+
+    fn candidate_moves_from_frontier(&self, frontier: &CandidateFrontierState) -> Vec<Move> {
+        let mut moves = Vec::with_capacity(frontier.candidates.count_ones() as usize);
+        for source in frontier.nonempty_sources.iter_ones() {
+            moves.extend(frontier.by_min_source[source].iter_ones());
+        }
+        debug_assert_eq!(moves.len(), frontier.candidates.count_ones() as usize);
+        moves
+    }
+
+    #[inline]
+    fn update_candidate_frontier_after_make(
+        &self,
+        frontier: &mut CandidateFrontierState,
+        mv: Move,
+    ) {
+        let occupied = self.black.or(&self.white);
+
+        if frontier.candidates.get(mv) {
+            frontier.candidate_remove(mv);
+        }
+        Self::for_radius2_neighbors(mv, |cell| {
+            let old_count = frontier.radius2_count[cell];
+            debug_assert!(old_count < 24);
+            frontier.radius2_count[cell] = old_count + 1;
+            if occupied.get(cell) {
+                return;
+            }
+            if old_count == 0 {
+                frontier.candidate_insert(mv, cell);
+            } else {
+                let old_source = frontier.min_source[cell] as usize;
+                debug_assert!(old_source < NUM_CELLS);
+                if mv < old_source {
+                    frontier.candidate_rekey(mv, cell);
+                }
+            }
+        });
+    }
+
+    #[inline]
+    fn update_candidate_frontier_after_undo(
+        &self,
+        frontier: &mut CandidateFrontierState,
+        mv: Move,
+    ) {
+        let occupied = self.black.or(&self.white);
+
+        Self::for_radius2_neighbors(mv, |cell| {
+            let old_count = frontier.radius2_count[cell];
+            debug_assert!(old_count > 0);
+            frontier.radius2_count[cell] = old_count - 1;
+            if occupied.get(cell) {
+                return;
+            }
+            if old_count == 1 {
+                frontier.candidate_remove(cell);
+            } else if frontier.min_source[cell] as usize == mv {
+                let new_source = Self::first_radius2_source(&occupied, cell)
+                    .expect("remaining radius-2 count must have a source");
+                frontier.candidate_rekey(new_source, cell);
+            }
+        });
+
+        if frontier.radius2_count[mv] > 0 {
+            let source = Self::first_radius2_source(&occupied, mv)
+                .expect("newly empty candidate must have a radius-2 source");
+            frontier.candidate_insert(source, mv);
+        }
+    }
+
     /// 착수
     pub fn make_move(&mut self, mv: Move) {
+        self.make_move_with_search_state(mv, None, None);
+    }
+
+    #[inline]
+    fn make_move_with_search_state(
+        &mut self,
+        mv: Move,
+        line_packed_windows: Option<&mut [[u32; 4]; NUM_CELLS]>,
+        candidate_frontier: Option<&mut CandidateFrontierState>,
+    ) {
         debug_assert!(mv < NUM_CELLS);
         debug_assert!(self.is_empty(mv));
 
@@ -400,13 +805,34 @@ impl Board {
         self.move_count += 1;
         self.side_to_move = placed.opponent();
 
+        // Maintain the optional radius-2 frontier after the stone is visible.
+        if let Some(frontier) = candidate_frontier {
+            self.update_candidate_frontier_after_make(frontier, mv);
+        }
+
         // Pattern4 mini state cache: mv 주변 4방향 ±5 cell의 pattern_id 갱신.
         // black-relative: read_window의 첫 인자 = black. side_to_move 무관.
-        self.update_line_patterns_around(mv);
+        self.update_line_patterns_around(
+            mv,
+            match placed {
+                Stone::Black => 1,
+                Stone::White => 2,
+            },
+            line_packed_windows,
+        );
     }
 
     /// 착수 취소
     pub fn undo_move(&mut self) {
+        self.undo_move_with_search_state(None, None);
+    }
+
+    #[inline]
+    fn undo_move_with_search_state(
+        &mut self,
+        line_packed_windows: Option<&mut [[u32; 4]; NUM_CELLS]>,
+        candidate_frontier: Option<&mut CandidateFrontierState>,
+    ) {
         if let Some(mv) = self.history.pop() {
             self.side_to_move = self.side_to_move.opponent();
             let placed = self.side_to_move;
@@ -421,9 +847,15 @@ impl Board {
 
             self.last_move = self.history.last().copied();
 
+            // The stone is already cleared, so restore the inverse radius-2
+            // delta and reinsert `mv` when another stone reaches it.
+            if let Some(frontier) = candidate_frontier {
+                self.update_candidate_frontier_after_undo(frontier, mv);
+            }
+
             // Pattern4 state cache: mv 주변 4방향 ±5 cell 다시 read+lookup.
             // mv는 이미 cleared된 상태라 새 윈도우에서 mv = empty.
-            self.update_line_patterns_around(mv);
+            self.update_line_patterns_around(mv, 0, line_packed_windows);
         }
     }
 
@@ -436,7 +868,7 @@ impl Board {
     ) -> usize {
         let mut seen = [false; NUM_CELLS];
         let mut len = 0usize;
-        Self::for_line_pattern_frontier(mv, |cell, _dir_idx| {
+        Self::for_line_pattern_frontier(mv, |cell, _dir_idx, _offset| {
             if !seen[cell] {
                 seen[cell] = true;
                 debug_assert!(len < LINE_PATTERN_FRONTIER_MAX);
@@ -448,7 +880,7 @@ impl Board {
     }
 
     #[inline]
-    fn for_line_pattern_frontier(mut mv: Move, mut f: impl FnMut(usize, usize)) {
+    fn for_line_pattern_frontier(mut mv: Move, mut f: impl FnMut(usize, usize, i32)) {
         const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
         debug_assert!(mv < NUM_CELLS);
         let row = (mv / BOARD_SIZE) as i32;
@@ -461,7 +893,7 @@ impl Board {
                     continue;
                 }
                 mv = (r as usize) * BOARD_SIZE + c as usize;
-                f(mv, dir_idx);
+                f(mv, dir_idx, offset);
             }
         }
     }
@@ -470,16 +902,38 @@ impl Board {
     /// pattern ID를 다시 lookup해 cache 갱신. 보드 경계로 일부 잘림.
     /// black-relative — read_window의 첫 인자 = black, 둘째 = white.
     #[inline]
-    fn update_line_patterns_around(&mut self, mv: Move) {
+    fn update_line_patterns_around(
+        &mut self,
+        mv: Move,
+        new_cell: u32,
+        line_packed_windows: Option<&mut [[u32; 4]; NUM_CELLS]>,
+    ) {
         const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
-        Self::for_line_pattern_frontier(mv, |cell, dir_idx| {
-            let (dr, dc) = DIRS[dir_idx];
-            let r = (cell / BOARD_SIZE) as i32;
-            let c = (cell % BOARD_SIZE) as i32;
-            let w = crate::pattern_table::read_window(&self.black, &self.white, r, c, dr, dc);
-            let packed = crate::pattern_table::pack_window(&w);
-            self.line_pattern_ids[cell][dir_idx] = crate::pattern_table::lookup_mapped_id(packed);
-        });
+        debug_assert!(new_cell <= 2);
+        if let Some(windows) = line_packed_windows {
+            let ids = &mut self.line_pattern_ids;
+            Self::for_line_pattern_frontier(mv, |cell, dir_idx, offset| {
+                // The changed board cell is at window index (5 - offset).
+                // Index 10 is in the low bits, hence:
+                // shift = (10 - (5 - offset)) * 2 = (5 + offset) * 2.
+                let shift = ((5 + offset) * 2) as u32;
+                let mask = 0b11u32 << shift;
+                let packed = (windows[cell][dir_idx] & !mask) | (new_cell << shift);
+                windows[cell][dir_idx] = packed;
+                ids[cell][dir_idx] = crate::pattern_table::lookup_mapped_id(packed);
+            });
+        } else {
+            Self::for_line_pattern_frontier(mv, |cell, dir_idx, _offset| {
+                let (dr, dc) = DIRS[dir_idx];
+                let r = (cell / BOARD_SIZE) as i32;
+                let c = (cell % BOARD_SIZE) as i32;
+                let window =
+                    crate::pattern_table::read_window(&self.black, &self.white, r, c, dr, dc);
+                let packed = crate::pattern_table::pack_window(&window);
+                self.line_pattern_ids[cell][dir_idx] =
+                    crate::pattern_table::lookup_mapped_id(packed);
+            });
+        }
     }
 
     /// Return whether the stone at `mv` completes a winning line under the active rule.
@@ -722,6 +1176,119 @@ mod tests {
         }
     }
 
+    fn assert_packed_windows_match_full_rebuild(
+        board: &Board,
+        state: &BoardSearchState,
+        operation: usize,
+    ) {
+        const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+        assert!(state.packed_line_windows_enabled());
+        assert!(state.is_synchronized(board));
+        for cell in 0..NUM_CELLS {
+            let row = (cell / BOARD_SIZE) as i32;
+            let col = (cell % BOARD_SIZE) as i32;
+            for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
+                let window =
+                    crate::pattern_table::read_window(&board.black, &board.white, row, col, dr, dc);
+                let expected_packed = crate::pattern_table::pack_window(&window);
+                let actual_packed = state.packed_line_window(cell, dir_idx).unwrap();
+                assert_eq!(
+                    actual_packed, expected_packed,
+                    "packed mismatch after operation {operation}, cell {cell}, dir {dir_idx}"
+                );
+                assert_eq!(
+                    board.line_pattern_ids[cell][dir_idx],
+                    crate::pattern_table::lookup_mapped_id(expected_packed),
+                    "mapped-id mismatch after operation {operation}, cell {cell}, dir {dir_idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_line_windows_are_opt_in_for_library_callers_and_toggle_cleanly() {
+        let mut board = Board::new();
+        let mut state = BoardSearchState::new();
+        assert!(!state.packed_line_windows_enabled());
+        board.make_move(to_idx(7, 7));
+        state.set_packed_line_windows_enabled(&board, true);
+        assert_packed_windows_match_full_rebuild(&board, &state, 1);
+        state.set_packed_line_windows_enabled(&board, false);
+        assert!(!state.packed_line_windows_enabled());
+        board.undo_move();
+        let empty = Board::new();
+        assert!(board.black == empty.black);
+        assert!(board.white == empty.white);
+        assert_eq!(board.side_to_move, empty.side_to_move);
+        assert_eq!(board.move_count, 0);
+        assert_eq!(board.line_pattern_ids, empty.line_pattern_ids);
+    }
+
+    /// Release correctness gate: 100k deterministic mixed make/undo
+    /// operations, lockstep equality with the legacy updater at every step,
+    /// plus periodic full raw-window rebuild equality.
+    #[test]
+    #[ignore = "100k release audit; run explicitly with --release --ignored"]
+    fn packed_line_windows_100k_make_undo_full_rebuild_equality() {
+        const OPERATIONS: usize = 100_000;
+        const FULL_REBUILD_PERIOD: usize = 97;
+
+        let mut legacy = Board::new();
+        let mut packed = Board::new();
+        let mut state = BoardSearchState::new();
+        state.set_packed_line_windows_enabled(&packed, true);
+        let mut rng = 0xDFA2_2026_0725_0001u64;
+
+        for operation in 1..=OPERATIONS {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let should_undo =
+                !legacy.history.is_empty() && (legacy.move_count >= 180 || (rng & 0b11) == 0);
+
+            if should_undo {
+                legacy.undo_move();
+                state.undo_move(&mut packed);
+            } else {
+                let start = (rng as usize) % NUM_CELLS;
+                let mv = (0..NUM_CELLS)
+                    .map(|delta| (start + delta) % NUM_CELLS)
+                    .find(|&cell| legacy.is_empty(cell))
+                    .expect("at least one empty cell before make");
+                legacy.make_move(mv);
+                state.make_move(&mut packed, mv);
+            }
+
+            assert!(
+                packed.black == legacy.black,
+                "black at operation {operation}"
+            );
+            assert!(
+                packed.white == legacy.white,
+                "white at operation {operation}"
+            );
+            assert_eq!(
+                packed.side_to_move, legacy.side_to_move,
+                "side at operation {operation}"
+            );
+            assert_eq!(
+                packed.line_pattern_ids, legacy.line_pattern_ids,
+                "mapped IDs at operation {operation}"
+            );
+
+            if operation % FULL_REBUILD_PERIOD == 0 || operation == OPERATIONS {
+                assert_packed_windows_match_full_rebuild(&packed, &state, operation);
+            }
+        }
+
+        while !legacy.history.is_empty() {
+            legacy.undo_move();
+            state.undo_move(&mut packed);
+        }
+        assert_eq!(packed.line_pattern_ids, legacy.line_pattern_ids);
+        assert_packed_windows_match_full_rebuild(&packed, &state, OPERATIONS + 1);
+    }
+
     /// 수 순서 무관 same position → same zobrist.
     /// 두 시퀀스가 같은 final position을 만들면 zobrist도 같아야 함.
     #[test]
@@ -869,5 +1436,142 @@ mod tests {
         let board = Board::new();
         let moves = board.candidate_moves();
         assert_eq!(moves, vec![to_idx(7, 7)]);
+    }
+
+    fn assert_candidate_frontier_matches_full_rebuild(
+        board: &Board,
+        state: &BoardSearchState,
+        operation: usize,
+    ) {
+        assert!(state.is_synchronized(board));
+        let actual = state
+            .candidate_frontier
+            .as_ref()
+            .expect("candidate frontier must be enabled");
+        let rebuilt = board.rebuild_candidate_frontier();
+        assert_eq!(
+            actual.radius2_count, rebuilt.radius2_count,
+            "radius2 counts at operation {operation}"
+        );
+        assert_eq!(
+            actual.min_source, rebuilt.min_source,
+            "minimum sources at operation {operation}"
+        );
+        assert!(
+            actual.candidates == rebuilt.candidates,
+            "candidate bitboard at operation {operation}"
+        );
+        assert!(
+            actual.nonempty_sources == rebuilt.nonempty_sources,
+            "non-empty source buckets at operation {operation}"
+        );
+        for source in 0..NUM_CELLS {
+            assert!(
+                actual.by_min_source[source] == rebuilt.by_min_source[source],
+                "source bucket {source} at operation {operation}"
+            );
+        }
+        assert_eq!(
+            state.candidate_moves(board),
+            if board.move_count == 0 {
+                vec![to_idx(7, 7)]
+            } else {
+                board.candidate_moves_legacy()
+            },
+            "exact candidate order at operation {operation}"
+        );
+    }
+
+    #[test]
+    fn candidate_frontier_is_opt_in_and_preserves_exact_order() {
+        let sequence = [
+            to_idx(7, 7),
+            to_idx(0, 0),
+            to_idx(14, 14),
+            to_idx(7, 8),
+            to_idx(2, 13),
+            to_idx(12, 1),
+        ];
+        let mut board = Board::new();
+        let mut state = BoardSearchState::new();
+        assert!(!state.candidate_frontier_enabled());
+        for &mv in &sequence {
+            board.make_move(mv);
+        }
+        let expected = board.candidate_moves();
+        state.set_candidate_frontier_enabled(&board, true);
+        assert!(state.candidate_frontier_enabled());
+        assert_eq!(state.candidate_moves(&board), expected);
+        assert_candidate_frontier_matches_full_rebuild(&board, &state, sequence.len());
+        state.set_candidate_frontier_enabled(&board, false);
+        assert!(!state.candidate_frontier_enabled());
+        assert_eq!(state.candidate_moves(&board), expected);
+    }
+
+    /// Release composition correctness gate: 100k deterministic mixed
+    /// make/undo operations, exact ordered-vector equality against the legacy
+    /// generator, and periodic complete frontier rebuild equality.
+    #[test]
+    #[ignore = "100k release audit; run explicitly with --release --ignored"]
+    fn candidate_frontier_100k_make_undo_full_rebuild_equality() {
+        const OPERATIONS: usize = 100_000;
+        const FULL_REBUILD_PERIOD: usize = 97;
+
+        let mut legacy = Board::new();
+        let mut incremental = Board::new();
+        let mut state = BoardSearchState::new();
+        state.set_packed_line_windows_enabled(&incremental, true);
+        state.set_candidate_frontier_enabled(&incremental, true);
+        let mut rng = 0xDFA3_2026_0725_0001u64;
+
+        for operation in 1..=OPERATIONS {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let should_undo =
+                !legacy.history.is_empty() && (legacy.move_count >= 180 || (rng & 0b11) == 0);
+
+            if should_undo {
+                legacy.undo_move();
+                state.undo_move(&mut incremental);
+            } else {
+                let start = (rng as usize) % NUM_CELLS;
+                let mv = (0..NUM_CELLS)
+                    .map(|delta| (start + delta) % NUM_CELLS)
+                    .find(|&cell| legacy.is_empty(cell))
+                    .expect("at least one empty cell before make");
+                legacy.make_move(mv);
+                state.make_move(&mut incremental, mv);
+            }
+
+            assert!(incremental.black == legacy.black);
+            assert!(incremental.white == legacy.white);
+            assert_eq!(incremental.side_to_move, legacy.side_to_move);
+            assert_eq!(
+                incremental.line_pattern_ids, legacy.line_pattern_ids,
+                "mapped pattern IDs at operation {operation}"
+            );
+            assert_eq!(
+                state.candidate_moves(&incremental),
+                legacy.candidate_moves(),
+                "ordered candidates at operation {operation}"
+            );
+
+            if operation % FULL_REBUILD_PERIOD == 0 || operation == OPERATIONS {
+                assert_packed_windows_match_full_rebuild(&incremental, &state, operation);
+                assert_candidate_frontier_matches_full_rebuild(&incremental, &state, operation);
+            }
+        }
+
+        while !legacy.history.is_empty() {
+            legacy.undo_move();
+            state.undo_move(&mut incremental);
+            assert_eq!(
+                state.candidate_moves(&incremental),
+                legacy.candidate_moves()
+            );
+        }
+        assert_packed_windows_match_full_rebuild(&incremental, &state, OPERATIONS + 1);
+        assert_candidate_frontier_matches_full_rebuild(&incremental, &state, OPERATIONS + 1);
     }
 }

@@ -23,10 +23,14 @@ impl<T: Copy> TokenDelta<T> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TokenDeltaReplay {
+    Forward,
+    Reverse,
+}
+
 pub(crate) trait TokenDeltaSink<T: Copy> {
-    fn begin_site(&mut self, site: u16);
-    fn apply(&mut self, delta: TokenDelta<T>);
-    fn end_site(&mut self, site: u16);
+    fn apply_site(&mut self, site: u16, deltas: &[TokenDelta<T>], replay: TokenDeltaReplay);
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -125,35 +129,25 @@ impl<T: Copy + Default + Eq, const LANES: usize, const MAX_DELTAS: usize>
             self.seen_generation = 1;
         }
         let generation = self.seen_generation;
-        let delta_count = dirty_sites
-            .iter()
-            .copied()
-            .map(|site| {
-                assert!(site < self.logical.len(), "TokenDelta dirty site overflow");
-                assert_ne!(
-                    self.seen_sites[site], generation,
-                    "TokenDelta dirty sites must be unique"
-                );
-                self.seen_sites[site] = generation;
-                (0..LANES)
-                    .filter(|&lane| self.logical[site][lane] != new_tokens[site][lane])
-                    .count()
-            })
-            .sum::<usize>();
-        assert!(
-            delta_count <= MAX_DELTAS,
-            "TokenDelta frame overflow: {delta_count} > {MAX_DELTAS}"
-        );
-
         let frame = &mut self.frames[self.depth];
         frame.len = 0;
         for site in dirty_sites.iter().copied() {
+            assert!(site < self.logical.len(), "TokenDelta dirty site overflow");
+            assert_ne!(
+                self.seen_sites[site], generation,
+                "TokenDelta dirty sites must be unique"
+            );
+            self.seen_sites[site] = generation;
             for lane in 0..LANES {
                 let old = self.logical[site][lane];
                 let new = new_tokens[site][lane];
                 if old == new {
                     continue;
                 }
+                assert!(
+                    frame.len < MAX_DELTAS,
+                    "TokenDelta frame overflow: more than {MAX_DELTAS}"
+                );
                 frame.deltas[frame.len] = TokenDelta {
                     site: site as u16,
                     lane: lane as u8,
@@ -161,10 +155,12 @@ impl<T: Copy + Default + Eq, const LANES: usize, const MAX_DELTAS: usize>
                     new,
                 };
                 frame.len += 1;
-                self.logical[site][lane] = new;
             }
         }
-        debug_assert_eq!(frame.len, delta_count);
+        let delta_count = frame.len;
+        for delta in frame.as_slice() {
+            self.logical[delta.site as usize][delta.lane as usize] = delta.new;
+        }
         self.depth += 1;
         delta_count
     }
@@ -227,12 +223,11 @@ fn replay_forward<T: Copy, S: TokenDeltaSink<T>, const MAX_DELTAS: usize>(
     let mut index = 0;
     while index < deltas.len() {
         let site = deltas[index].site;
-        sink.begin_site(site);
+        let begin = index;
         while index < deltas.len() && deltas[index].site == site {
-            sink.apply(deltas[index]);
             index += 1;
         }
-        sink.end_site(site);
+        sink.apply_site(site, &deltas[begin..index], TokenDeltaReplay::Forward);
     }
 }
 
@@ -245,12 +240,11 @@ fn replay_reverse<T: Copy, S: TokenDeltaSink<T>, const MAX_DELTAS: usize>(
     let mut index = deltas.len();
     while index > 0 {
         let site = deltas[index - 1].site;
-        sink.begin_site(site);
+        let end = index;
         while index > 0 && deltas[index - 1].site == site {
             index -= 1;
-            sink.apply(deltas[index].reversed());
         }
-        sink.end_site(site);
+        sink.apply_site(site, &deltas[index..end], TokenDeltaReplay::Reverse);
     }
 }
 
@@ -264,20 +258,31 @@ mod tests {
         events: Vec<String>,
     }
 
-    impl TokenDeltaSink<u16> for RecordingSink {
-        fn begin_site(&mut self, site: u16) {
-            self.events.push(format!("begin:{site}"));
-        }
-
-        fn apply(&mut self, delta: TokenDelta<u16>) {
+    impl RecordingSink {
+        fn apply_one(&mut self, delta: TokenDelta<u16>) {
             self.values[delta.site as usize] += i32::from(delta.new) - i32::from(delta.old);
             self.events.push(format!(
                 "delta:{}:{}:{}>{}",
                 delta.site, delta.lane, delta.old, delta.new
             ));
         }
+    }
 
-        fn end_site(&mut self, site: u16) {
+    impl TokenDeltaSink<u16> for RecordingSink {
+        fn apply_site(&mut self, site: u16, deltas: &[TokenDelta<u16>], replay: TokenDeltaReplay) {
+            self.events.push(format!("begin:{site}"));
+            match replay {
+                TokenDeltaReplay::Forward => {
+                    for &delta in deltas {
+                        self.apply_one(delta);
+                    }
+                }
+                TokenDeltaReplay::Reverse => {
+                    for &delta in deltas.iter().rev() {
+                        self.apply_one(delta.reversed());
+                    }
+                }
+            }
             self.events.push(format!("end:{site}"));
         }
     }

@@ -4,10 +4,10 @@
 //! correctness gate. It is deliberately feature-gated and is not wired into
 //! search by default.
 
-use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
-use crate::pattern_table::{PATTERN_NUM_IDS, swap_mapped_id};
+use crate::board::{Board, Move, Stone, BOARD_SIZE, NUM_CELLS};
+use crate::pattern_table::{swap_mapped_id, PATTERN_NUM_IDS};
 pub use crate::search::EvalStateStepProfile;
-use crate::token_delta::{ReversibleTokenJournal, TokenDelta, TokenDeltaSink};
+use crate::token_delta::{ReversibleTokenJournal, TokenDelta, TokenDeltaReplay, TokenDeltaSink};
 use serde_json::Value;
 
 const MAX_DIRTY_CELLS: usize = 41;
@@ -473,8 +473,6 @@ struct QuantizedCodebookTokenSink<'a> {
     profile: &'a mut EvalStateStepProfile,
     profile_enabled: bool,
     restore: bool,
-    active_site: Option<usize>,
-    numeric_start: Option<std::time::Instant>,
 }
 
 impl<'a> QuantizedCodebookTokenSink<'a> {
@@ -502,23 +500,11 @@ impl<'a> QuantizedCodebookTokenSink<'a> {
             profile,
             profile_enabled,
             restore,
-            active_site: None,
-            numeric_start: None,
         }
     }
-}
 
-impl TokenDeltaSink<u16> for QuantizedCodebookTokenSink<'_> {
-    #[inline]
-    fn begin_site(&mut self, site: u16) {
-        debug_assert!(self.active_site.is_none());
-        self.active_site = Some(site as usize);
-        self.numeric_start = EvalStateStepProfile::start(self.profile_enabled);
-    }
-
-    #[inline]
-    fn apply(&mut self, delta: TokenDelta<u16>) {
-        let cell = self.active_site.expect("TokenDelta site not begun");
+    #[inline(always)]
+    fn apply_delta(&mut self, cell: usize, delta: TokenDelta<u16>) {
         debug_assert_eq!(cell, delta.site as usize);
         debug_assert!((delta.lane as usize) < 4);
         apply_quantized_token_delta_to_raw(
@@ -536,12 +522,25 @@ impl TokenDeltaSink<u16> for QuantizedCodebookTokenSink<'_> {
             quant_cell_slice_mut(self.raw_white, cell, self.weights.dim),
         );
     }
+}
 
+impl TokenDeltaSink<u16> for QuantizedCodebookTokenSink<'_> {
     #[inline]
-    fn end_site(&mut self, site: u16) {
-        let cell = self.active_site.take().expect("TokenDelta site not begun");
-        debug_assert_eq!(cell, site as usize);
-        let numeric_start = self.numeric_start.take();
+    fn apply_site(&mut self, site: u16, deltas: &[TokenDelta<u16>], replay: TokenDeltaReplay) {
+        let cell = site as usize;
+        let numeric_start = EvalStateStepProfile::start(self.profile_enabled);
+        match replay {
+            TokenDeltaReplay::Forward => {
+                for &delta in deltas {
+                    self.apply_delta(cell, delta);
+                }
+            }
+            TokenDeltaReplay::Reverse => {
+                for &delta in deltas.iter().rev() {
+                    self.apply_delta(cell, delta.reversed());
+                }
+            }
+        }
         if self.restore {
             self.profile.add_restore(numeric_start);
         } else {

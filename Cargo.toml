@@ -165,6 +165,11 @@ name = "cb-f1-pack"
 path = "bin/cb_f1_pack.rs"
 required-features = ["codebook-eval"]
 
+[[bin]]
+name = "cb-voc1-census"
+path = "bin/cb_voc1_census.rs"
+required-features = ["codebook-eval"]
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

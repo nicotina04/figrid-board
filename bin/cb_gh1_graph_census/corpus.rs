@@ -110,6 +110,10 @@ pub(crate) struct Slate {
 
 pub(crate) struct CorpusBundle {
     pub(crate) slates: Vec<Slate>,
+    /// The validated current-product FP32 payload. This is returned alongside
+    /// the released quantized form so later train-only diagnostics can compare
+    /// both arms without reparsing or weakening the shared input seals.
+    pub(crate) product_float: CodebookWeights,
     pub(crate) product: QuantizedCodebookWeights,
     pub(crate) lineage: QuantizedCodebookWeights,
     pub(crate) diagnostics: Value,
@@ -264,6 +268,7 @@ pub(crate) fn load_validate_and_replay(paths: &InputPaths) -> Result<CorpusBundl
     recheck_inputs(paths)?;
     Ok(CorpusBundle {
         slates,
+        product_float,
         product,
         lineage,
         diagnostics,

@@ -311,6 +311,7 @@ fn run() -> Result<(), String> {
 
     let corpus::CorpusBundle {
         slates,
+        product_float: _product_float,
         product: _product,
         lineage: _lineage,
         diagnostics: corpus_diagnostics,

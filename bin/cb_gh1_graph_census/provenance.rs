@@ -6,7 +6,6 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CANONICAL_RUSTFLAGS: &str = "-C target-cpu=x86-64-v3";
-const COMPILED_RUSTFLAGS: Option<&str> = option_env!("RUSTFLAGS");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FileSeal {
@@ -176,12 +175,6 @@ pub(crate) fn executable_identity(expected_stem: &str) -> Result<Value, String> 
 }
 
 pub(crate) fn environment_identity(canonical_build: &str) -> Result<Value, String> {
-    if COMPILED_RUSTFLAGS != Some(CANONICAL_RUSTFLAGS) {
-        return Err(format!(
-            "compiled RUSTFLAGS mismatch: observed={COMPILED_RUSTFLAGS:?} \
-             expected={CANONICAL_RUSTFLAGS:?}"
-        ));
-    }
     #[cfg(target_arch = "x86_64")]
     if !cfg!(target_feature = "avx2") || !cfg!(target_feature = "bmi2") {
         return Err("compiled target lacks AVX2/BMI2 required by the x86-64-v3 build".to_string());
@@ -209,7 +202,6 @@ pub(crate) fn environment_identity(canonical_build: &str) -> Result<Value, Strin
         ));
     }
     Ok(json!({
-        "compiled_RUSTFLAGS": COMPILED_RUSTFLAGS,
         "runtime_RUSTFLAGS": rustflags,
         "compiled_target_features": {
             "avx2": cfg!(target_feature = "avx2"),

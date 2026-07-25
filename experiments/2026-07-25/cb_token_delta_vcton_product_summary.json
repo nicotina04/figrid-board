@@ -1,0 +1,36 @@
+{
+  "format": "cb-token-delta-abba-v1",
+  "mode": "fixed-depth-product-vct-on",
+  "time_ms": 30000,
+  "effective_root_vct_budget_ms": 2000,
+  "games": 64,
+  "positions": 1022,
+  "wall_a_ns": 41584670900.0,
+  "wall_b_ns": 41687744050.0,
+  "wall_ratio_b_over_a": 1.0024786332985023,
+  "wall_saving": -0.0024786332985022863,
+  "one_sided_95_game_block_bootstrap_upper": 1.006352181665059,
+  "nodes_a": 3502671.0,
+  "nodes_b": 3502671.0,
+  "node_ratio_b_over_a": 1.0,
+  "searched_depth_p50_a": 4.0,
+  "searched_depth_p50_b": 4.0,
+  "decision_mismatches": 0,
+  "result_mismatches": 0,
+  "node_mismatches": 0,
+  "gate": {
+    "wall_threshold": 1.005,
+    "bootstrap_upper_threshold": 1.01,
+    "correctness_mismatch_zero": true,
+    "wall_ratio_lte_threshold": true,
+    "one_sided_95_upper_lt_threshold": true,
+    "pass": true
+  },
+  "raw_arms_sha256": {
+    "a1": "EECC5B684F688AD7039A420D23BFB8FDBAE1E2CF0C86F8839A639EC31FBDB8BF",
+    "b1": "469205127941E56304D3D1C0C5809790EFE580E681FF93AA2CFFE9C39946B33A",
+    "b2": "1017AE387FF5B9E26E92F841D9CB5E79765876A05234BCE8DE78F8DFC39D88CF",
+    "a2": "83C9755ED2251DC6DEF42355D3D2B795819B164470F285EEA0015CEE0BBC05CB"
+  },
+  "raw_summary_sha256": "11AEA4314DB99A9EEEAF7519068A29A8D3291AA2F36BE9AAE62FD1263E32F9CE"
+}

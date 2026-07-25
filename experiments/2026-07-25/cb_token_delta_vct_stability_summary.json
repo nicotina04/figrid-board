@@ -1,0 +1,32 @@
+{
+  "format": "cb-token-delta-vct-stability-v1",
+  "groups": 5,
+  "positions": 1022,
+  "measurements_per_position": 20,
+  "direct_all_repeat_stable": 1018,
+  "journal_all_repeat_stable": 1016,
+  "union_unstable": 6,
+  "unstable_root_zobrist": [
+    16190087640098376112,
+    12379558193489596386,
+    18027059020765488528,
+    10965324913084412264,
+    14162633660369977410,
+    14688987771797757330
+  ],
+  "stable_positions": 1016,
+  "stable_cross_variant_divergence": 0,
+  "symmetric_censored_wall": {
+    "a_ns": 179731414700.0,
+    "b_ns": 180236961250.0,
+    "ratio_b_over_a": 1.002812789021017,
+    "one_sided_95_game_block_bootstrap_upper": 1.0050872745981638
+  },
+  "gate": {
+    "stable_cross_variant_divergence_zero": true,
+    "wall_ratio_lte_1_005": true,
+    "bootstrap_upper_lt_1_01": true,
+    "pass": true
+  },
+  "raw_summary_sha256": "0A40150E796DEFA660A2B5F0FE1E0F70CE901F959459B1768C08821FF9954E6D"
+}

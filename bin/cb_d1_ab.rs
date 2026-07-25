@@ -1,4 +1,4 @@
-//! Same-binary product-policy A/B harness for CB-D1 and CB-TD1.
+//! Same-binary product-policy A/B harness for CB-D1.
 
 use figrid_board::codebook_eval::{CodebookWeights, QuantizedCodebookWeights};
 use figrid_board::{Board, GOMOKU_NNUE_CONFIG, RuleSet, Searcher, Stone, to_idx, to_rc};
@@ -21,7 +21,6 @@ struct Args {
     depth: u32,
     time_ms: Option<u64>,
     directional_delta: bool,
-    token_delta: bool,
 }
 
 impl Args {
@@ -34,7 +33,6 @@ impl Args {
         let mut depth = 4u32;
         let mut time_ms = None;
         let mut directional_delta = false;
-        let mut token_delta = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -48,16 +46,12 @@ impl Args {
                 "--depth" => depth = parse_next(&mut it, "--depth")?,
                 "--time-ms" => time_ms = Some(parse_next(&mut it, "--time-ms")?),
                 "--directional-delta" => directional_delta = true,
-                "--token-delta" => token_delta = true,
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument `{other}`\n{}", usage())),
             }
         }
         if depth == 0 || sample_every == 0 {
             return Err("--depth and --sample-every must be > 0".to_string());
-        }
-        if token_delta && !directional_delta {
-            return Err("--token-delta requires --directional-delta".to_string());
         }
         Ok(Self {
             input: input.ok_or_else(usage)?,
@@ -68,7 +62,6 @@ impl Args {
             depth,
             time_ms,
             directional_delta,
-            token_delta,
         })
     }
 }
@@ -88,7 +81,7 @@ where
 
 fn usage() -> String {
     "usage: cb-d1-ab --input games.jsonl --output run.jsonl \
-     [--directional-delta] [--token-delta] [--max-searches N] [--sample-every N] \
+     [--directional-delta] [--max-searches N] [--sample-every N] \
      [--depth N] [--time-ms MS] [--flat-weights path]"
         .to_string()
 }
@@ -108,7 +101,7 @@ fn load_codebook() -> Result<QuantizedCodebookWeights, String> {
     .map_err(|error| format!("failed to parse embedded codebook: {error}"))
 }
 
-fn product_searcher(directional_delta: bool, token_delta: bool) -> Result<Searcher, String> {
+fn product_searcher(directional_delta: bool) -> Result<Searcher, String> {
     let mut searcher = Searcher::new();
     searcher.set_use_threat_field(false);
     searcher.set_use_lazy_threat_field(false);
@@ -117,7 +110,6 @@ fn product_searcher(directional_delta: bool, token_delta: bool) -> Result<Search
     searcher.set_use_packed_line_windows(true);
     searcher.set_use_candidate_frontier(true);
     searcher.set_use_codebook_directional_delta(directional_delta);
-    searcher.set_use_codebook_token_delta_journal(token_delta);
     searcher.set_white_root_order_enabled(true)?;
     Ok(searcher)
 }
@@ -157,7 +149,7 @@ fn main() -> Result<(), String> {
         "{}",
         json!({
             "kind": "seal",
-            "format": "cb-token-delta-ab-v1",
+            "format": "cb-d1-ab-v2",
             "baseline_commit": BASELINE_COMMIT,
             "codebook_sha256": CODEBOOK_SHA256,
             "input": args.input,
@@ -171,7 +163,6 @@ fn main() -> Result<(), String> {
             "packed_windows": true,
             "candidate_frontier": true,
             "directional_delta": args.directional_delta,
-            "token_delta": args.token_delta,
         })
     )
     .map_err(|error| format!("failed to write seal: {error}"))?;
@@ -207,7 +198,7 @@ fn main() -> Result<(), String> {
             .ok_or("game missing moves")?;
         let mut board = Board::new();
         board.set_rule_set(RuleSet::Freestyle);
-        let mut searcher = product_searcher(args.directional_delta, args.token_delta)?;
+        let mut searcher = product_searcher(args.directional_delta)?;
 
         for (ply, move_json) in moves.iter().enumerate() {
             if searches >= args.max_searches {
@@ -266,7 +257,6 @@ fn main() -> Result<(), String> {
                             "root_vct_enabled": root_vct_enabled,
                             "product_defaults": root_vct_enabled,
                             "directional_delta": args.directional_delta,
-                            "token_delta": args.token_delta,
                             "shape": {
                                 "main_nodes": shape.main_nodes,
                                 "qsearch_nodes": shape.qsearch_nodes,

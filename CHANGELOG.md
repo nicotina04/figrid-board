@@ -14,6 +14,14 @@
   remain opt-in, and `NORU_CODEBOOK_DIRECTIONAL_DELTA=off` provides immediate
   product rollback. No model, feature, pooling, move-order, or proof rule
   changed.
+* **Extract directional updates through a reusable reversible token journal.**
+  The private fixed-capacity `TokenDelta` journal is now the sole CB-D1
+  implementation, replacing its evaluator-specific undo ledger without
+  changing arithmetic or policy. A 100,000-operation rebuild audit remained
+  exact; the deterministic 1,022-root wall ratio was `1.00314` with one-sided
+  95% upper `1.00707`, and the same-feature release binary shrank by 7 KiB.
+  This is an internal architecture promotion, not a speed or playing-strength
+  claim. The existing directional-delta rollback remains unchanged.
 
 ## 0.8.2 (2026-07-25)
 * **Promote packed Pattern4 windows in `pbrain-figrid`.** Make/undo now

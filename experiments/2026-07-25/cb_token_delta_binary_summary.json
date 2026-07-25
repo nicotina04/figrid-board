@@ -1,0 +1,25 @@
+{
+  "format": "cb-token-delta-binary-audit-v1",
+  "target": "x86_64-pc-windows-msvc",
+  "rustflags": "-C target-cpu=x86-64-v3",
+  "cargo_features": [
+    "codebook-eval"
+  ],
+  "locked": true,
+  "baseline": {
+    "bytes": 2840064,
+    "sha256": "493C94578834A23B35C58DC1697ABF1D170FFB24C4171177C381535356F33A2A"
+  },
+  "candidate": {
+    "bytes": 2832896,
+    "sha256": "15030571829A44FBCE34A831740A92102F9FE109142A8A31A1610229DC992FC0"
+  },
+  "delta_bytes": -7168,
+  "delta_fraction": -0.0025238867856498537,
+  "gate": {
+    "growth_lte_1_percent": true,
+    "growth_lte_32768_bytes": true,
+    "pass": true
+  },
+  "note": "This same-feature MSVC audit is distinct from the self-contained embed-weights tournament bundle."
+}

@@ -1,0 +1,29 @@
+{
+  "format": "cb-token-delta-profile-summary-v2",
+  "design": "abba",
+  "positions": 256,
+  "measurements": 1024,
+  "wall_a_ns": 19122056600,
+  "wall_b_ns": 19085384000,
+  "wall_ratio_b_over_a": 0.9980821832731109,
+  "result_mismatches": 0,
+  "profile_call_mismatches": 0,
+  "ratios_b_over_a": {
+    "eval_ns": 0.9979056390270344,
+    "eval_state_push_pop_ns": 1.0034886256815303,
+    "eval_state_frame_write_ns": 1.1276169976836867,
+    "eval_state_aggregate_ns": 1.0141173073701144
+  },
+  "wall_shares_b": {
+    "eval_state_frame_write_ns": 0.009409619423952905,
+    "eval_state_aggregate_ns": 0.19834690776984104
+  },
+  "gate": {
+    "eval_ratio_lte_1_01": true,
+    "push_pop_ratio_lte_1_01": true,
+    "result_mismatch_zero": true,
+    "profile_call_mismatch_zero": true,
+    "pass": true
+  },
+  "raw_summary_sha256": "08BFF1FEB7D66A5A3B0F6CE70BD2E2C3E3BD89A9070DC87E7CE501EDD936F702"
+}

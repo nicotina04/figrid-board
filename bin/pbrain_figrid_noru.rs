@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "codebook-eval")]
 use figrid_board::codebook_eval::{CodebookWeights, QuantizedCodebookWeights};
+#[cfg(feature = "codebook-eval")]
+use figrid_board::factored_codebook::{FactoredQuantizedCodebookWeights, PackedCodebookArtifact};
 use figrid_board::{BOARD_SIZE, Board, GOMOKU_NNUE_CONFIG, RuleSet, Searcher, book, to_idx};
 use noru::network::NnueWeights;
 
@@ -85,15 +87,23 @@ fn pbrain_fixed_depth() -> bool {
     })
 }
 
-#[cfg(feature = "codebook-eval")]
-const EMBEDDED_CODEBOOK_JSON: &[u8] =
-    include_bytes!("../models/gomoku_codebook_v1_swapclosed.json");
+#[cfg(all(feature = "codebook-eval", feature = "cb-f1-flat-asset"))]
+const EMBEDDED_CODEBOOK_CBF: &[u8] =
+    include_bytes!("../models/gomoku_codebook_v1_swapclosed_compact_flat.cbf");
+
+#[cfg(all(feature = "codebook-eval", not(feature = "cb-f1-flat-asset")))]
+const EMBEDDED_CODEBOOK_CBF: &[u8] =
+    include_bytes!("../models/gomoku_codebook_v1_swapclosed_factored.cbf");
 
 #[cfg(feature = "codebook-eval")]
 enum CodebookRuntimeWeights {
     Float(CodebookWeights),
     Quantized {
         weights: QuantizedCodebookWeights,
+        embedded: bool,
+    },
+    FactoredQuantized {
+        weights: FactoredQuantizedCodebookWeights,
         embedded: bool,
     },
 }
@@ -159,6 +169,19 @@ fn codebook_quantized_enabled() -> bool {
             .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_QUANT"))
             .map(|raw| env_bool_default(&raw, true))
             .unwrap_or(true)
+    })
+}
+
+/// CB-F1 is an opt-in prototype. The embedded artifact is compact in either
+/// mode, but the runtime keeps the established flat quantized representation
+/// unless this selector is explicitly enabled.
+#[cfg(feature = "codebook-eval")]
+fn codebook_factored_enabled() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("NORU_CODEBOOK_FACTORED")
+            .map(|raw| env_bool_default(&raw, false))
+            .unwrap_or(false)
     })
 }
 
@@ -260,6 +283,7 @@ fn configure_white_root_order_mode(
     let supported = matches!(
         codebook,
         Some(CodebookRuntimeWeights::Quantized { embedded: true, .. })
+            | Some(CodebookRuntimeWeights::FactoredQuantized { embedded: true, .. })
     );
     match mode {
         WhiteRootOrderMode::Auto if supported => {
@@ -332,6 +356,7 @@ mod white_root_order_tests {
                 })
             }
             CodebookRuntimeWeights::Float(_) => unreachable!(),
+            CodebookRuntimeWeights::FactoredQuantized { .. } => unreachable!(),
         };
         let mut custom_searcher = Searcher::new();
         configure_white_root_order_mode(&mut custom_searcher, &custom, WhiteRootOrderMode::Auto)
@@ -341,6 +366,55 @@ mod white_root_order_tests {
             configure_white_root_order_mode(&mut custom_searcher, &custom, WhiteRootOrderMode::On,)
                 .is_err()
         );
+    }
+
+    #[cfg(not(feature = "cb-f1-flat-asset"))]
+    #[test]
+    fn auto_and_on_support_the_embedded_factored_path() {
+        let factored =
+            Some(load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true, true).unwrap());
+        assert!(matches!(
+            factored,
+            Some(CodebookRuntimeWeights::FactoredQuantized { embedded: true, .. })
+        ));
+
+        for mode in [WhiteRootOrderMode::Auto, WhiteRootOrderMode::On] {
+            let mut searcher = Searcher::new();
+            configure_white_root_order_mode(&mut searcher, &factored, mode).unwrap();
+            assert!(searcher.white_root_order_enabled());
+        }
+    }
+}
+
+#[cfg(feature = "codebook-eval")]
+fn load_embedded_codebook_weights(
+    bytes: &[u8],
+    quantized: bool,
+    factored: bool,
+) -> Result<CodebookRuntimeWeights, String> {
+    let artifact = PackedCodebookArtifact::parse(bytes)
+        .map_err(|e| format!("failed to parse embedded packed codebook: {e}"))?;
+    if !quantized {
+        return Ok(CodebookRuntimeWeights::Float(
+            artifact.into_source_weights(),
+        ));
+    }
+    if factored {
+        let weights = artifact.into_factored_quantized().map_err(|e| {
+            format!("NORU_CODEBOOK_FACTORED=on requires a factored embedded codebook: {e}")
+        })?;
+        Ok(CodebookRuntimeWeights::FactoredQuantized {
+            weights,
+            embedded: true,
+        })
+    } else {
+        // Keep the OFF arm identical to the established product kernel: the
+        // exact source floats are quantized into the existing flat table.
+        let weights = artifact.into_source_weights().quantize_i16_s32_s64();
+        Ok(CodebookRuntimeWeights::Quantized {
+            weights,
+            embedded: true,
+        })
     }
 }
 
@@ -363,33 +437,81 @@ fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
             None => None,
         },
     };
-    let (bytes, embedded) = match configured_path.as_deref().map(str::trim) {
-        Some("") => return Ok(None),
-        Some("0") => return Ok(None),
-        Some(path)
-            if path.eq_ignore_ascii_case("off")
-                || path.eq_ignore_ascii_case("false")
-                || path.eq_ignore_ascii_case("no") =>
-        {
-            return Ok(None);
-        }
-        Some(path) => (
-            std::fs::read(path)
-                .map_err(|e| format!("failed to read codebook weights from `{path}`: {e}"))?,
-            false,
-        ),
-        None => (EMBEDDED_CODEBOOK_JSON.to_vec(), true),
+    let Some(configured_path) = configured_path else {
+        return load_embedded_codebook_weights(
+            EMBEDDED_CODEBOOK_CBF,
+            codebook_quantized_enabled(),
+            codebook_factored_enabled(),
+        )
+        .map(Some);
     };
+    let path = configured_path.trim();
+    if path.is_empty()
+        || path == "0"
+        || path.eq_ignore_ascii_case("off")
+        || path.eq_ignore_ascii_case("false")
+        || path.eq_ignore_ascii_case("no")
+    {
+        return Ok(None);
+    }
 
+    // External model paths retain their public JSON behavior. They never
+    // inherit the embedded CB-F1 representation selector.
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("failed to read codebook weights from `{path}`: {e}"))?;
     let weights = CodebookWeights::from_json_bytes(&bytes)
         .map_err(|e| format!("failed to parse codebook weights: {e}"))?;
     if codebook_quantized_enabled() {
         Ok(Some(CodebookRuntimeWeights::Quantized {
             weights: weights.quantize_i16_s32_s64(),
-            embedded,
+            embedded: false,
         }))
     } else {
         Ok(Some(CodebookRuntimeWeights::Float(weights)))
+    }
+}
+
+#[cfg(all(test, feature = "codebook-eval"))]
+mod codebook_loader_tests {
+    use super::*;
+
+    #[test]
+    fn embedded_quant_off_uses_exact_source_floats() {
+        let runtime = load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, false, true).unwrap();
+        let CodebookRuntimeWeights::Float(weights) = runtime else {
+            panic!("quantized-off embedded codebook must use source floats");
+        };
+        assert_eq!(weights.dim, 16);
+        assert_eq!(weights.fm_rank, 8);
+    }
+
+    #[test]
+    fn embedded_factored_off_uses_the_existing_flat_quantizer() {
+        let runtime = load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true, false).unwrap();
+        assert!(matches!(
+            runtime,
+            CodebookRuntimeWeights::Quantized { embedded: true, .. }
+        ));
+    }
+
+    #[cfg(not(feature = "cb-f1-flat-asset"))]
+    #[test]
+    fn embedded_factored_on_keeps_only_the_factored_runtime() {
+        let runtime = load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true, true).unwrap();
+        assert!(matches!(
+            runtime,
+            CodebookRuntimeWeights::FactoredQuantized { embedded: true, .. }
+        ));
+    }
+
+    #[cfg(feature = "cb-f1-flat-asset")]
+    #[test]
+    fn flat_counterfactual_fails_closed_when_factored_is_requested() {
+        let error = match load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true, true) {
+            Ok(_) => panic!("flat counterfactual must reject the factored selector"),
+            Err(error) => error,
+        };
+        assert!(error.contains("requires a factored embedded codebook"));
     }
 }
 
@@ -658,6 +780,16 @@ impl Engine {
                 weights: codebook_weights,
                 ..
             }) => self.searcher.search_codebook_eval_quantized(
+                &mut self.board,
+                &self.weights,
+                codebook_weights,
+                max_depth,
+                time_limit,
+            ),
+            Some(CodebookRuntimeWeights::FactoredQuantized {
+                weights: codebook_weights,
+                ..
+            }) => self.searcher.search_codebook_eval_quantized_factored(
                 &mut self.board,
                 &self.weights,
                 codebook_weights,

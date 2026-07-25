@@ -65,8 +65,11 @@ def main() -> None:
     parser.add_argument("--wall-gate", type=float, default=0.99)
     parser.add_argument("--upper-gate", type=float, default=1.0)
     parser.add_argument("--token-delta", action="store_true")
+    parser.add_argument("--factored", action="store_true")
     parser.add_argument("--timed", action="store_true")
     args = parser.parse_args()
+    if args.token_delta and args.factored:
+        parser.error("--token-delta and --factored are mutually exclusive")
 
     loaded = [
         load(Path(args.a1)),
@@ -76,6 +79,8 @@ def main() -> None:
     ]
     seals = [item[0] for item in loaded]
     arms = [item[1] for item in loaded]
+    if args.factored and any(seal is None for seal in seals):
+        raise ValueError("CB-F1 requires one seal in every arm")
     if any(seal is not None for seal in seals):
         if any(seal is None for seal in seals):
             raise ValueError("ABBA seal presence differs")
@@ -95,6 +100,15 @@ def main() -> None:
             "packed_windows",
             "candidate_frontier",
         )
+        if args.factored:
+            stable_seal_keys += (
+                "factored_weights",
+                "factored_artifact_format",
+                "factored_artifact_kind",
+                "factored_source_sha256",
+                "factored_artifact_bytes",
+                "factored_artifact_payload_bytes",
+            )
         reference = seals[0]
         for arm_index, seal in enumerate(seals[1:], start=2):
             for field in stable_seal_keys:
@@ -103,7 +117,29 @@ def main() -> None:
                         f"arm {arm_index}: seal field {field} differs: "
                         f"{seal[field]!r} != {reference[field]!r}"
                     )
-        if args.token_delta:
+        if args.factored:
+            if any(seal.get("format") != "cb-f1-ab-v1" for seal in seals):
+                raise ValueError("CB-F1 requires cb-f1-ab-v1 seals")
+            if not all(seal.get("directional_delta") for seal in seals):
+                raise ValueError("CB-F1 requires directional delta in every arm")
+            expected_factored = (False, True, True, False)
+            for arm_index, (seal, expected) in enumerate(
+                zip(seals, expected_factored, strict=True), start=1
+            ):
+                if seal.get("factored_runtime") is not expected:
+                    raise ValueError(
+                        f"arm {arm_index}: factored_runtime="
+                        f"{seal.get('factored_runtime')!r}, expected {expected}"
+                    )
+                if seal.get("factored_artifact_format") != "noru-cbf1-v1":
+                    raise ValueError(
+                        f"arm {arm_index}: unexpected factored artifact format"
+                    )
+                if seal.get("factored_artifact_kind") != "factored":
+                    raise ValueError(
+                        f"arm {arm_index}: packed artifact is not factored"
+                    )
+        elif args.token_delta:
             if not all(seal["directional_delta"] for seal in seals):
                 raise ValueError("CB-TD1 requires CB-D1 in every arm")
             if seals[0].get("token_delta") or seals[3].get("token_delta"):
@@ -124,7 +160,25 @@ def main() -> None:
         rows = [arm[key] for arm in arms]
         if any(row.get("eval") != "codebook-quant" for row in rows):
             raise ValueError(f"{key}: non-codebook arm")
-        if args.token_delta:
+        if args.factored:
+            if not all(row.get("directional_delta") for row in rows):
+                raise ValueError(f"{key}: CB-F1 arm disables directional delta")
+            expected_factored = (False, True, True, False)
+            for arm_index, (row, expected) in enumerate(
+                zip(rows, expected_factored, strict=True), start=1
+            ):
+                if row.get("factored_runtime") is not expected:
+                    raise ValueError(
+                        f"{key}: arm {arm_index} factored_runtime="
+                        f"{row.get('factored_runtime')!r}, expected {expected}"
+                    )
+                if row.get("factored_source_sha256") != seals[0].get(
+                    "factored_source_sha256"
+                ):
+                    raise ValueError(
+                        f"{key}: arm {arm_index} factored source hash differs"
+                    )
+        elif args.token_delta:
             if not all(row.get("directional_delta") for row in rows):
                 raise ValueError(f"{key}: CB-TD1 arm disables CB-D1")
             if a1[key].get("token_delta") or a2[key].get("token_delta"):
@@ -269,9 +323,17 @@ def main() -> None:
     )
     result = {
         "format": (
-            "cb-token-delta-abba-v1"
-            if args.token_delta
-            else ("cb-d1-abba-v2" if seals[0] is not None else "cb-d1-abba-v1")
+            "cb-f1-abba-v1"
+            if args.factored
+            else (
+                "cb-token-delta-abba-v1"
+                if args.token_delta
+                else (
+                    "cb-d1-abba-v2"
+                    if seals[0] is not None
+                    else "cb-d1-abba-v1"
+                )
+            )
         ),
         "mode": "timed" if args.timed else "fixed-depth",
         "seal": seals[0],

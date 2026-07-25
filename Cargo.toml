@@ -42,6 +42,10 @@ avx512 = ["noru/avx512"]
 # eval path. Optional for library users; pbrain builds with this feature load the
 # embedded swap-closed codebook and use the quantized kernel by default.
 codebook-eval = []
+# CB-F1 compact-flat counterfactual. Never enabled by default; product code
+# uses it only to attribute serialization savings separately from the exact
+# factored embedding representation.
+cb-f1-flat-asset = ["codebook-eval"]
 
 [dependencies]
 noru = { version = "2.2" }
@@ -154,6 +158,11 @@ path = "bin/rq603_response_relevance.rs"
 [[bin]]
 name = "cb-d1-ab"
 path = "bin/cb_d1_ab.rs"
+required-features = ["codebook-eval"]
+
+[[bin]]
+name = "cb-f1-pack"
+path = "bin/cb_f1_pack.rs"
 required-features = ["codebook-eval"]
 
 [profile.release]

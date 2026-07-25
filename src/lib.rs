@@ -17,6 +17,8 @@ pub mod codebook_eval;
 pub(crate) mod codebook_sidecar;
 pub mod coord;
 pub mod eval;
+#[cfg(feature = "codebook-eval")]
+pub mod factored_codebook;
 pub mod features;
 pub mod heuristic;
 pub mod pattern_dense;

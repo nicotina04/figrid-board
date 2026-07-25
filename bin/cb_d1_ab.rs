@@ -1,6 +1,9 @@
-//! Same-binary product-policy A/B harness for CB-D1.
+//! Same-binary product-policy A/B harness for CB-D1 and CB-F1.
 
 use figrid_board::codebook_eval::{CodebookWeights, QuantizedCodebookWeights};
+use figrid_board::factored_codebook::{
+    FactoredQuantizedCodebookWeights, PackedCodebookArtifact, PackedCodebookKind,
+};
 use figrid_board::{Board, GOMOKU_NNUE_CONFIG, RuleSet, Searcher, Stone, to_idx, to_rc};
 use noru::network::NnueWeights;
 use serde_json::{Value, json};
@@ -9,7 +12,9 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::time::{Duration, Instant};
 
 const BASELINE_COMMIT: &str = "74c93bca23c031b1401d63acdf1831dbd782e805";
+const CB_F1_BASELINE_COMMIT: &str = "dc0d9afae658113747e5666c3864b381cc971582";
 const CODEBOOK_SHA256: &str = "42968fdab01ba8ccd1de3ded05c532e4b237dd47eeffd7ae1c2f264d77ba7da2";
+const CB_F1_ARTIFACT_FORMAT: &str = "noru-cbf1-v1";
 
 #[derive(Debug)]
 struct Args {
@@ -21,6 +26,8 @@ struct Args {
     depth: u32,
     time_ms: Option<u64>,
     directional_delta: bool,
+    factored_weights: Option<String>,
+    factored_runtime: bool,
 }
 
 impl Args {
@@ -33,6 +40,8 @@ impl Args {
         let mut depth = 4u32;
         let mut time_ms = None;
         let mut directional_delta = false;
+        let mut factored_weights = None;
+        let mut factored_runtime = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -46,12 +55,24 @@ impl Args {
                 "--depth" => depth = parse_next(&mut it, "--depth")?,
                 "--time-ms" => time_ms = Some(parse_next(&mut it, "--time-ms")?),
                 "--directional-delta" => directional_delta = true,
+                "--factored-weights" => {
+                    factored_weights = Some(it.next().ok_or("--factored-weights requires a path")?)
+                }
+                "--factored-runtime" => factored_runtime = true,
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument `{other}`\n{}", usage())),
             }
         }
         if depth == 0 || sample_every == 0 {
             return Err("--depth and --sample-every must be > 0".to_string());
+        }
+        if factored_runtime && factored_weights.is_none() {
+            return Err("--factored-runtime requires --factored-weights".to_string());
+        }
+        if factored_weights.is_some() && !directional_delta {
+            return Err(
+                "CB-F1 A/B requires --directional-delta in both flat and factored arms".to_string(),
+            );
         }
         Ok(Self {
             input: input.ok_or_else(usage)?,
@@ -62,6 +83,8 @@ impl Args {
             depth,
             time_ms,
             directional_delta,
+            factored_weights,
+            factored_runtime,
         })
     }
 }
@@ -82,7 +105,8 @@ where
 fn usage() -> String {
     "usage: cb-d1-ab --input games.jsonl --output run.jsonl \
      [--directional-delta] [--max-searches N] [--sample-every N] \
-     [--depth N] [--time-ms MS] [--flat-weights path]"
+     [--depth N] [--time-ms MS] [--flat-weights path] \
+     [--factored-weights artifact.cbf [--factored-runtime]]"
         .to_string()
 }
 
@@ -99,6 +123,49 @@ fn load_codebook() -> Result<QuantizedCodebookWeights, String> {
     ))
     .map(|weights| weights.quantize_i16_s32_s64())
     .map_err(|error| format!("failed to parse embedded codebook: {error}"))
+}
+
+struct FactoredCandidate {
+    factored: FactoredQuantizedCodebookWeights,
+    flat: QuantizedCodebookWeights,
+    source_sha256: String,
+    artifact_bytes: usize,
+    artifact_payload_bytes: usize,
+}
+
+fn load_factored(path: &str) -> Result<FactoredCandidate, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read factored weights `{path}`: {error}"))?;
+    let artifact = PackedCodebookArtifact::parse(&bytes)
+        .map_err(|error| format!("failed to parse factored weights `{path}`: {error}"))?;
+    if artifact.kind() != PackedCodebookKind::Factored {
+        return Err(format!(
+            "packed codebook `{path}` is {:?}, expected Factored",
+            artifact.kind()
+        ));
+    }
+    let source_sha256 = hex_lower(artifact.source_sha256());
+    let artifact_bytes = bytes.len();
+    let artifact_payload_bytes = artifact.artifact_payload_len();
+    let factored = artifact.into_factored_quantized()?;
+    let flat = factored.reconstruct_flat();
+    Ok(FactoredCandidate {
+        factored,
+        flat,
+        source_sha256,
+        artifact_bytes,
+        artifact_payload_bytes,
+    })
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn product_searcher(directional_delta: bool) -> Result<Searcher, String> {
@@ -133,7 +200,16 @@ fn root_vct_enabled() -> bool {
 fn main() -> Result<(), String> {
     let args = Args::parse()?;
     let flat = load_flat(&args.flat_weights)?;
-    let codebook = load_codebook()?;
+    let factored = args
+        .factored_weights
+        .as_deref()
+        .map(load_factored)
+        .transpose()?;
+    let codebook = if factored.is_none() {
+        Some(load_codebook()?)
+    } else {
+        None
+    };
     let input = File::open(&args.input)
         .map_err(|error| format!("failed to open input `{}`: {error}", args.input))?;
     let output = File::create(&args.output)
@@ -141,6 +217,7 @@ fn main() -> Result<(), String> {
     let mut output = BufWriter::new(output);
     let time_limit = args.time_ms.map(Duration::from_millis);
     let root_vct_enabled = root_vct_enabled();
+    let cb_f1 = factored.is_some();
     let mut searches = 0usize;
     let mut seen_product_positions = 0usize;
 
@@ -149,8 +226,8 @@ fn main() -> Result<(), String> {
         "{}",
         json!({
             "kind": "seal",
-            "format": "cb-d1-ab-v2",
-            "baseline_commit": BASELINE_COMMIT,
+            "format": if cb_f1 { "cb-f1-ab-v1" } else { "cb-d1-ab-v2" },
+            "baseline_commit": if cb_f1 { CB_F1_BASELINE_COMMIT } else { BASELINE_COMMIT },
             "codebook_sha256": CODEBOOK_SHA256,
             "input": args.input,
             "flat_weights": args.flat_weights,
@@ -163,6 +240,15 @@ fn main() -> Result<(), String> {
             "packed_windows": true,
             "candidate_frontier": true,
             "directional_delta": args.directional_delta,
+            "factored_weights": args.factored_weights,
+            "factored_artifact_format": cb_f1.then_some(CB_F1_ARTIFACT_FORMAT),
+            "factored_artifact_kind": cb_f1.then_some("factored"),
+            "factored_source_sha256": factored.as_ref().map(|item| item.source_sha256.as_str()),
+            "factored_artifact_bytes": factored.as_ref().map(|item| item.artifact_bytes),
+            "factored_artifact_payload_bytes": factored
+                .as_ref()
+                .map(|item| item.artifact_payload_bytes),
+            "factored_runtime": args.factored_runtime,
         })
     )
     .map_err(|error| format!("failed to write seal: {error}"))?;
@@ -222,13 +308,30 @@ fn main() -> Result<(), String> {
                 if seen_product_positions % args.sample_every == 0 {
                     let mut search_board = board.clone();
                     let started = Instant::now();
-                    let result = searcher.search_codebook_eval_quantized(
-                        &mut search_board,
-                        &flat,
-                        &codebook,
-                        args.depth,
-                        time_limit,
-                    );
+                    let result = match &factored {
+                        Some(candidate) if args.factored_runtime => searcher
+                            .search_codebook_eval_quantized_factored(
+                                &mut search_board,
+                                &flat,
+                                &candidate.factored,
+                                args.depth,
+                                time_limit,
+                            ),
+                        Some(candidate) => searcher.search_codebook_eval_quantized(
+                            &mut search_board,
+                            &flat,
+                            &candidate.flat,
+                            args.depth,
+                            time_limit,
+                        ),
+                        None => searcher.search_codebook_eval_quantized(
+                            &mut search_board,
+                            &flat,
+                            codebook.as_ref().expect("embedded codebook loaded"),
+                            args.depth,
+                            time_limit,
+                        ),
+                    };
                     let elapsed_ns = started.elapsed().as_nanos();
                     let shape = searcher.search_shape_stats();
                     let best_move = result.best_move.map(|mv| {
@@ -257,6 +360,10 @@ fn main() -> Result<(), String> {
                             "root_vct_enabled": root_vct_enabled,
                             "product_defaults": root_vct_enabled,
                             "directional_delta": args.directional_delta,
+                            "factored_runtime": args.factored_runtime,
+                            "factored_source_sha256": factored
+                                .as_ref()
+                                .map(|item| item.source_sha256.as_str()),
                             "shape": {
                                 "main_nodes": shape.main_nodes,
                                 "qsearch_nodes": shape.qsearch_nodes,

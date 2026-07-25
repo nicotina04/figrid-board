@@ -12,9 +12,11 @@ use crate::board::{
 #[cfg(feature = "codebook-eval")]
 use crate::codebook_eval::{
     CodebookWeights, IncrementalCodebookEval, IncrementalQuantizedCodebookEval,
-    QuantizedCodebookWeights,
+    QuantizedCodebookAccess, QuantizedCodebookWeights,
 };
 use crate::eval::IncrementalEval;
+#[cfg(feature = "codebook-eval")]
+use crate::factored_codebook::FactoredQuantizedCodebookWeights;
 use crate::heuristic::{DIR, scan_line};
 use crate::threat_field::{IncrementalThreatField, ThreatFieldUpdateMode};
 use crate::transposition::{Bound, TranspositionTable, TtStats};
@@ -1262,25 +1264,18 @@ impl SearchEvalState for CodebookEvalState<'_> {
 }
 
 #[cfg(feature = "codebook-eval")]
-struct QuantizedCodebookEvalState<'a> {
-    weights: &'a QuantizedCodebookWeights,
+struct QuantizedCodebookEvalState<'a, W: QuantizedCodebookAccess> {
+    weights: &'a W,
     inc: IncrementalQuantizedCodebookEval,
     scale: f32,
 }
 
 #[cfg(feature = "codebook-eval")]
-impl<'a> QuantizedCodebookEvalState<'a> {
-    fn new(
-        board: &Board,
-        weights: &'a QuantizedCodebookWeights,
-        scale: f32,
-        use_directional_delta: bool,
-    ) -> Self {
-        let mut inc = IncrementalQuantizedCodebookEval::new_with_directional_delta(
-            weights,
-            use_directional_delta,
-        );
-        inc.refresh(board, weights);
+impl<'a, W: QuantizedCodebookAccess> QuantizedCodebookEvalState<'a, W> {
+    fn new(board: &Board, weights: &'a W, scale: f32, use_directional_delta: bool) -> Self {
+        let mut inc =
+            IncrementalQuantizedCodebookEval::new_with_access(weights, use_directional_delta);
+        inc.refresh_with_access(board, weights);
         Self {
             weights,
             inc,
@@ -1290,7 +1285,7 @@ impl<'a> QuantizedCodebookEvalState<'a> {
 }
 
 #[cfg(feature = "codebook-eval")]
-impl SearchEvalState for QuantizedCodebookEvalState<'_> {
+impl<W: QuantizedCodebookAccess> SearchEvalState for QuantizedCodebookEvalState<'_, W> {
     fn push_move(
         &mut self,
         board: &Board,
@@ -1298,17 +1293,18 @@ impl SearchEvalState for QuantizedCodebookEvalState<'_> {
         profile_enabled: bool,
     ) -> EvalStateStepProfile {
         self.inc
-            .push_move_profiled(board, mv, self.weights, profile_enabled)
+            .push_move_profiled_with_access(board, mv, self.weights, profile_enabled)
     }
 
     fn pop_move(&mut self, profile_enabled: bool) -> EvalStateStepProfile {
-        self.inc.pop_move_profiled(self.weights, profile_enabled)
+        self.inc
+            .pop_move_profiled_with_access(self.weights, profile_enabled)
     }
 
     fn eval(&mut self, board: &Board, profile_enabled: bool) -> (i32, EvalStateStepProfile) {
-        let (value, detail) = self
-            .inc
-            .value_profiled(board, self.weights, profile_enabled);
+        let (value, detail) =
+            self.inc
+                .value_profiled_with_access(board, self.weights, profile_enabled);
         (
             (value * self.scale)
                 .round()
@@ -1756,10 +1752,10 @@ impl Searcher {
     }
 
     #[cfg(feature = "codebook-eval")]
-    fn prepare_white_root_order_cache(
+    fn prepare_white_root_order_cache<W: QuantizedCodebookAccess>(
         &mut self,
         board: &Board,
-        weights: &QuantizedCodebookWeights,
+        weights: &W,
     ) -> Result<(), String> {
         let Some(policy) = self.white_root_order.as_ref() else {
             return Ok(());
@@ -1783,11 +1779,11 @@ impl Searcher {
 
         let mut cache = WhiteRootOrderCache::new(board.zobrist);
         let mut scratch = board.clone();
-        let mut extractor = IncrementalQuantizedCodebookEval::new_with_directional_delta(
+        let mut extractor = IncrementalQuantizedCodebookEval::new_with_access(
             weights,
             self.use_codebook_directional_delta,
         );
-        extractor.refresh(&scratch, weights);
+        extractor.refresh_with_access(&scratch, weights);
         let candidates = self.board_candidate_moves(board);
         for mv in candidates {
             let attack = classify_move_fast(board, mv, board.side_to_move);
@@ -1797,17 +1793,17 @@ impl Searcher {
             } else {
                 scratch.make_move(mv);
             }
-            extractor.push_move(&scratch, mv, weights);
+            extractor.push_move_profiled_with_access(&scratch, mv, weights, false);
             let quiet_ongoing = scratch.game_result() == GameResult::Ongoing
                 && attack == ThreatKind::None
                 && block == ThreatKind::None;
             let residual = if quiet_ongoing {
-                let orbit = extractor.explicit_orbit48(weights, Stone::White)?;
+                let orbit = extractor.explicit_orbit48_with_access(weights, Stone::White)?;
                 policy.score_orbit48(&orbit)?
             } else {
                 0.0
             };
-            extractor.pop_move(weights);
+            extractor.pop_move_profiled_with_access(weights, false);
             if let Some(state) = self.board_search_state.as_mut() {
                 state.undo_move_synchronized(&mut scratch);
             } else {
@@ -2488,6 +2484,47 @@ impl Searcher {
         board: &mut Board,
         ordering_weights: &NnueWeights,
         codebook_weights: &QuantizedCodebookWeights,
+        max_depth: u32,
+        time_limit: Option<Duration>,
+    ) -> SearchResult {
+        self.search_codebook_eval_quantized_with(
+            board,
+            ordering_weights,
+            codebook_weights,
+            max_depth,
+            time_limit,
+        )
+    }
+
+    /// Search with a CB-F1 class-base plus residual quantized codebook.
+    ///
+    /// This is a separate generic instantiation of the evaluator and search
+    /// adapter. The factored table is never expanded and the node hot path
+    /// performs no representation tag dispatch.
+    #[cfg(feature = "codebook-eval")]
+    pub fn search_codebook_eval_quantized_factored(
+        &mut self,
+        board: &mut Board,
+        ordering_weights: &NnueWeights,
+        codebook_weights: &FactoredQuantizedCodebookWeights,
+        max_depth: u32,
+        time_limit: Option<Duration>,
+    ) -> SearchResult {
+        self.search_codebook_eval_quantized_with(
+            board,
+            ordering_weights,
+            codebook_weights,
+            max_depth,
+            time_limit,
+        )
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    fn search_codebook_eval_quantized_with<W: QuantizedCodebookAccess>(
+        &mut self,
+        board: &mut Board,
+        ordering_weights: &NnueWeights,
+        codebook_weights: &W,
         max_depth: u32,
         time_limit: Option<Duration>,
     ) -> SearchResult {
@@ -4660,6 +4697,8 @@ fn threat_priority(kind: ThreatKind, defending: bool) -> i32 {
 mod tests {
     use super::*;
     use crate::board::{Board, to_idx};
+    #[cfg(feature = "codebook-eval")]
+    use crate::factored_codebook::PackedCodebookArtifact;
     use crate::features::GOMOKU_NNUE_CONFIG;
 
     #[cfg(feature = "codebook-eval")]
@@ -4690,6 +4729,56 @@ mod tests {
 
         searcher.set_use_codebook_directional_delta(false);
         assert!(!searcher.use_codebook_directional_delta);
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    #[test]
+    fn factored_quantized_search_matches_reconstructed_flat_smoke() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("models/gomoku_codebook_v1_swapclosed_factored.cbf");
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let factored = PackedCodebookArtifact::parse(&bytes)
+            .expect("valid CB-F1 artifact")
+            .into_factored_quantized()
+            .expect("factored payload");
+        let flat = factored.reconstruct_flat();
+        let ordering = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+
+        let mut flat_board = Board::new();
+        flat_board.make_move(to_idx(7, 7));
+        let mut factored_board = flat_board.clone();
+        let mut flat_searcher = Searcher::new();
+        let mut factored_searcher = Searcher::new();
+        flat_searcher.set_use_codebook_directional_delta(true);
+        factored_searcher.set_use_codebook_directional_delta(true);
+        flat_searcher.set_white_root_order_enabled(true).unwrap();
+        factored_searcher
+            .set_white_root_order_enabled(true)
+            .unwrap();
+
+        let flat_result = flat_searcher.search_codebook_eval_quantized(
+            &mut flat_board,
+            &ordering,
+            &flat,
+            2,
+            None,
+        );
+        let factored_result = factored_searcher.search_codebook_eval_quantized_factored(
+            &mut factored_board,
+            &ordering,
+            &factored,
+            2,
+            None,
+        );
+        assert_eq!(factored_result.best_move, flat_result.best_move);
+        assert_eq!(factored_result.score, flat_result.score);
+        assert_eq!(factored_result.depth, flat_result.depth);
+        assert_eq!(factored_result.nodes, flat_result.nodes);
+        assert!(factored_board.black == flat_board.black);
+        assert!(factored_board.white == flat_board.white);
+        assert_eq!(factored_board.history, flat_board.history);
+        assert_eq!(factored_board.zobrist, flat_board.zobrist);
     }
 
     #[cfg(feature = "codebook-eval")]

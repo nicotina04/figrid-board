@@ -4,6 +4,10 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "codebook-eval")]
 use figrid_board::codebook_eval::{CodebookWeights, QuantizedCodebookWeights};
+#[cfg(feature = "codebook-eval")]
+use figrid_board::factored_codebook::{
+    FactoredQuantizedCodebookWeights, PackedCodebookArtifact, PackedCodebookKind,
+};
 use figrid_board::{
     Board, GOMOKU_NNUE_CONFIG, MovePickerStats, SearchProfileSnapshot, SearchShapeStats, Searcher,
     to_idx, to_rc,
@@ -28,6 +32,8 @@ struct Args {
     use_tail_threat_materialize: bool,
     product_defaults: bool,
     directional_delta: bool,
+    factored_weights: Option<String>,
+    factored_runtime: bool,
 }
 
 impl Args {
@@ -48,6 +54,8 @@ impl Args {
         let mut use_tail_threat_materialize = false;
         let mut product_defaults = false;
         let mut directional_delta = false;
+        let mut factored_weights = None;
+        let mut factored_runtime = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -112,6 +120,10 @@ impl Args {
                 }
                 "--product-defaults" => product_defaults = true,
                 "--directional-delta" => directional_delta = true,
+                "--factored-weights" => {
+                    factored_weights = Some(it.next().ok_or("--factored-weights requires a path")?)
+                }
+                "--factored-runtime" => factored_runtime = true,
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument `{other}`\n{}", usage())),
             }
@@ -119,6 +131,17 @@ impl Args {
 
         if sample_every == 0 {
             return Err("--sample-every must be > 0".to_string());
+        }
+        if factored_runtime && factored_weights.is_none() {
+            return Err("--factored-runtime requires --factored-weights".to_string());
+        }
+        if factored_weights.is_some() {
+            if eval != "codebook-quant" {
+                return Err("--factored-weights requires --eval codebook-quant".to_string());
+            }
+            if !directional_delta {
+                return Err("CB-F1 profiling requires --directional-delta in both arms".to_string());
+            }
         }
 
         Ok(Self {
@@ -137,6 +160,8 @@ impl Args {
             use_tail_threat_materialize,
             product_defaults,
             directional_delta,
+            factored_weights,
+            factored_runtime,
         })
     }
 }
@@ -146,7 +171,8 @@ fn usage() -> String {
      [--eval flat|codebook-quant] [--depth N] [--time-ms MS] [--node-budget N] [--limit N] \
      [--sample-every N] [--use-threat-field|--use-lazy-threat-field|--no-threat-field] \
      [--stress-threat-field] [--use-move-picker] [--use-tail-threat-materialize] \
-     [--product-defaults] [--directional-delta]\n\
+     [--product-defaults] [--directional-delta] \
+     [--factored-weights artifact.cbf [--factored-runtime]]\n\
      Set NORU_SEARCH_PROFILE=1 to record profile buckets."
         .to_string()
 }
@@ -172,6 +198,52 @@ fn load_quantized_codebook() -> Result<QuantizedCodebookWeights, String> {
     let weights = CodebookWeights::from_json_bytes(&bytes)
         .map_err(|e| format!("failed to parse codebook weights: {e}"))?;
     Ok(weights.quantize_i16_s32_s64())
+}
+
+#[cfg(feature = "codebook-eval")]
+struct FactoredCandidate {
+    factored: FactoredQuantizedCodebookWeights,
+    flat: QuantizedCodebookWeights,
+    source_sha256: String,
+    artifact_bytes: usize,
+    artifact_payload_bytes: usize,
+}
+
+#[cfg(feature = "codebook-eval")]
+fn load_factored(path: &str) -> Result<FactoredCandidate, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read factored weights `{path}`: {error}"))?;
+    let artifact = PackedCodebookArtifact::parse(&bytes)
+        .map_err(|error| format!("failed to parse factored weights `{path}`: {error}"))?;
+    if artifact.kind() != PackedCodebookKind::Factored {
+        return Err(format!(
+            "packed codebook `{path}` is {:?}, expected Factored",
+            artifact.kind()
+        ));
+    }
+    let source_sha256 = hex_lower(artifact.source_sha256());
+    let artifact_bytes = bytes.len();
+    let artifact_payload_bytes = artifact.artifact_payload_len();
+    let factored = artifact.into_factored_quantized()?;
+    let flat = factored.reconstruct_flat();
+    Ok(FactoredCandidate {
+        factored,
+        flat,
+        source_sha256,
+        artifact_bytes,
+        artifact_payload_bytes,
+    })
+}
+
+#[cfg(feature = "codebook-eval")]
+fn hex_lower(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn move_picker_json(stats: MovePickerStats) -> Value {
@@ -249,7 +321,13 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("failed to parse flat weights: {e}"))?;
 
     #[cfg(feature = "codebook-eval")]
-    let codebook_weights = if args.eval == "codebook-quant" {
+    let factored_candidate = args
+        .factored_weights
+        .as_deref()
+        .map(load_factored)
+        .transpose()?;
+    #[cfg(feature = "codebook-eval")]
+    let codebook_weights = if args.eval == "codebook-quant" && factored_candidate.is_none() {
         Some(load_quantized_codebook()?)
     } else {
         None
@@ -328,13 +406,30 @@ fn main() -> Result<(), String> {
                             time_limit,
                         ),
                         #[cfg(feature = "codebook-eval")]
-                        "codebook-quant" => searcher.search_codebook_eval_quantized(
-                            &mut search_board,
-                            &flat_weights,
-                            codebook_weights.as_ref().expect("codebook weights loaded"),
-                            args.depth,
-                            time_limit,
-                        ),
+                        "codebook-quant" => match &factored_candidate {
+                            Some(candidate) if args.factored_runtime => searcher
+                                .search_codebook_eval_quantized_factored(
+                                    &mut search_board,
+                                    &flat_weights,
+                                    &candidate.factored,
+                                    args.depth,
+                                    time_limit,
+                                ),
+                            Some(candidate) => searcher.search_codebook_eval_quantized(
+                                &mut search_board,
+                                &flat_weights,
+                                &candidate.flat,
+                                args.depth,
+                                time_limit,
+                            ),
+                            None => searcher.search_codebook_eval_quantized(
+                                &mut search_board,
+                                &flat_weights,
+                                codebook_weights.as_ref().expect("codebook weights loaded"),
+                                args.depth,
+                                time_limit,
+                            ),
+                        },
                         other => return Err(format!("unknown eval arm `{other}`")),
                     };
                     let elapsed = started.elapsed();
@@ -381,6 +476,23 @@ fn main() -> Result<(), String> {
                         "use_tail_threat_materialize": args.use_tail_threat_materialize,
                         "product_defaults": args.product_defaults,
                         "directional_delta": args.directional_delta,
+                        "factored_weights": args.factored_weights,
+                        "factored_artifact_format": factored_candidate
+                            .as_ref()
+                            .map(|_| "noru-cbf1-v1"),
+                        "factored_artifact_kind": factored_candidate
+                            .as_ref()
+                            .map(|_| "factored"),
+                        "factored_source_sha256": factored_candidate
+                            .as_ref()
+                            .map(|item| item.source_sha256.as_str()),
+                        "factored_artifact_bytes": factored_candidate
+                            .as_ref()
+                            .map(|item| item.artifact_bytes),
+                        "factored_artifact_payload_bytes": factored_candidate
+                            .as_ref()
+                            .map(|item| item.artifact_payload_bytes),
+                        "factored_runtime": args.factored_runtime,
                         "elapsed_ns": elapsed_ns,
                         "elapsed_ms": elapsed_ms,
                         "best_move": best_move,

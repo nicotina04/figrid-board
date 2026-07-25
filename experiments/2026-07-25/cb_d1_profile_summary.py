@@ -86,7 +86,10 @@ def main() -> None:
     parser.add_argument("--a2")
     parser.add_argument("--output", required=True)
     parser.add_argument("--token-delta", action="store_true")
+    parser.add_argument("--factored", action="store_true")
     args = parser.parse_args()
+    if args.token_delta and args.factored:
+        parser.error("--token-delta and --factored are mutually exclusive")
 
     paired = args.a is not None or args.b is not None
     abba = any(value is not None for value in (args.a1, args.b1, args.b2, args.a2))
@@ -140,7 +143,36 @@ def main() -> None:
         ):
             raise ValueError("actual visited node accounting mismatch")
 
-    if args.token_delta:
+    if args.factored:
+        if not all(
+            row.get("directional_delta") for rows in arm_rows for row in rows
+        ):
+            raise ValueError("CB-F1 profile requires directional delta in every arm")
+        if any(row.get("factored_runtime") for rows in a_arms for row in rows):
+            raise ValueError("profile A unexpectedly enables factored runtime")
+        if not all(
+            row.get("factored_runtime") for rows in b_arms for row in rows
+        ):
+            raise ValueError("profile B does not enable factored runtime")
+        stable_factored_fields = (
+            "factored_weights",
+            "factored_artifact_format",
+            "factored_artifact_kind",
+            "factored_source_sha256",
+            "factored_artifact_bytes",
+            "factored_artifact_payload_bytes",
+        )
+        reference = arm_rows[0][0]
+        if reference.get("factored_artifact_format") != "noru-cbf1-v1":
+            raise ValueError("unexpected factored artifact format")
+        if reference.get("factored_artifact_kind") != "factored":
+            raise ValueError("packed artifact is not factored")
+        for rows in arm_rows:
+            for row in rows:
+                for field in stable_factored_fields:
+                    if row.get(field) != reference.get(field):
+                        raise ValueError(f"factored profile field {field} differs")
+    elif args.token_delta:
         if not all(
             row.get("directional_delta") for rows in arm_rows for row in rows
         ):
@@ -198,9 +230,13 @@ def main() -> None:
     )
     result = {
         "format": (
-            "cb-token-delta-profile-summary-v2"
-            if args.token_delta
-            else "cb-d1-profile-summary-v2"
+            "cb-f1-profile-summary-v1"
+            if args.factored
+            else (
+                "cb-token-delta-profile-summary-v2"
+                if args.token_delta
+                else "cb-d1-profile-summary-v2"
+            )
         ),
         "design": "abba" if abba else "paired",
         "arm_order": arm_names,

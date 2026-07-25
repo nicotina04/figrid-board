@@ -29,6 +29,10 @@ pub(crate) enum TokenDeltaReplay {
     Reverse,
 }
 
+/// Applies a grouped site replay to external numeric state.
+///
+/// Implementations must not unwind: replay intentionally commits directly
+/// into the sink and does not provide transactional rollback for sink panics.
 pub(crate) trait TokenDeltaSink<T: Copy> {
     fn apply_site(&mut self, site: u16, deltas: &[TokenDelta<T>], replay: TokenDeltaReplay);
 }
@@ -110,8 +114,9 @@ impl<T: Copy + Default + Eq, const LANES: usize, const MAX_DELTAS: usize>
 
     /// Record the changed lanes at the supplied sites and advance logical time.
     ///
-    /// The capacity check happens before mutation, so an invalid producer
-    /// cannot leave the logical mirror half-updated.
+    /// Validation completes before logical/depth mutation, so an invalid
+    /// producer cannot leave the logical mirror half-updated. Scratch frame
+    /// contents and duplicate-detection generations may change on panic.
     pub(crate) fn push_after(&mut self, new_tokens: &[[T; LANES]], dirty_sites: &[usize]) -> usize {
         assert_eq!(
             new_tokens.len(),
@@ -403,5 +408,25 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(journal.logical_tokens(), [[1, 2]]);
         assert_eq!(journal.depth(), 0);
+    }
+
+    #[test]
+    fn validation_panic_allows_successful_retry_and_roundtrip() {
+        let initial = [[1u16, 2]];
+        let mut journal = ReversibleTokenJournal::<u16, 2, 1>::new(1, 1);
+        journal.reset(&initial);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = journal.push_after(&[[3, 4]], &[0]);
+        }));
+        assert!(result.is_err());
+
+        let after = [[3, 2]];
+        assert_eq!(journal.push_after(&after, &[0]), 1);
+        let mut sink = RecordingSink::default();
+        journal.materialize_pending(&mut sink);
+        assert_eq!(sink.values, [2, 0, 0]);
+        assert!(journal.pop(&mut sink).unwrap().materialized);
+        assert_eq!(journal.logical_tokens(), initial);
+        assert_eq!(sink.values, [0, 0, 0]);
     }
 }

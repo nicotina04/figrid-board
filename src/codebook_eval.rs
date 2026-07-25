@@ -504,23 +504,17 @@ impl<'a> QuantizedCodebookTokenSink<'a> {
     }
 
     #[inline(always)]
-    fn apply_delta(&mut self, cell: usize, delta: TokenDelta<u16>) {
-        debug_assert_eq!(cell, delta.site as usize);
+    fn apply_delta(
+        weights: &QuantizedCodebookWeights,
+        site: u16,
+        delta: TokenDelta<u16>,
+        raw_black: &mut [i32],
+        raw_white: &mut [i32],
+    ) {
+        debug_assert_eq!(site, delta.site);
         debug_assert!((delta.lane as usize) < 4);
-        apply_quantized_token_delta_to_raw(
-            delta.old,
-            delta.new,
-            self.weights,
-            Stone::Black,
-            quant_cell_slice_mut(self.raw_black, cell, self.weights.dim),
-        );
-        apply_quantized_token_delta_to_raw(
-            delta.old,
-            delta.new,
-            self.weights,
-            Stone::White,
-            quant_cell_slice_mut(self.raw_white, cell, self.weights.dim),
-        );
+        apply_quantized_token_delta_to_raw(delta.old, delta.new, weights, Stone::Black, raw_black);
+        apply_quantized_token_delta_to_raw(delta.old, delta.new, weights, Stone::White, raw_white);
     }
 }
 
@@ -529,15 +523,18 @@ impl TokenDeltaSink<u16> for QuantizedCodebookTokenSink<'_> {
     fn apply_site(&mut self, site: u16, deltas: &[TokenDelta<u16>], replay: TokenDeltaReplay) {
         let cell = site as usize;
         let numeric_start = EvalStateStepProfile::start(self.profile_enabled);
+        let weights = self.weights;
+        let raw_black = quant_cell_slice_mut(self.raw_black, cell, weights.dim);
+        let raw_white = quant_cell_slice_mut(self.raw_white, cell, weights.dim);
         match replay {
             TokenDeltaReplay::Forward => {
                 for &delta in deltas {
-                    self.apply_delta(cell, delta);
+                    Self::apply_delta(weights, site, delta, raw_black, raw_white);
                 }
             }
             TokenDeltaReplay::Reverse => {
                 for &delta in deltas.iter().rev() {
-                    self.apply_delta(cell, delta.reversed());
+                    Self::apply_delta(weights, site, delta.reversed(), raw_black, raw_white);
                 }
             }
         }

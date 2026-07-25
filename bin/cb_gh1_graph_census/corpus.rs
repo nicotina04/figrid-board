@@ -76,16 +76,17 @@ pub(crate) struct InputPaths {
 pub(crate) struct Candidate {
     pub(crate) mv: Move,
     pub(crate) teacher_top: bool,
+    pub(crate) deployed_actual: bool,
     /// Stored RQ569 high-precision value in the forced-Black coordinate.
     pub(crate) stored_black_logit: f32,
     pub(crate) stored_child_hash: String,
 }
 
 #[derive(Clone, Debug)]
-struct InventoryEntry {
-    mv: Move,
-    stored_black_logit: f32,
-    stored_child_hash: String,
+pub(crate) struct InventoryEntry {
+    pub(crate) mv: Move,
+    pub(crate) stored_black_logit: f32,
+    pub(crate) stored_child_hash: String,
 }
 
 #[derive(Clone)]
@@ -98,7 +99,7 @@ pub(crate) struct Slate {
     pub(crate) root_side: Stone,
     pub(crate) history: Vec<(Move, Stone)>,
     pub(crate) parent: Board,
-    legal_inventory: Vec<InventoryEntry>,
+    pub(crate) legal_inventory: Vec<InventoryEntry>,
     pub(crate) candidates: [Candidate; K6],
     pub(crate) q_teacher: [f64; K6],
     pub(crate) repeat_scores_mover: [[i64; K6]; 2],
@@ -752,6 +753,7 @@ fn parse_slate(value: &Value) -> Result<Slate, String> {
         candidates.push(Candidate {
             mv,
             teacher_top,
+            deployed_actual,
             stored_black_logit: stored,
             stored_child_hash: child_hash,
         });

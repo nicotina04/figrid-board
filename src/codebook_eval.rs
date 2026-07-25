@@ -1356,6 +1356,19 @@ pub fn evaluate_full_quantized(board: &Board, weights: &QuantizedCodebookWeights
     inc.value(board, weights)
 }
 
+/// CB-AL1-only full-refresh audit entry point for the deployed factored
+/// access path. It is deliberately unavailable to ordinary product builds.
+#[cfg(feature = "cb-al1-audit")]
+#[doc(hidden)]
+pub fn evaluate_full_factored_quantized_for_audit(
+    board: &Board,
+    weights: &FactoredQuantizedCodebookWeights,
+) -> f32 {
+    let mut inc = IncrementalQuantizedCodebookEval::new_with_access(weights, false);
+    inc.refresh_with_access(board, weights);
+    inc.value_profiled_with_access(board, weights, false).0
+}
+
 pub fn dirty_cells_for_move(mv: Move) -> Vec<usize> {
     const DIRS: [(i32, i32); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
     let row = (mv / BOARD_SIZE) as i32;

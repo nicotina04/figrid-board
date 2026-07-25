@@ -46,6 +46,9 @@ codebook-eval = []
 # uses it only to attribute serialization savings separately from the exact
 # factored embedding representation.
 cb-f1-flat-asset = ["codebook-eval"]
+# CB-AL1 preregistered audit surface. Default-off and used only by the
+# label-blind selector binary to compare factored access with flat replay.
+cb-al1-audit = ["codebook-eval"]
 
 [dependencies]
 noru = { version = "2.2" }
@@ -193,6 +196,11 @@ required-features = ["codebook-eval"]
 name = "cb-qat1-headroom"
 path = "bin/cb_qat1_headroom.rs"
 required-features = ["codebook-eval"]
+
+[[bin]]
+name = "cb-al1-selector"
+path = "bin/cb_al1_selector.rs"
+required-features = ["cb-al1-audit"]
 
 [profile.release]
 opt-level = 3

@@ -100,16 +100,17 @@ statistics, or output creation. The registered P0B output path remains absent.
 The guard incorrectly assumed that this transformation is byte-idempotent:
 
 ```text
-typed serde_json::Value containing f32
+f32 passed into json! and promoted to an exact f64 JSON number
   -> to_vec_pretty
-  -> parse as untyped serde_json::Value
+  -> parse through serde_json's default f64 path
   -> to_vec_pretty
 ```
 
-It is not. P0A constructed JSON numbers from binary32 values. The first
-serialization used the shortest decimal representation appropriate to the
-typed `f32`. P0B parsed those numbers into the generic number representation
-used as binary64, whose shortest round-tripping decimal can differ.
+It is not under the frozen serde_json build. `json!` immediately promoted
+each binary32 value to its exact binary64 value. The first serialization
+therefore emitted the promoted value's decimal representation. The default
+serde_json parser, built without `float_roundtrip`, reconstructed one such
+decimal as the adjacent binary64 value, whose next serialization was shorter.
 
 A read-only diagnostic reproduced the exact failure:
 

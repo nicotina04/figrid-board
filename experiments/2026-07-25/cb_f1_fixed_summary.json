@@ -1,0 +1,32 @@
+{
+  "format": "cb-f1-fixed-summary-v1",
+  "implementation_commit": "fabc8794a753beedea2f76faffab69644c31d88c",
+  "rustflags": "-C target-cpu=x86-64-v3",
+  "harness_sha256": "E0AC01B7316E6D7160138A60BE73D1D352AC6DDCB7FAA32EF53AA472C446F948",
+  "games": 64,
+  "positions": 1022,
+  "depth": 4,
+  "root_vct": false,
+  "arm_order": [
+    "a1",
+    "b1",
+    "b2",
+    "a2"
+  ],
+  "wall_a_ns": 17398958000,
+  "wall_b_ns": 18067728500,
+  "wall_ratio_b_over_a": 1.0384373880320878,
+  "one_sided_95_bootstrap_upper": 1.045790458015278,
+  "nodes_a": 4488455,
+  "nodes_b": 4488455,
+  "decision_mismatches": 0,
+  "result_mismatches": 0,
+  "node_mismatches": 0,
+  "gate": {
+    "point_lte_1_005": false,
+    "upper_lt_1_01": false,
+    "exact": true,
+    "pass": false
+  },
+  "raw_summary_sha256": "7A2F3E1C5B36E008692C35CE5481833F371B0A779263033AD9A0792F92161C7E"
+}

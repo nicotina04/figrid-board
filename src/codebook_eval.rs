@@ -1796,6 +1796,167 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "CB-F1 benchmark: run in release mode with x86-64-v3"]
+    fn cb_f1_reusable_full_refresh_microbenchmark() {
+        fn timed_refresh<W: QuantizedCodebookAccess>(
+            roots: &[Board],
+            weights: &W,
+            eval: &mut IncrementalQuantizedCodebookEval,
+            repeats: usize,
+        ) -> (u128, i64) {
+            let start = std::time::Instant::now();
+            let mut checksum = 0i64;
+            for _ in 0..repeats {
+                for board in roots {
+                    eval.refresh_with_access(board, weights);
+                    std::hint::black_box(&eval.cell_black);
+                    std::hint::black_box(&eval.cell_white);
+                    std::hint::black_box(&eval.features_black);
+                    std::hint::black_box(&eval.features_white);
+                    let cell_last = eval.cell_black.len() - 1;
+                    let feature_last = eval.features_black.len() - 1;
+                    for value in [
+                        eval.cell_black[0],
+                        eval.cell_black[cell_last / 2],
+                        eval.cell_black[cell_last],
+                        eval.cell_white[17],
+                        eval.cell_white[cell_last / 2],
+                        eval.features_black[0],
+                        eval.features_black[feature_last],
+                        eval.features_white[feature_last / 2],
+                    ] {
+                        checksum = checksum
+                            .wrapping_mul(0x517c_c1b7_2722_0a95)
+                            .wrapping_add(i64::from(value))
+                            .wrapping_add(1);
+                    }
+                }
+            }
+            (start.elapsed().as_nanos(), std::hint::black_box(checksum))
+        }
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let artifact_path = manifest_dir.join("models/gomoku_codebook_v1_swapclosed_factored.cbf");
+        let artifact_bytes = std::fs::read(&artifact_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", artifact_path.display()));
+        let artifact =
+            PackedCodebookArtifact::parse(&artifact_bytes).expect("valid CB-F1 factored artifact");
+        let source_sha256 = artifact
+            .source_sha256()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let factored = artifact
+            .into_factored_quantized()
+            .expect("factored payload");
+        let flat = factored.reconstruct_flat();
+
+        let holdout_path = std::env::var_os("CB_F1_HOLDOUT_JSONL")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                manifest_dir.join(
+                    "../figrid-dp-campaign/experiments/2026-07-25/dp_a1_fresh_holdout_64g.jsonl",
+                )
+            });
+        let trace = std::fs::read_to_string(&holdout_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", holdout_path.display()));
+        let mut roots = Vec::with_capacity(1_022);
+        'games: for line in trace.lines().filter(|line| !line.trim().is_empty()) {
+            let game: Value = serde_json::from_str(line).expect("valid holdout JSONL row");
+            let black = game["black_engine"].as_str().expect("black_engine");
+            let white = game["white_engine"].as_str().expect("white_engine");
+            let product_side = match (
+                black.to_ascii_lowercase().contains("figrid"),
+                white.to_ascii_lowercase().contains("figrid"),
+            ) {
+                (true, false) => Stone::Black,
+                (false, true) => Stone::White,
+                other => panic!("expected exactly one figrid side, got {other:?}"),
+            };
+            let mut board = Board::new();
+            for move_json in game["moves"].as_array().expect("moves array") {
+                let source = move_json["source"].as_str().unwrap_or("unknown");
+                if source == "engine" && board.side_to_move == product_side {
+                    roots.push(board.clone());
+                    if roots.len() == 1_022 {
+                        break 'games;
+                    }
+                }
+                let x = move_json["x"].as_u64().expect("move x") as usize;
+                let y = move_json["y"].as_u64().expect("move y") as usize;
+                let mv = y * BOARD_SIZE + x;
+                assert!(board.is_empty(mv), "holdout contains an occupied move");
+                board.make_move(mv);
+            }
+        }
+        assert_eq!(roots.len(), 1_022, "frozen product-root count drift");
+
+        let classes = factored.classes();
+        let mut same_class = 0u64;
+        let mut mixed_class = 0u64;
+        for board in &roots {
+            for pattern_ids in &board.line_pattern_ids[..] {
+                for swap in [false, true] {
+                    let ids = if swap {
+                        pattern_ids.map(swap_mapped_id)
+                    } else {
+                        *pattern_ids
+                    };
+                    let class = classes[ids[0] as usize];
+                    if ids[1..]
+                        .iter()
+                        .all(|&pattern_id| classes[pattern_id as usize] == class)
+                    {
+                        same_class += 1;
+                    } else {
+                        mixed_class += 1;
+                    }
+                }
+            }
+        }
+
+        let mut flat_eval = IncrementalQuantizedCodebookEval::new_with_access(&flat, true);
+        let mut factored_eval = IncrementalQuantizedCodebookEval::new_with_access(&factored, true);
+        const WARMUP_REPEATS: usize = 2;
+        const REPEATS: usize = 24;
+        let _ = timed_refresh(&roots, &flat, &mut flat_eval, WARMUP_REPEATS);
+        let _ = timed_refresh(&roots, &factored, &mut factored_eval, WARMUP_REPEATS);
+        let (a1_ns, a1_checksum) = timed_refresh(&roots, &flat, &mut flat_eval, REPEATS);
+        let (b1_ns, b1_checksum) = timed_refresh(&roots, &factored, &mut factored_eval, REPEATS);
+        let (b2_ns, b2_checksum) = timed_refresh(&roots, &factored, &mut factored_eval, REPEATS);
+        let (a2_ns, a2_checksum) = timed_refresh(&roots, &flat, &mut flat_eval, REPEATS);
+        assert_eq!(a1_checksum, b1_checksum, "A1/B1 checksum mismatch");
+        assert_eq!(a1_checksum, b2_checksum, "A1/B2 checksum mismatch");
+        assert_eq!(a1_checksum, a2_checksum, "A1/A2 checksum mismatch");
+
+        let total_class_cells = same_class + mixed_class;
+        let ratio = (b1_ns + b2_ns) as f64 / (a1_ns + a2_ns) as f64;
+        println!(
+            "{}",
+            serde_json::json!({
+                "format": "cb-f1-full-refresh-v1",
+                "kind": "result",
+                "arm_order": ["a1", "b1", "b2", "a2"],
+                "holdout": holdout_path.to_string_lossy(),
+                "factored_artifact": artifact_path.to_string_lossy(),
+                "source_sha256": source_sha256,
+                "roots": roots.len(),
+                "warmup_repeats": WARMUP_REPEATS,
+                "repeats": REPEATS,
+                "a1_ns": a1_ns,
+                "b1_ns": b1_ns,
+                "b2_ns": b2_ns,
+                "a2_ns": a2_ns,
+                "ratio_b_over_a": ratio,
+                "checksum": a1_checksum,
+                "same_class": same_class,
+                "mixed_class": mixed_class,
+                "same_class_ratio": same_class as f64 / total_class_cells as f64,
+            })
+        );
+    }
+
+    #[test]
     #[ignore = "CB-F1 release gate: run explicitly with --release --ignored"]
     fn quantized_factored_100k_mixed_make_undo_full_rebuild_equality() {
         const OPERATIONS: usize = 100_000;

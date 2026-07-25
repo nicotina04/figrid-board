@@ -1,0 +1,38 @@
+{
+  "format": "cb-f1-size-summary-v1",
+  "rustflags": "-C target-cpu=x86-64-v3",
+  "flat_quantized_payload_bytes": 139108,
+  "factored_embedding_payload_bytes": 72682,
+  "factored_quantized_payload_bytes": 75278,
+  "quantized_payload_delta_bytes": 63830,
+  "quantized_payload_reduction_percent": 45.885211490352816,
+  "compact_flat_artifact": {
+    "bytes": 417412,
+    "sha256": "9A5E3D3FC47EEF79468F021F78E9130F5842764F579EE68A2FD270E8289B3250"
+  },
+  "factored_artifact": {
+    "bytes": 353582,
+    "sha256": "141014529417A73E58B210832AFD189AD970E045A8907F7D2879693C5B171A8D"
+  },
+  "frozen_product_binary_bytes": 2832896,
+  "compact_flat_product_binary": {
+    "bytes": 1899008,
+    "sha256": "71B9BF71F34C3E5023566EC5D5171073434318E1D3EDAB017B8454E125E1080F"
+  },
+  "factored_asset_product_binary": {
+    "bytes": 1839104,
+    "sha256": "ADE3776DB8C5A97AEB87994008D460FED9253325A6172EDD9823324CFFC97FE3"
+  },
+  "packaging_only_binary_delta_bytes": 933888,
+  "factored_representation_binary_delta_bytes": 59904,
+  "total_binary_delta_bytes": 993792,
+  "total_binary_reduction_percent": 35.08042653171878,
+  "gate": {
+    "embedding_lte_72682": true,
+    "factored_total_lte_75300": true,
+    "payload_reduction_gte_45_percent": true,
+    "artifact_lte_354_kib": true,
+    "product_delta_gte_900_kib": true,
+    "pass": true
+  }
+}

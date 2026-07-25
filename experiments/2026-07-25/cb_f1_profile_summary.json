@@ -1,0 +1,26 @@
+{
+  "format": "cb-f1-profile-compact-v1",
+  "implementation_commit": "fabc8794a753beedea2f76faffab69644c31d88c",
+  "rustflags": "-C target-cpu=x86-64-v3",
+  "positions_per_arm": 256,
+  "measurements": 1024,
+  "arm_order": [
+    "a1",
+    "b1",
+    "b2",
+    "a2"
+  ],
+  "wall_ratio_b_over_a": 1.02249431403321,
+  "eval_ratio_b_over_a": 1.0220933181647394,
+  "push_pop_ratio_b_over_a": 1.0209767575634037,
+  "recompute_ratio_b_over_a": 1.076557042626508,
+  "restore_ratio_b_over_a": 1.075955317350751,
+  "result_mismatches": 0,
+  "profile_call_mismatches": 0,
+  "gate": {
+    "eval_lte_1_01": false,
+    "push_pop_lte_1_01": false,
+    "pass": false
+  },
+  "raw_summary_sha256": "07F0A73A34C7D1CAA259F083AAA09EBDD3442216DA82CC049653F7DE61CE49E3"
+}

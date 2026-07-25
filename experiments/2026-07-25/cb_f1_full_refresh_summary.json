@@ -1,0 +1,28 @@
+{
+  "format": "cb-f1-full-refresh-compact-v1",
+  "implementation_commit": "fabc8794a753beedea2f76faffab69644c31d88c",
+  "rustflags": "-C target-cpu=x86-64-v3",
+  "roots": 1022,
+  "warmup_repeats": 2,
+  "repeats": 24,
+  "arm_order": [
+    "a1",
+    "b1",
+    "b2",
+    "a2"
+  ],
+  "a1_ns": 379280400,
+  "b1_ns": 446849300,
+  "b2_ns": 428077100,
+  "a2_ns": 376643000,
+  "ratio_b_over_a": 1.1574273266312434,
+  "checksum": 5939102526144215000,
+  "same_class": 436103,
+  "mixed_class": 23797,
+  "same_class_ratio": 0.9482561426397043,
+  "gate": {
+    "ratio_lte_1_02": false,
+    "pass": false
+  },
+  "raw_stdout_sha256": "10F0358CAB89713332B6165EB092575C1B0F0E9B50A0A616B64718D8D2CDCD3B"
+}

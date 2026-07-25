@@ -1,0 +1,25 @@
+{
+  "format": "cb-f1-vct-summary-v1",
+  "implementation_commit": "fabc8794a753beedea2f76faffab69644c31d88c",
+  "rustflags": "-C target-cpu=x86-64-v3",
+  "games": 64,
+  "positions": 1022,
+  "depth": 4,
+  "time_ms": 30000,
+  "root_vct": true,
+  "arm_order": [
+    "a1",
+    "b1",
+    "b2",
+    "a2"
+  ],
+  "wall_ratio_b_over_a": 1.0121488640422962,
+  "one_sided_95_bootstrap_upper": 1.019255820943105,
+  "nodes_a": 3502671,
+  "nodes_b": 3502671,
+  "decision_mismatches": 0,
+  "result_mismatches": 0,
+  "node_mismatches": 0,
+  "exactness_pass": true,
+  "raw_summary_sha256": "5A74CD81F5D209D5280F901B4234C2D0BAEE2C77EDE1915068AA05C45AF8A49D"
+}

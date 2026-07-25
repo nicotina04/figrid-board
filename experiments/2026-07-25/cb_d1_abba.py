@@ -1,4 +1,4 @@
-"""Analyze same-binary CB-D1 A-B-B-A search-profile runs by game block."""
+"""Analyze same-binary CB-D1 or CB-TD1 A-B-B-A runs by game block."""
 
 from __future__ import annotations
 
@@ -63,6 +63,8 @@ def main() -> None:
     parser.add_argument("--output")
     parser.add_argument("--bootstrap", type=int, default=20_000)
     parser.add_argument("--wall-gate", type=float, default=0.99)
+    parser.add_argument("--upper-gate", type=float, default=1.0)
+    parser.add_argument("--token-delta", action="store_true")
     parser.add_argument("--timed", action="store_true")
     args = parser.parse_args()
 
@@ -101,10 +103,18 @@ def main() -> None:
                         f"arm {arm_index}: seal field {field} differs: "
                         f"{seal[field]!r} != {reference[field]!r}"
                     )
-        if seals[0]["directional_delta"] or seals[3]["directional_delta"]:
-            raise ValueError("A seal unexpectedly enables CB-D1")
-        if not seals[1]["directional_delta"] or not seals[2]["directional_delta"]:
-            raise ValueError("B seal does not enable CB-D1")
+        if args.token_delta:
+            if not all(seal["directional_delta"] for seal in seals):
+                raise ValueError("CB-TD1 requires CB-D1 in every arm")
+            if seals[0].get("token_delta") or seals[3].get("token_delta"):
+                raise ValueError("A seal unexpectedly enables CB-TD1")
+            if not seals[1].get("token_delta") or not seals[2].get("token_delta"):
+                raise ValueError("B seal does not enable CB-TD1")
+        else:
+            if seals[0]["directional_delta"] or seals[3]["directional_delta"]:
+                raise ValueError("A seal unexpectedly enables CB-D1")
+            if not seals[1]["directional_delta"] or not seals[2]["directional_delta"]:
+                raise ValueError("B seal does not enable CB-D1")
     keys = set(arms[0])
     if any(set(arm) != keys for arm in arms[1:]):
         raise ValueError("ABBA position keys differ")
@@ -114,12 +124,20 @@ def main() -> None:
         rows = [arm[key] for arm in arms]
         if any(row.get("eval") != "codebook-quant" for row in rows):
             raise ValueError(f"{key}: non-codebook arm")
-        if a1[key].get("directional_delta") or a2[key].get("directional_delta"):
-            raise ValueError(f"{key}: A arm unexpectedly enables CB-D1")
-        if not b1[key].get("directional_delta") or not b2[key].get(
-            "directional_delta"
-        ):
-            raise ValueError(f"{key}: B arm does not enable CB-D1")
+        if args.token_delta:
+            if not all(row.get("directional_delta") for row in rows):
+                raise ValueError(f"{key}: CB-TD1 arm disables CB-D1")
+            if a1[key].get("token_delta") or a2[key].get("token_delta"):
+                raise ValueError(f"{key}: A arm unexpectedly enables CB-TD1")
+            if not b1[key].get("token_delta") or not b2[key].get("token_delta"):
+                raise ValueError(f"{key}: B arm does not enable CB-TD1")
+        else:
+            if a1[key].get("directional_delta") or a2[key].get("directional_delta"):
+                raise ValueError(f"{key}: A arm unexpectedly enables CB-D1")
+            if not b1[key].get("directional_delta") or not b2[key].get(
+                "directional_delta"
+            ):
+                raise ValueError(f"{key}: B arm does not enable CB-D1")
         if seals[0] is not None:
             for row, seal in zip(rows, seals, strict=True):
                 if row.get("requested_depth") != seal["depth"]:
@@ -243,14 +261,18 @@ def main() -> None:
     upper = percentile(ratios, 0.95)
 
     exact = decision_mismatches == result_mismatches == node_mismatches == 0
-    wall_pass = wall_ratio <= args.wall_gate and upper < 1.0
+    wall_pass = wall_ratio <= args.wall_gate and upper < args.upper_gate
     timed_pass = (
         nps_ratio > 1.0
         and b_nodes / a_nodes >= 1.0
         and median(b_depths) >= median(a_depths)
     )
     result = {
-        "format": "cb-d1-abba-v2" if seals[0] is not None else "cb-d1-abba-v1",
+        "format": (
+            "cb-token-delta-abba-v1"
+            if args.token_delta
+            else ("cb-d1-abba-v2" if seals[0] is not None else "cb-d1-abba-v1")
+        ),
         "mode": "timed" if args.timed else "fixed-depth",
         "seal": seals[0],
         "games": len(games),
@@ -272,9 +294,10 @@ def main() -> None:
         "mismatch_examples": mismatch_examples,
         "gate": {
             "wall_threshold": args.wall_gate,
+            "bootstrap_upper_threshold": args.upper_gate,
             "correctness_mismatch_zero": exact,
             "wall_ratio_lte_threshold": wall_ratio <= args.wall_gate,
-            "one_sided_95_upper_lt_1": upper < 1.0,
+            "one_sided_95_upper_lt_threshold": upper < args.upper_gate,
             "nps_ratio_gt_1": nps_ratio > 1.0,
             "node_ratio_gte_1": b_nodes / a_nodes >= 1.0,
             "median_depth_non_regression": median(b_depths) >= median(a_depths),

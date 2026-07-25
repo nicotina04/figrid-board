@@ -151,6 +151,17 @@ fn codebook_directional_delta_enabled() -> bool {
     })
 }
 
+/// CB-TD1 candidate is OFF until its extraction gates pass.
+#[cfg(feature = "codebook-eval")]
+fn codebook_token_delta_journal_enabled() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("NORU_CODEBOOK_TOKEN_DELTA")
+            .map(|raw| env_bool_default(&raw, false))
+            .unwrap_or(false)
+    })
+}
+
 #[cfg(feature = "codebook-eval")]
 fn codebook_quantized_enabled() -> bool {
     static VALUE: OnceLock<bool> = OnceLock::new();
@@ -589,6 +600,8 @@ impl Engine {
         configure_white_root_order(&mut searcher, &codebook_weights)?;
         #[cfg(feature = "codebook-eval")]
         searcher.set_use_codebook_directional_delta(codebook_directional_delta_enabled());
+        #[cfg(feature = "codebook-eval")]
+        searcher.set_use_codebook_token_delta_journal(codebook_token_delta_journal_enabled());
         searcher.set_use_candidate_frontier(candidate_frontier_enabled());
         searcher.set_use_packed_line_windows(packed_line_windows_enabled());
         let board = Board::new();

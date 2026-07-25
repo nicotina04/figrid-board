@@ -28,6 +28,7 @@ struct Args {
     use_tail_threat_materialize: bool,
     product_defaults: bool,
     directional_delta: bool,
+    token_delta: bool,
 }
 
 impl Args {
@@ -48,6 +49,7 @@ impl Args {
         let mut use_tail_threat_materialize = false;
         let mut product_defaults = false;
         let mut directional_delta = false;
+        let mut token_delta = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -112,6 +114,7 @@ impl Args {
                 }
                 "--product-defaults" => product_defaults = true,
                 "--directional-delta" => directional_delta = true,
+                "--token-delta" => token_delta = true,
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument `{other}`\n{}", usage())),
             }
@@ -119,6 +122,9 @@ impl Args {
 
         if sample_every == 0 {
             return Err("--sample-every must be > 0".to_string());
+        }
+        if token_delta && !directional_delta {
+            return Err("--token-delta requires --directional-delta".to_string());
         }
 
         Ok(Self {
@@ -137,6 +143,7 @@ impl Args {
             use_tail_threat_materialize,
             product_defaults,
             directional_delta,
+            token_delta,
         })
     }
 }
@@ -146,7 +153,7 @@ fn usage() -> String {
      [--eval flat|codebook-quant] [--depth N] [--time-ms MS] [--node-budget N] [--limit N] \
      [--sample-every N] [--use-threat-field|--use-lazy-threat-field|--no-threat-field] \
      [--stress-threat-field] [--use-move-picker] [--use-tail-threat-materialize] \
-     [--product-defaults] [--directional-delta]\n\
+     [--product-defaults] [--directional-delta] [--token-delta]\n\
      Set NORU_SEARCH_PROFILE=1 to record profile buckets."
         .to_string()
 }
@@ -314,6 +321,7 @@ fn main() -> Result<(), String> {
                     #[cfg(feature = "codebook-eval")]
                     {
                         searcher.set_use_codebook_directional_delta(args.directional_delta);
+                        searcher.set_use_codebook_token_delta_journal(args.token_delta);
                         if args.product_defaults && args.eval == "codebook-quant" {
                             searcher.set_white_root_order_enabled(true)?;
                         }
@@ -381,6 +389,7 @@ fn main() -> Result<(), String> {
                         "use_tail_threat_materialize": args.use_tail_threat_materialize,
                         "product_defaults": args.product_defaults,
                         "directional_delta": args.directional_delta,
+                        "token_delta": args.token_delta,
                         "elapsed_ns": elapsed_ns,
                         "elapsed_ms": elapsed_ms,
                         "best_move": best_move,

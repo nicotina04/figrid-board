@@ -1275,11 +1275,14 @@ impl<'a> QuantizedCodebookEvalState<'a> {
         weights: &'a QuantizedCodebookWeights,
         scale: f32,
         use_directional_delta: bool,
+        use_token_delta_journal: bool,
     ) -> Self {
-        let mut inc = IncrementalQuantizedCodebookEval::new_with_directional_delta(
-            weights,
-            use_directional_delta,
-        );
+        let mut inc =
+            IncrementalQuantizedCodebookEval::new_with_directional_delta_and_token_journal(
+                weights,
+                use_directional_delta,
+                use_token_delta_journal,
+            );
         inc.refresh(board, weights);
         Self {
             weights,
@@ -1438,6 +1441,11 @@ pub struct Searcher {
     /// Experimental and OFF by default until the CB-D1 release gates pass.
     #[cfg(feature = "codebook-eval")]
     use_codebook_directional_delta: bool,
+    /// Route CB-D1 through the private reversible TokenDelta journal.
+    ///
+    /// Experimental and OFF by default until the CB-TD1 gates pass.
+    #[cfg(feature = "codebook-eval")]
+    use_codebook_token_delta_journal: bool,
     /// Per-search incremental state. It is rebuilt at the root and dropped
     /// before returning so protocol moves cannot leave it stale.
     board_search_state: Option<BoardSearchState>,
@@ -1481,6 +1489,8 @@ impl Searcher {
             use_packed_line_windows: false,
             #[cfg(feature = "codebook-eval")]
             use_codebook_directional_delta: false,
+            #[cfg(feature = "codebook-eval")]
+            use_codebook_token_delta_journal: false,
             board_search_state: None,
             move_picker_stats: MovePickerStats::default(),
             shape_stats: SearchShapeStats::default(),
@@ -1613,6 +1623,16 @@ impl Searcher {
     #[cfg(feature = "codebook-eval")]
     pub fn set_use_codebook_directional_delta(&mut self, enabled: bool) {
         self.use_codebook_directional_delta = enabled;
+        if !enabled {
+            self.use_codebook_token_delta_journal = false;
+        }
+    }
+
+    /// Experimental same-binary selector for the CB-TD1 extraction card.
+    #[doc(hidden)]
+    #[cfg(feature = "codebook-eval")]
+    pub fn set_use_codebook_token_delta_journal(&mut self, enabled: bool) {
+        self.use_codebook_token_delta_journal = enabled && self.use_codebook_directional_delta;
     }
 
     fn begin_board_search_state(&mut self, board: &Board) {
@@ -1783,10 +1803,12 @@ impl Searcher {
 
         let mut cache = WhiteRootOrderCache::new(board.zobrist);
         let mut scratch = board.clone();
-        let mut extractor = IncrementalQuantizedCodebookEval::new_with_directional_delta(
-            weights,
-            self.use_codebook_directional_delta,
-        );
+        let mut extractor =
+            IncrementalQuantizedCodebookEval::new_with_directional_delta_and_token_journal(
+                weights,
+                self.use_codebook_directional_delta,
+                self.use_codebook_token_delta_journal,
+            );
         extractor.refresh(&scratch, weights);
         let candidates = self.board_candidate_moves(board);
         for mv in candidates {
@@ -2508,6 +2530,7 @@ impl Searcher {
             codebook_weights,
             scale,
             self.use_codebook_directional_delta,
+            self.use_codebook_token_delta_journal,
         );
         let result = self.search_with_eval_state(
             board,
@@ -4677,6 +4700,25 @@ mod tests {
             });
         }
         searcher.white_root_order_cache = Some(cache);
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    #[test]
+    fn token_delta_selector_cannot_override_directional_rollback() {
+        let mut searcher = Searcher::new();
+        searcher.set_use_codebook_directional_delta(false);
+        searcher.set_use_codebook_token_delta_journal(true);
+        assert!(!searcher.use_codebook_directional_delta);
+        assert!(!searcher.use_codebook_token_delta_journal);
+
+        searcher.set_use_codebook_directional_delta(true);
+        searcher.set_use_codebook_token_delta_journal(true);
+        assert!(searcher.use_codebook_directional_delta);
+        assert!(searcher.use_codebook_token_delta_journal);
+
+        searcher.set_use_codebook_directional_delta(false);
+        assert!(!searcher.use_codebook_directional_delta);
+        assert!(!searcher.use_codebook_token_delta_journal);
     }
 
     #[cfg(feature = "codebook-eval")]

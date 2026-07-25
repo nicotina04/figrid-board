@@ -25,6 +25,13 @@
   95% upper `1.00707`, and the same-feature release binary shrank by 7 KiB.
   This is an internal architecture promotion, not a speed or playing-strength
   claim. The existing directional-delta rollback remains unchanged.
+* **Pack the embedded codebook source without changing the normal runtime.**
+  The shipped binary now embeds the exact factored CBF source instead of the
+  larger JSON and reconstructs the established flat quantized evaluator by
+  default. Source floats and deployed quantized weights remain bit-exact, while
+  the matching x86-64-v3 product binary shrank by 59,904 bytes. Direct factored
+  evaluation remains opt-in through `NORU_CODEBOOK_FACTORED=on`; it was not
+  promoted as the normal runtime.
 
 ## 0.8.2 (2026-07-25)
 * **Promote packed Pattern4 windows in `pbrain-figrid`.** Make/undo now

@@ -148,8 +148,8 @@ plus its in-process duplicate serialization, or encoding load-bearing
 binary32 values as exact bit strings.
 
 CB-AL1 is closed as `INVALID_CB_AL1_P0`. Because the card was observer-only,
-default-off, and made no product mutation, the accepted 0.8.2 product remains
-unchanged and may proceed to its independent release checks.
+default-off, and made no product mutation, the accepted pre-AL1 product
+candidate remains unchanged and may proceed to the 0.8.3 release checks.
 
 Raw artifact:
 

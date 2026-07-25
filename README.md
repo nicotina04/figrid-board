@@ -61,11 +61,14 @@ If you build without `embed-weights`, set `FIGRID_WEIGHTS=path/to/weights.bin` o
 `on` fails closed unless the embedded quantized codebook is active and no
 other root rank/replace/veto hook is configured.
 
-The 0.8.2 state-update optimizations have independent rollback switches:
+The state-update optimizations have independent rollback switches:
 
 - `NORU_PACKED_LINE_WINDOWS=off` restores the 0.8.1 Pattern4 updater.
 - `NORU_CANDIDATE_FRONTIER=off` keeps packed windows but restores legacy
   candidate generation.
+- `NORU_CODEBOOK_DIRECTIONAL_DELTA=off` restores full accumulator refreshes
+  for the quantized codebook evaluator instead of the 0.8.3 directional
+  delta journal.
 
 ### Use as a library
 

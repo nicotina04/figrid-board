@@ -1,6 +1,9 @@
 # Changes
 
 ## Unreleased
+
+## 0.8.3 (2026-07-26)
+
 * **Promote exact directional deltas for the quantized codebook evaluator.**
   Incremental make/undo now updates only changed `(cell, direction)`
   embeddings and applies one ReLU/region delta per affected cell. On the

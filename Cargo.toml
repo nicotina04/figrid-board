@@ -1,6 +1,6 @@
 [package]
 name = "figrid-board"
-version = "0.8.2"
+version = "0.8.3"
 authors = [
     "nicotina04 <devherdson@gmail.com>",
     "wuwbobo2021 <wuwbobo@outlook.com>",
@@ -22,6 +22,9 @@ categories = ["data-structures", "game-development"]
 exclude = [
     "models/*.bin",
     "experiments/**",
+    "!/experiments/2026-07-26/cb_gh1_threat_graph_preregister.md",
+    "!/experiments/2026-07-26/cb_qat1_integer_lattice_preregister.md",
+    "!/experiments/2026-07-26/cb_al1_active_distillation_preregister.md",
 ]
 
 [features]

@@ -179,6 +179,11 @@ required-features = ["codebook-eval"]
 name = "cb-gh0-hash-correctness"
 path = "bin/cb_gh0_hash_correctness.rs"
 
+[[bin]]
+name = "cb-gh0-hash-cost"
+path = "bin/cb_gh0_hash_cost.rs"
+required-features = ["codebook-eval"]
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

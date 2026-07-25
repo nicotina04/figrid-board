@@ -11,6 +11,16 @@ input is opened for this card. It does not authorize a teacher query, training,
 validation, artifact replacement, search change, arena, or release-weight
 change.
 
+## Pre-run erratum
+
+The initial preregistration commit is `c585617`. A static implementation audit,
+performed before any row-bearing input was opened, found that its exact
+critical-source list named `build.rs`, although neither that commit nor the
+working tree has such a file. The exact stream below removes only that
+nonexistent entry. No source file is substituted, no metric/gate changes, and
+the commit containing this erratum is the implementation's registered
+preregistration ancestor.
+
 ## Question and claim boundary
 
 The accepted product remains the flat swap-closed Pattern4 codebook, shipped as
@@ -243,7 +253,6 @@ The exact critical-source stream, in this order, is:
 ```text
 Cargo.toml
 Cargo.lock
-build.rs
 src/lib.rs
 src/board.rs
 src/codebook_eval.rs

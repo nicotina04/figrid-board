@@ -175,6 +175,10 @@ name = "cb-gh0-precondition"
 path = "bin/cb_gh0_precondition.rs"
 required-features = ["codebook-eval"]
 
+[[bin]]
+name = "cb-gh0-hash-correctness"
+path = "bin/cb_gh0_hash_correctness.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

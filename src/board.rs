@@ -173,7 +173,7 @@ mod zobrist {
     use super::{NUM_CELLS, Stone};
 
     /// 결정적이지만 잘 분산된 splitmix64 변형으로 컴파일 타임 키 생성.
-    const fn splitmix64(seed: u64) -> u64 {
+    pub(super) const fn splitmix64(seed: u64) -> u64 {
         let mut x = seed;
         x = x.wrapping_add(0x9E3779B97F4A7C15);
         x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -214,6 +214,22 @@ pub use zobrist::SIDE_TO_MOVE_KEY as ZOBRIST_SIDE;
 #[inline]
 pub const fn zobrist_stone_key(stone: Stone, cell: usize) -> u64 {
     zobrist::key_for(stone, cell)
+}
+
+/// Domain-separation key for the effective game rule in the D4 hash sidecar.
+///
+/// These seeds are frozen by the CB-GH0 preregistration. Keep this function
+/// tied to the board's existing SplitMix64 implementation so the construction
+/// cannot silently drift between the ordinary and D4 Zobrist families.
+#[inline]
+pub const fn d4_rule_key(rule: RuleSet) -> u64 {
+    let seed = match rule {
+        RuleSet::Freestyle => 0xD4C0_0000_0000_0000,
+        RuleSet::Standard => 0xD4C0_0000_0000_0001,
+        RuleSet::Caro => 0xD4C0_0000_0000_0002,
+        RuleSet::Renju => 0xD4C0_0000_0000_0003,
+    };
+    zobrist::splitmix64(seed)
 }
 
 /// 4 directional 11-cell line pattern mapped IDs per cell.
@@ -319,7 +335,8 @@ pub type LinePackedWindowState = Box<[[u32; 4]; NUM_CELLS]>;
 pub struct BoardSearchState {
     line_packed_windows: Option<LinePackedWindowState>,
     candidate_frontier: Option<Box<CandidateFrontierState>>,
-    synchronized_position: Option<(u64, usize)>,
+    d4_hash: Option<crate::d4_hash::D4HashState>,
+    synchronized_position: Option<(u64, usize, RuleSet)>,
 }
 
 impl BoardSearchState {
@@ -330,10 +347,14 @@ impl BoardSearchState {
     /// Whether every enabled cache describes the supplied board position.
     #[inline]
     pub fn is_synchronized(&self, board: &Board) -> bool {
-        if self.line_packed_windows.is_none() && self.candidate_frontier.is_none() {
+        if self.line_packed_windows.is_none()
+            && self.candidate_frontier.is_none()
+            && self.d4_hash.is_none()
+        {
             true
         } else {
-            self.synchronized_position == Some((board.zobrist, board.move_count))
+            self.synchronized_position
+                == Some((board.zobrist, board.move_count, board.effective_rule_set()))
         }
     }
 
@@ -345,8 +366,10 @@ impl BoardSearchState {
         }
         let packed_enabled = self.line_packed_windows.is_some();
         let frontier_enabled = self.candidate_frontier.is_some();
+        let d4_hash_enabled = self.d4_hash.is_some();
         self.line_packed_windows = None;
         self.candidate_frontier = None;
+        self.d4_hash = None;
         self.synchronized_position = None;
         if packed_enabled {
             self.set_packed_line_windows_enabled(board, true);
@@ -354,13 +377,17 @@ impl BoardSearchState {
         if frontier_enabled {
             self.set_candidate_frontier_enabled(board, true);
         }
+        if d4_hash_enabled {
+            self.set_d4_hash_enabled(board, true);
+        }
     }
 
     #[inline]
     fn record_position(&mut self, board: &Board) {
         self.synchronized_position = (self.line_packed_windows.is_some()
-            || self.candidate_frontier.is_some())
-        .then_some((board.zobrist, board.move_count));
+            || self.candidate_frontier.is_some()
+            || self.d4_hash.is_some())
+        .then_some((board.zobrist, board.move_count, board.effective_rule_set()));
     }
 
     /// Enable or disable incremental packed Pattern4 windows.
@@ -436,6 +463,76 @@ impl BoardSearchState {
         self.candidate_frontier.is_some()
     }
 
+    /// Enable or disable the default-off incremental D4 hash sidecar.
+    ///
+    /// Enabling rebuilds all eight transformed hashes from the supplied root.
+    /// The ordinary public [`Board`] layout remains unchanged.
+    #[doc(hidden)]
+    pub fn set_d4_hash_enabled(&mut self, board: &Board, enabled: bool) {
+        self.synchronize(board);
+        if enabled {
+            if self.d4_hash.is_none() {
+                self.d4_hash = Some(crate::d4_hash::D4HashState::rebuild(board));
+            }
+        } else {
+            self.d4_hash = None;
+        }
+        self.record_position(board);
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn d4_hash_enabled(&self) -> bool {
+        self.d4_hash.is_some()
+    }
+
+    /// Return a copy of the eight transformed hashes only when this sidecar
+    /// is enabled and synchronized to `board`.
+    #[doc(hidden)]
+    #[inline]
+    pub fn d4_hashes(&self, board: &Board) -> Option<[u64; 8]> {
+        if !self.is_synchronized(board) {
+            return None;
+        }
+        self.d4_hash.as_ref().map(|state| *state.hashes())
+    }
+
+    /// Return the current canonical hash context only for synchronized state.
+    #[doc(hidden)]
+    #[inline]
+    pub fn d4_canonical_context(&self, board: &Board) -> Option<crate::d4_hash::CanonicalContext> {
+        if !self.is_synchronized(board) {
+            return None;
+        }
+        self.d4_hash
+            .as_ref()
+            .map(crate::d4_hash::D4HashState::canonical_context)
+    }
+
+    /// Predict all child hashes without mutating either the board or sidecar.
+    #[doc(hidden)]
+    #[inline]
+    pub fn d4_predicted_child_hashes(&self, board: &Board, mv: Move) -> Option<[u64; 8]> {
+        if !self.is_synchronized(board) {
+            return None;
+        }
+        self.d4_hash.as_ref()?.predicted_child_hashes(board, mv)
+    }
+
+    /// Predict the child's canonical hash context without mutation.
+    #[doc(hidden)]
+    #[inline]
+    pub fn d4_predicted_child_context(
+        &self,
+        board: &Board,
+        mv: Move,
+    ) -> Option<crate::d4_hash::CanonicalContext> {
+        if !self.is_synchronized(board) {
+            return None;
+        }
+        self.d4_hash.as_ref()?.predicted_child_context(board, mv)
+    }
+
     /// Generate candidates in exactly the legacy discovery order.
     pub fn candidate_moves(&self, board: &Board) -> Vec<Move> {
         if !self.is_synchronized(board) {
@@ -472,11 +569,15 @@ impl BoardSearchState {
             self.is_synchronized(board),
             "BoardSearchState is stale before make_move"
         );
+        let placed = board.side_to_move;
         board.make_move_with_search_state(
             mv,
             self.line_packed_windows.as_deref_mut(),
             self.candidate_frontier.as_deref_mut(),
         );
+        if let Some(d4_hash) = self.d4_hash.as_mut() {
+            d4_hash.apply_move(placed, mv);
+        }
         self.record_position(board);
     }
 
@@ -493,10 +594,18 @@ impl BoardSearchState {
             self.is_synchronized(board),
             "BoardSearchState is stale before undo_move"
         );
+        let removed = board
+            .history
+            .last()
+            .copied()
+            .map(|mv| (board.side_to_move.opponent(), mv));
         board.undo_move_with_search_state(
             self.line_packed_windows.as_deref_mut(),
             self.candidate_frontier.as_deref_mut(),
         );
+        if let (Some(d4_hash), Some((placed, mv))) = (self.d4_hash.as_mut(), removed) {
+            d4_hash.apply_move(placed, mv);
+        }
         self.record_position(board);
     }
 }
@@ -1222,6 +1331,107 @@ mod tests {
         assert_eq!(board.side_to_move, empty.side_to_move);
         assert_eq!(board.move_count, 0);
         assert_eq!(board.line_pattern_ids, empty.line_pattern_ids);
+    }
+
+    #[test]
+    fn d4_hash_composes_with_existing_sidecars_and_make_undo() {
+        let sequence = [
+            to_idx(7, 7),
+            to_idx(0, 0),
+            to_idx(14, 14),
+            to_idx(6, 8),
+            to_idx(2, 12),
+            to_idx(11, 3),
+        ];
+        let mut board = Board::new();
+        let mut state = BoardSearchState::new();
+        state.set_packed_line_windows_enabled(&board, true);
+        state.set_candidate_frontier_enabled(&board, true);
+        state.set_d4_hash_enabled(&board, true);
+
+        assert!(state.packed_line_windows_enabled());
+        assert!(state.candidate_frontier_enabled());
+        assert!(state.d4_hash_enabled());
+        let root_hashes = state.d4_hashes(&board).expect("D4 hash enabled");
+        assert_eq!(
+            root_hashes,
+            *crate::d4_hash::D4HashState::rebuild(&board).hashes()
+        );
+
+        for &mv in &sequence {
+            let predicted_hashes = state
+                .d4_predicted_child_hashes(&board, mv)
+                .expect("legal child prediction");
+            let predicted_context = state
+                .d4_predicted_child_context(&board, mv)
+                .expect("legal child prediction");
+            state.make_move(&mut board, mv);
+            assert_eq!(state.d4_hashes(&board), Some(predicted_hashes));
+            assert_eq!(state.d4_canonical_context(&board), Some(predicted_context));
+            assert_eq!(
+                state.d4_hashes(&board),
+                Some(*crate::d4_hash::D4HashState::rebuild(&board).hashes())
+            );
+            assert_packed_windows_match_full_rebuild(&board, &state, board.move_count);
+            assert_candidate_frontier_matches_full_rebuild(&board, &state, board.move_count);
+        }
+
+        for operation in (0..sequence.len()).rev() {
+            state.undo_move(&mut board);
+            assert_eq!(
+                state.d4_hashes(&board),
+                Some(*crate::d4_hash::D4HashState::rebuild(&board).hashes()),
+                "D4 hashes after undo {operation}"
+            );
+        }
+        assert_eq!(state.d4_hashes(&board), Some(root_hashes));
+        state.undo_move(&mut board);
+        assert_eq!(
+            state.d4_hashes(&board),
+            Some(root_hashes),
+            "empty-history undo must not toggle D4 hashes"
+        );
+        assert!(state.packed_line_windows_enabled());
+        assert!(state.candidate_frontier_enabled());
+        assert!(state.d4_hash_enabled());
+    }
+
+    #[test]
+    fn d4_hash_rule_change_forces_resync_and_preserves_all_enable_flags() {
+        let mut board = Board::new();
+        let mut state = BoardSearchState::new();
+        state.set_packed_line_windows_enabled(&board, true);
+        state.set_candidate_frontier_enabled(&board, true);
+        state.set_d4_hash_enabled(&board, true);
+        let freestyle = state.d4_hashes(&board).expect("D4 hash enabled");
+
+        board.set_rule_set(RuleSet::Caro);
+        assert!(!state.is_synchronized(&board));
+        assert_eq!(state.d4_hashes(&board), None);
+        assert_eq!(state.d4_canonical_context(&board), None);
+        state.synchronize(&board);
+        let caro = state.d4_hashes(&board).expect("D4 hash rebuilt");
+        assert_ne!(caro, freestyle);
+        assert_eq!(caro, *crate::d4_hash::D4HashState::rebuild(&board).hashes());
+        assert!(state.packed_line_windows_enabled());
+        assert!(state.candidate_frontier_enabled());
+        assert!(state.d4_hash_enabled());
+
+        // Exercise the legacy compatibility path: the public flag changes
+        // effective Freestyle into Standard without changing ordinary
+        // Zobrist or move count, so the rule component must detect it.
+        board.set_rule_set(RuleSet::Freestyle);
+        state.synchronize(&board);
+        let freestyle_again = state.d4_hashes(&board).unwrap();
+        board.exact5 = true;
+        assert_eq!(board.effective_rule_set(), RuleSet::Standard);
+        assert!(!state.is_synchronized(&board));
+        state.synchronize(&board);
+        let standard = state.d4_hashes(&board).unwrap();
+        assert_ne!(standard, freestyle_again);
+        assert!(state.packed_line_windows_enabled());
+        assert!(state.candidate_frontier_enabled());
+        assert!(state.d4_hash_enabled());
     }
 
     /// Release correctness gate: 100k deterministic mixed make/undo

@@ -1429,6 +1429,15 @@ pub struct Searcher {
     /// Enable packed Pattern4 window maintenance in search-local sidecar
     /// state. Keeping this out of `Board` preserves its public layout.
     use_packed_line_windows: bool,
+    /// Enable incremental D4 hashes in search-local sidecar state.
+    ///
+    /// This is an experimental observer only: no TT, VCT, or move-selection
+    /// key consumes it.
+    use_d4_hash_sidecar: bool,
+    /// Per-searcher root-VCT selector for deterministic audit harnesses.
+    ///
+    /// Product behavior remains enabled and still obeys `NORU_ROOT_VCT`.
+    use_root_vct_for_audit: bool,
     /// Exact quantized-codebook `(cell, direction)` embedding deltas.
     ///
     /// Experimental and OFF by default until the CB-D1 release gates pass.
@@ -1475,6 +1484,8 @@ impl Searcher {
             use_tail_threat_materialize,
             use_candidate_frontier: false,
             use_packed_line_windows: false,
+            use_d4_hash_sidecar: false,
+            use_root_vct_for_audit: true,
             #[cfg(feature = "codebook-eval")]
             use_codebook_directional_delta: false,
             board_search_state: None,
@@ -1605,6 +1616,36 @@ impl Searcher {
         self.use_packed_line_windows = enabled;
     }
 
+    /// Enable incremental D4 hashes in the search-local sidecar.
+    ///
+    /// The hashes are maintained across searched make/undo operations but are
+    /// deliberately not connected to any transposition or proof cache.
+    pub fn set_use_d4_hash_sidecar(&mut self, enabled: bool) {
+        self.use_d4_hash_sidecar = enabled;
+    }
+
+    /// Report whether D4 hash maintenance was explicitly requested.
+    #[doc(hidden)]
+    #[inline]
+    pub fn d4_hash_sidecar_requested(&self) -> bool {
+        self.use_d4_hash_sidecar
+    }
+
+    /// Override root VCT for deterministic, no-deadline audit searches.
+    ///
+    /// This does not alter the process-level product switch and defaults to
+    /// enabled. Production callers should leave it unchanged.
+    #[doc(hidden)]
+    pub fn set_use_root_vct_for_audit(&mut self, enabled: bool) {
+        self.use_root_vct_for_audit = enabled;
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn root_vct_requested_for_audit(&self) -> bool {
+        self.use_root_vct_for_audit
+    }
+
     /// Enable the exact directional-delta quantized evaluator.
     #[cfg(feature = "codebook-eval")]
     pub fn set_use_codebook_directional_delta(&mut self, enabled: bool) {
@@ -1612,7 +1653,10 @@ impl Searcher {
     }
 
     fn begin_board_search_state(&mut self, board: &Board) {
-        if !self.use_packed_line_windows && !self.use_candidate_frontier {
+        if !self.use_packed_line_windows
+            && !self.use_candidate_frontier
+            && !self.use_d4_hash_sidecar
+        {
             self.board_search_state = None;
             return;
         }
@@ -1623,6 +1667,7 @@ impl Searcher {
         state.set_packed_line_windows_enabled(board, self.use_packed_line_windows);
         // A3 starts only after root VCT fails.
         state.set_candidate_frontier_enabled(board, false);
+        state.set_d4_hash_enabled(board, self.use_d4_hash_sidecar);
     }
 
     #[inline]
@@ -1636,9 +1681,9 @@ impl Searcher {
     fn end_board_search_state(&mut self, board: &Board) {
         if let Some(state) = self.board_search_state.as_mut() {
             // A3 is profitable only inside the main search. Retain synchronized
-            // A2 state for repeated searches of an unchanged root.
+            // A2 or D4-hash state for repeated searches of an unchanged root.
             state.set_candidate_frontier_enabled(board, false);
-            if !state.packed_line_windows_enabled() {
+            if !state.packed_line_windows_enabled() && !state.d4_hash_enabled() {
                 self.board_search_state = None;
             }
         }
@@ -1908,7 +1953,7 @@ impl Searcher {
         time_limit: Option<Duration>,
         root_search_decision_audit: bool,
     ) -> Option<SearchResult> {
-        if !root_vct_enabled() {
+        if !self.use_root_vct_for_audit || !root_vct_enabled() {
             return None;
         }
         let vct_budget = match time_limit {
@@ -1986,7 +2031,7 @@ impl Searcher {
         };
         let mut prev_best: Option<Move> = None;
         let mut prev_score: Option<i32> = None;
-        let defensive_vct_veto = root_defensive_vct_veto_enabled();
+        let defensive_vct_veto = self.use_root_vct_for_audit && root_defensive_vct_veto_enabled();
         let final_only_candidate_ranker = candidate_ranker_root_final_only_enabled()
             || crate::candidate_local_ensemble::root_tiebreak_enabled_for(board);
         let collect_root_candidates =
@@ -2194,7 +2239,7 @@ impl Searcher {
 
         // Root VCT: ????븐뼐?????????? ????????????????????????ル???????????諛몃마嶺뚮?????꾩렯???????耀붾굝????????????븐뼐?????????????????????????븐뼐?곭춯?竊???????.
         // Dynamic budget ???????????1/ROOT_VCT_BUDGET_FRACTION (cap/floor ?????????泥??.
-        if root_vct_enabled() {
+        if self.use_root_vct_for_audit && root_vct_enabled() {
             let vct_budget = match time_limit {
                 Some(d) => (d / ROOT_VCT_BUDGET_FRACTION)
                     .max(Duration::from_millis(ROOT_VCT_BUDGET_FLOOR_MS))
@@ -2271,7 +2316,7 @@ impl Searcher {
         // this drastically reduces re-search cost.
         let mut prev_best: Option<Move> = None;
         let mut prev_score: Option<i32> = None;
-        let defensive_vct_veto = root_defensive_vct_veto_enabled();
+        let defensive_vct_veto = self.use_root_vct_for_audit && root_defensive_vct_veto_enabled();
         let final_only_candidate_ranker = candidate_ranker_root_final_only_enabled()
             || crate::candidate_local_ensemble::root_tiebreak_enabled_for(board);
         let collect_root_candidates =
@@ -2592,7 +2637,7 @@ impl Searcher {
         self.move_picker_stats = MovePickerStats::default();
         self.begin_board_search_state(board);
 
-        if root_vct_enabled() {
+        if self.use_root_vct_for_audit && root_vct_enabled() {
             let vct_budget = match time_limit {
                 Some(total) => (total / ROOT_VCT_BUDGET_FRACTION)
                     .max(Duration::from_millis(ROOT_VCT_BUDGET_FLOOR_MS))
@@ -5043,6 +5088,89 @@ mod tests {
             .as_ref()
             .expect("A2 sidecar should remain retained");
         assert!(retained.is_synchronized(&replacement));
+        assert!(!retained.candidate_frontier_enabled());
+    }
+
+    #[test]
+    fn d4_hash_sidecar_selector_defaults_off_and_supports_rollback() {
+        let mut searcher = Searcher::new();
+        assert!(!searcher.d4_hash_sidecar_requested());
+        assert!(searcher.root_vct_requested_for_audit());
+
+        searcher.set_use_d4_hash_sidecar(true);
+        assert!(searcher.d4_hash_sidecar_requested());
+        searcher.set_use_root_vct_for_audit(false);
+        assert!(!searcher.root_vct_requested_for_audit());
+
+        searcher.set_use_d4_hash_sidecar(false);
+        assert!(!searcher.d4_hash_sidecar_requested());
+        searcher.set_use_root_vct_for_audit(true);
+        assert!(searcher.root_vct_requested_for_audit());
+    }
+
+    #[test]
+    fn d4_hash_sidecar_is_search_transparent_and_retained() {
+        let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let mut root = Board::new();
+        for mv in [
+            to_idx(7, 7),
+            to_idx(3, 3),
+            to_idx(8, 8),
+            to_idx(3, 4),
+            to_idx(7, 8),
+            to_idx(4, 4),
+        ] {
+            root.make_move(mv);
+        }
+        let expected_root = root.clone();
+        let mut off_board = root.clone();
+        let mut on_board = root;
+
+        let mut off = Searcher::new();
+        assert!(!off.d4_hash_sidecar_requested());
+        off.set_use_root_vct_for_audit(false);
+        let off_result = off.search(&mut off_board, &weights, 2, None);
+        assert!(
+            off.board_search_state.is_none(),
+            "default search must not allocate a sidecar"
+        );
+
+        let mut on = Searcher::new();
+        on.set_use_d4_hash_sidecar(true);
+        on.set_use_root_vct_for_audit(false);
+        let on_result = on.search(&mut on_board, &weights, 2, None);
+
+        assert_eq!(on_result.best_move, off_result.best_move);
+        assert_eq!(on_result.score, off_result.score);
+        assert_eq!(on_result.depth, off_result.depth);
+        assert_eq!(on_result.nodes, off_result.nodes);
+
+        let assert_root_unchanged = |board: &Board| {
+            assert!(board.black == expected_root.black);
+            assert!(board.white == expected_root.white);
+            assert_eq!(board.side_to_move, expected_root.side_to_move);
+            assert_eq!(board.move_count, expected_root.move_count);
+            assert_eq!(board.last_move, expected_root.last_move);
+            assert_eq!(board.history, expected_root.history);
+            assert_eq!(board.zobrist, expected_root.zobrist);
+            assert_eq!(board.line_pattern_ids, expected_root.line_pattern_ids);
+            assert_eq!(board.rule_set, expected_root.rule_set);
+            assert_eq!(board.exact5, expected_root.exact5);
+        };
+        assert_root_unchanged(&off_board);
+        assert_root_unchanged(&on_board);
+
+        let retained = on
+            .board_search_state
+            .as_ref()
+            .expect("D4 hash sidecar should remain retained");
+        assert!(retained.is_synchronized(&on_board));
+        assert!(retained.d4_hash_enabled());
+        assert_eq!(
+            retained.d4_hashes(&on_board),
+            Some(*crate::d4_hash::D4HashState::rebuild(&on_board).hashes())
+        );
+        assert!(!retained.packed_line_windows_enabled());
         assert!(!retained.candidate_frontier_enabled());
     }
 

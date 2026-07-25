@@ -16,6 +16,7 @@ pub(crate) mod candidate_ranker;
 pub mod codebook_eval;
 pub(crate) mod codebook_sidecar;
 pub mod coord;
+pub mod d4_hash;
 pub mod eval;
 #[cfg(feature = "codebook-eval")]
 pub mod factored_codebook;

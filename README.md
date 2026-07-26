@@ -5,7 +5,7 @@
 <h1 align="center">figrid-board</h1>
 
 <p align="center">
-  A Rust library and Piskvork-compatible engine for Five-in-a-Row, powered by noru.
+  A Rust library and Piskvork-compatible engine for Five-in-a-Row.
 </p>
 
 <p align="center">
@@ -18,9 +18,13 @@
 
 `figrid-board` provides two public roles:
 
-- **Library** (`figrid_board`) — board representation, rule logic, move generation, threat detection, transposition table, and an NNUE evaluation surface. Reusable from any Rust project that wants Gomoku game state and search primitives without an engine attached.
+- **Library** (`figrid_board`) — board representation, rule logic, move generation, threat detection, transposition table, and learned-evaluator surfaces. Reusable from any Rust project that wants Gomoku game state and search primitives without an engine attached.
 - **Engine binaries**:
-  - `pbrain-figrid` — the NNUE engine, powered by [noru](https://crates.io/crates/noru). Speaks the Piskvork pbrain protocol and is the binary intended for tournament play.
+  - `pbrain-figrid` — the current engine. It combines a
+    [NORU](https://crates.io/crates/noru) NNUE ordering model with an optional
+    [CB2Vec](https://crates.io/crates/cb2vec) codebook leaf evaluator, speaks
+    the Piskvork pbrain protocol, and is the binary intended for tournament
+    play.
   - `pbrain-figrid-legacy` — preserves the original pre-NNUE engine by [wuwbobo2021](https://github.com/wuwbobo2021), kept as a reference baseline.
 
 The reusable categorical-codebook layer now lives in the standalone
@@ -231,6 +235,9 @@ Users who need the pre-Rust `figrid-board` as a Linux alternative to Renlib can 
 - [wuwbobo2021](https://github.com/wuwbobo2021) for the original engine and for entrusting `figrid-board` to its current maintainer.
 - [Rapfi](https://github.com/dhbloo/rapfi) for advancing public NNUE work in Gomoku and for serving as a reference point during evaluation development.
 - [noru](https://crates.io/crates/noru) for the underlying Rust NNUE training and inference stack.
+- [CB2Vec](https://crates.io/crates/cb2vec) for the reusable categorical
+  training, quantization, artifact, scoring, and reversible token-update
+  primitives used by the codebook evaluator.
 
 ## License
 

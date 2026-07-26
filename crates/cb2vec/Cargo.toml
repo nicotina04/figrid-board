@@ -1,0 +1,22 @@
+[package]
+name = "cb2vec"
+version = "0.1.0"
+authors = ["nicotina04 <devherdson@gmail.com>"]
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nicotina04/figrid-board"
+readme = "README.md"
+description = "Exact categorical codebook embeddings and reversible token deltas for Rust search engines"
+keywords = ["embedding", "game-ai", "incremental", "search"]
+categories = ["algorithms", "game-development"]
+
+[features]
+default = ["json"]
+json = ["dep:serde_json"]
+
+[dependencies]
+serde_json = { version = "1", optional = true }
+
+[package.metadata.docs.rs]
+all-features = true

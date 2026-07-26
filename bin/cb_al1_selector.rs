@@ -114,8 +114,8 @@ const CRITICAL_SOURCES: &[(&str, &[u8])] = &[
     ("src/d4_hash.rs", include_bytes!("../src/d4_hash.rs")),
     ("src/search.rs", include_bytes!("../src/search.rs")),
     (
-        "src/token_delta.rs",
-        include_bytes!("../src/token_delta.rs"),
+        "audit/provenance/cb2vec-0.1.0-journal.rs.snapshot",
+        include_bytes!("../audit/provenance/cb2vec-0.1.0-journal.rs.snapshot"),
     ),
     (
         "bin/cb_gh1_graph_census/graph.rs",

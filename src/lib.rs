@@ -30,8 +30,6 @@ pub(crate) mod relation_lite;
 pub mod rq423_root_accept;
 pub mod search;
 pub mod threat_field;
-#[cfg(any(feature = "codebook-eval", test))]
-pub(crate) mod token_delta;
 pub mod transposition;
 pub mod tss;
 pub mod vct;

@@ -48,7 +48,7 @@ avx512 = ["noru/avx512"]
 # Codebook(no-MP) evaluator promoted by RQ570 as the 0.8 pbrain deployment
 # eval path. Optional for library users; pbrain builds with this feature load the
 # embedded swap-closed codebook and use the quantized kernel by default.
-codebook-eval = []
+codebook-eval = ["dep:cb2vec"]
 # CB-F1 compact-flat counterfactual. Never enabled by default; product code
 # uses it only to attribute serialization savings separately from the exact
 # factored embedding representation.
@@ -61,6 +61,7 @@ cb-p1-audit = []
 
 [dependencies]
 noru = { version = "2.2" }
+cb2vec = { version = "0.1.0", path = "crates/cb2vec", optional = true }
 flate2 = { version = "1", optional = true }
 serde_json = "1"
 
@@ -225,3 +226,5 @@ panic = "abort"
 
 # Keep this crate standalone when checked out inside a larger Cargo workspace.
 [workspace]
+members = ["crates/cb2vec"]
+resolver = "2"

@@ -8,7 +8,8 @@ use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
 use crate::factored_codebook::FactoredQuantizedCodebookWeights;
 use crate::pattern_table::{PATTERN_NUM_IDS, swap_mapped_id};
 pub use crate::search::EvalStateStepProfile;
-use crate::token_delta::{ReversibleTokenJournal, TokenDelta, TokenDeltaReplay, TokenDeltaSink};
+pub(crate) use cb2vec::QuantizedCodebookAccess;
+use cb2vec::{ReversibleTokenJournal, TokenDelta, TokenDeltaReplay, TokenDeltaSink};
 use serde_json::Value;
 
 const MAX_DIRTY_CELLS: usize = 41;
@@ -43,93 +44,52 @@ pub struct CodebookWeights {
 
 impl CodebookWeights {
     pub fn deterministic(dim: usize, fm_rank: usize) -> Self {
-        let mut state = 0xC0DE_B00C_F00D_0542u64;
-        let embeddings = deterministic_vec(&mut state, PATTERN_NUM_IDS * dim, 0.02);
-        let head = deterministic_vec(&mut state, REGIONS * dim, 0.02);
-        let factors = deterministic_vec(&mut state, REGIONS * dim * fm_rank, 0.02);
+        let weights =
+            cb2vec::CodebookWeights::deterministic(PATTERN_NUM_IDS, REGIONS, dim, fm_rank);
         Self {
-            dim,
-            fm_rank,
-            embeddings,
-            head,
-            factors,
-            bias: 0.01,
+            dim: weights.dim,
+            fm_rank: weights.fm_rank,
+            embeddings: weights.embeddings,
+            head: weights.head,
+            factors: weights.factors,
+            bias: weights.bias,
         }
     }
 
     pub fn from_json_bytes(data: &[u8]) -> Result<Self, String> {
         let root: Value = serde_json::from_slice(data)
-            .map_err(|e| format!("failed to parse codebook json: {e}"))?;
+            .map_err(|error| format!("failed to parse codebook json: {error}"))?;
         Self::from_json_value(&root)
     }
 
     pub fn from_json_value(root: &Value) -> Result<Self, String> {
-        let format = json_str(root, "format")?;
-        if format != "noru-relation-fusion-eval-v1" && format != "noru-pattern4-codebook-eval-v1" {
-            return Err(format!("unsupported codebook format: {format}"));
-        }
+        validate_figrid_json_schema(root)?;
+        let weights =
+            cb2vec::CodebookWeights::from_json_value(root).map_err(|error| error.to_string())?;
+        Self::from_cb2vec(weights)
+    }
 
-        let model = json_str(root, "model")?;
-        if model != "codebook-region-fm" && model != "region-codebook-fm" {
+    fn from_cb2vec(weights: cb2vec::CodebookWeights) -> Result<Self, String> {
+        let shape = weights.validate().map_err(|error| error.to_string())?;
+        if shape.token_count() != PATTERN_NUM_IDS {
             return Err(format!(
-                "unsupported codebook model: {model}; expected codebook-region-fm"
+                "embedding token count mismatch: got {}, expected {PATTERN_NUM_IDS}",
+                shape.token_count()
             ));
         }
-
-        let metadata = root.get("metadata");
-        let dim = metadata
-            .and_then(|m| json_usize_opt(m, "embedding_dim"))
-            .or_else(|| json_usize_opt(root, "embedding_dim"))
-            .ok_or_else(|| "missing embedding_dim".to_string())?;
-        let fm_rank = metadata
-            .and_then(|m| json_usize_opt(m, "fm_rank"))
-            .or_else(|| json_usize_opt(root, "fm_rank"))
-            .ok_or_else(|| "missing fm_rank".to_string())?;
-        let regions = metadata
-            .and_then(|m| json_usize_opt(m, "regions"))
-            .or_else(|| json_usize_opt(root, "regions"))
-            .unwrap_or(REGIONS);
-        if regions != REGIONS {
-            return Err(format!("unsupported region count: {regions}"));
+        if shape.group_count() != REGIONS {
+            return Err(format!("unsupported region count: {}", shape.group_count()));
         }
-
-        let weights = root
-            .get("weights")
-            .ok_or_else(|| "missing weights object".to_string())?;
-        let embeddings = json_f32_array(weights, "embeddings")?;
-        let head = json_f32_array(weights, "head")?;
-        let factors = json_f32_array(weights, "factors")?;
-        let bias = json_f32_opt(weights, "bias").ok_or_else(|| "missing bias".to_string())?;
-
-        let expected_embeddings = PATTERN_NUM_IDS * dim;
-        let expected_head = REGIONS * dim;
-        let expected_factors = expected_head * fm_rank;
-        if embeddings.len() != expected_embeddings {
-            return Err(format!(
-                "embedding length mismatch: got {}, expected {expected_embeddings}",
-                embeddings.len()
-            ));
+        if shape.fm_rank() == 0 {
+            return Err("fm_rank must be non-zero for the FIGRID evaluator".to_string());
         }
-        if head.len() != expected_head {
-            return Err(format!(
-                "head length mismatch: got {}, expected {expected_head}",
-                head.len()
-            ));
-        }
-        if factors.len() != expected_factors {
-            return Err(format!(
-                "factor length mismatch: got {}, expected {expected_factors}",
-                factors.len()
-            ));
-        }
-
         Ok(Self {
-            dim,
-            fm_rank,
-            embeddings,
-            head,
-            factors,
-            bias,
+            dim: weights.dim,
+            fm_rank: weights.fm_rank,
+            embeddings: weights.embeddings,
+            head: weights.head,
+            factors: weights.factors,
+            bias: weights.bias,
         })
     }
 
@@ -140,16 +100,23 @@ impl CodebookWeights {
 
     pub fn quantize_i16_s32_s64(&self) -> QuantizedCodebookWeights {
         self.validate();
+        let weights = cb2vec::quantize_i16(
+            self,
+            QUANT_EMBED_SCALE,
+            QUANT_HEAD_SCALE,
+            QUANT_FACTOR_SCALE,
+        )
+        .expect("FIGRID codebook weights must be valid before quantization");
         QuantizedCodebookWeights {
-            dim: self.dim,
-            fm_rank: self.fm_rank,
-            embedding_scale: QUANT_EMBED_SCALE,
-            head_scale: QUANT_HEAD_SCALE,
-            factor_scale: QUANT_FACTOR_SCALE,
-            embeddings: quantize_vec_i16(&self.embeddings, QUANT_EMBED_SCALE),
-            head: quantize_vec_i16(&self.head, QUANT_HEAD_SCALE),
-            factors: quantize_vec_i16(&self.factors, QUANT_FACTOR_SCALE),
-            bias: self.bias,
+            dim: weights.dim,
+            fm_rank: weights.fm_rank,
+            embedding_scale: weights.embedding_scale,
+            head_scale: weights.head_scale,
+            factor_scale: weights.factor_scale,
+            embeddings: weights.embeddings,
+            head: weights.head,
+            factors: weights.factors,
+            bias: weights.bias,
         }
     }
 
@@ -157,6 +124,74 @@ impl CodebookWeights {
         debug_assert_eq!(self.embeddings.len(), PATTERN_NUM_IDS * self.dim);
         debug_assert_eq!(self.head.len(), self.feature_len());
         debug_assert_eq!(self.factors.len(), self.feature_len() * self.fm_rank);
+    }
+}
+
+fn validate_figrid_json_schema(root: &Value) -> Result<(), String> {
+    let format = root
+        .get("format")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing format".to_string())?;
+    if format != "noru-relation-fusion-eval-v1" && format != "noru-pattern4-codebook-eval-v1" {
+        return Err(format!("unsupported codebook format: {format}"));
+    }
+
+    let model = root
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing model".to_string())?;
+    if model != "codebook-region-fm" && model != "region-codebook-fm" {
+        return Err(format!(
+            "unsupported codebook model: {model}; expected codebook-region-fm"
+        ));
+    }
+
+    let metadata = root.get("metadata");
+    let regions = metadata
+        .and_then(|value| value.get("regions"))
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .or_else(|| {
+            root.get("regions")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+        })
+        .unwrap_or(REGIONS);
+    if regions != REGIONS {
+        return Err(format!("unsupported region count: {regions}"));
+    }
+    Ok(())
+}
+
+impl cb2vec::FloatCodebookAccess for CodebookWeights {
+    #[inline(always)]
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    #[inline(always)]
+    fn fm_rank(&self) -> usize {
+        self.fm_rank
+    }
+
+    #[inline(always)]
+    fn embeddings(&self) -> &[f32] {
+        &self.embeddings
+    }
+
+    #[inline(always)]
+    fn head(&self) -> &[f32] {
+        &self.head
+    }
+
+    #[inline(always)]
+    fn factors(&self) -> &[f32] {
+        &self.factors
+    }
+
+    #[inline(always)]
+    fn bias(&self) -> f32 {
+        self.bias
     }
 }
 
@@ -201,58 +236,6 @@ impl QuantizedCodebookWeights {
     }
 }
 
-/// Static-dispatch view of the quantized evaluator payload.
-///
-/// This stays crate-private so the released flat payload API remains
-/// unchanged. Generic evaluator helpers are instantiated once for the flat
-/// representation and once for the CB-F1 factored representation; no tagged
-/// representation check is left in the search hot path.
-pub(crate) trait QuantizedCodebookAccess {
-    fn dim(&self) -> usize;
-    fn fm_rank(&self) -> usize;
-    fn embedding_scale(&self) -> i32;
-    fn head_scale(&self) -> i32;
-    fn factor_scale(&self) -> i32;
-    fn bias(&self) -> f32;
-    fn pattern_count(&self) -> usize;
-    fn head(&self) -> &[i16];
-    fn factors(&self) -> &[i16];
-    fn embedding(&self, pattern_id: u16, component: usize) -> i16;
-    fn embedding_delta(&self, old_pattern_id: u16, new_pattern_id: u16, component: usize) -> i32;
-
-    #[inline(always)]
-    fn add_embedding_to(&self, pattern_id: u16, out: &mut [i32]) {
-        debug_assert_eq!(out.len(), self.dim());
-        for (component, value) in out.iter_mut().enumerate() {
-            *value += i32::from(self.embedding(pattern_id, component));
-        }
-    }
-
-    #[inline(always)]
-    fn add_embedding_delta_to(&self, old_pattern_id: u16, new_pattern_id: u16, out: &mut [i32]) {
-        debug_assert_eq!(out.len(), self.dim());
-        for (component, value) in out.iter_mut().enumerate() {
-            *value += self.embedding_delta(old_pattern_id, new_pattern_id, component);
-        }
-    }
-
-    #[inline]
-    fn feature_len(&self) -> usize {
-        REGIONS * self.dim()
-    }
-
-    #[inline]
-    fn validate_access(&self) {
-        debug_assert!(self.dim() > 0);
-        debug_assert!(self.embedding_scale() > 0);
-        debug_assert!(self.head_scale() > 0);
-        debug_assert!(self.factor_scale() > 0);
-        debug_assert_eq!(self.pattern_count(), PATTERN_NUM_IDS);
-        debug_assert_eq!(self.head().len(), self.feature_len());
-        debug_assert_eq!(self.factors().len(), self.feature_len() * self.fm_rank());
-    }
-}
-
 impl QuantizedCodebookAccess for QuantizedCodebookWeights {
     #[inline(always)]
     fn dim(&self) -> usize {
@@ -285,7 +268,7 @@ impl QuantizedCodebookAccess for QuantizedCodebookWeights {
     }
 
     #[inline(always)]
-    fn pattern_count(&self) -> usize {
+    fn token_count(&self) -> usize {
         self.embeddings.len() / self.dim
     }
 
@@ -364,7 +347,7 @@ impl QuantizedCodebookAccess for FactoredQuantizedCodebookWeights {
     }
 
     #[inline(always)]
-    fn pattern_count(&self) -> usize {
+    fn token_count(&self) -> usize {
         self.token_count()
     }
 
@@ -756,10 +739,22 @@ impl<'a, W: QuantizedCodebookAccess> QuantizedCodebookTokenSink<'a, W> {
         raw_black: &mut [i32],
         raw_white: &mut [i32],
     ) {
-        debug_assert_eq!(site, delta.site);
-        debug_assert!((delta.lane as usize) < 4);
-        apply_quantized_token_delta_to_raw(delta.old, delta.new, weights, Stone::Black, raw_black);
-        apply_quantized_token_delta_to_raw(delta.old, delta.new, weights, Stone::White, raw_white);
+        debug_assert_eq!(site, delta.site());
+        debug_assert!((delta.lane() as usize) < 4);
+        apply_quantized_token_delta_to_raw(
+            delta.old(),
+            delta.new_token(),
+            weights,
+            Stone::Black,
+            raw_black,
+        );
+        apply_quantized_token_delta_to_raw(
+            delta.old(),
+            delta.new_token(),
+            weights,
+            Stone::White,
+            raw_white,
+        );
     }
 }
 
@@ -1233,7 +1228,7 @@ impl IncrementalQuantizedCodebookEval {
             true,
         );
         let popped = journal.pop(&mut sink).expect("TokenDelta stack underflow");
-        debug_assert!(popped.deltas <= MAX_DIRECTION_DELTAS);
+        debug_assert!(popped.deltas() <= MAX_DIRECTION_DELTAS);
         debug_assert!(journal.materialized_depth() <= journal.depth());
         self.last_dirty_cells = 0;
         self.last_direction_deltas = 0;
@@ -1522,47 +1517,12 @@ fn add_quant_cell_to_features(
 }
 
 fn value_from_features(features: &[f32], weights: &CodebookWeights) -> f32 {
-    let mut logit = weights.bias;
-    for (x, w) in features.iter().zip(&weights.head) {
-        logit += x * w;
-    }
-    for rank in 0..weights.fm_rank {
-        let mut sum = 0.0f32;
-        let mut square_sum = 0.0f32;
-        for (idx, &x) in features.iter().enumerate() {
-            let vx = weights.factors[idx * weights.fm_rank + rank] * x;
-            sum += vx;
-            square_sum += vx * vx;
-        }
-        logit += 0.5 * (sum * sum - square_sum);
-    }
-    logit
+    cb2vec::score_f32(features, weights).expect("FIGRID floating codebook shape is validated")
 }
 
 fn quant_value_from_features<W: QuantizedCodebookAccess>(features: &[i32], weights: &W) -> f32 {
-    let region_denom = region_cell_count(0) as f64;
-    let feature_denom = weights.embedding_scale() as f64 * region_denom;
-    let mut logit = weights.bias() as f64;
-
-    let head_denom = feature_denom * weights.head_scale() as f64;
-    for (&x, &w) in features.iter().zip(weights.head()) {
-        logit += (x as f64 * w as f64) / head_denom;
-    }
-
-    let factor_denom = feature_denom * weights.factor_scale() as f64;
-    for rank in 0..weights.fm_rank() {
-        let mut sum = 0.0f64;
-        let mut square_sum = 0.0f64;
-        for (idx, &x) in features.iter().enumerate() {
-            let vx = (x as f64 * weights.factors()[idx * weights.fm_rank() + rank] as f64)
-                / factor_denom;
-            sum += vx;
-            square_sum += vx * vx;
-        }
-        logit += 0.5 * (sum * sum - square_sum);
-    }
-
-    logit as f32
+    cb2vec::score_quantized_uniform(features, weights, region_cell_count(0))
+        .expect("FIGRID quantized codebook shape is validated")
 }
 
 #[inline]
@@ -1601,62 +1561,9 @@ fn region_cell_count(_region: usize) -> usize {
     25
 }
 
-fn deterministic_vec(state: &mut u64, n: usize, scale: f32) -> Vec<f32> {
-    (0..n).map(|_| deterministic_f32(state, scale)).collect()
-}
-
-fn deterministic_f32(state: &mut u64, scale: f32) -> f32 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    let unit = ((*state >> 40) as u32) as f32 / (1u32 << 24) as f32;
-    (unit * 2.0 - 1.0) * scale
-}
-
-fn quantize_vec_i16(values: &[f32], scale: i32) -> Vec<i16> {
-    values
-        .iter()
-        .map(|&x| {
-            (x * scale as f32)
-                .round()
-                .clamp(i16::MIN as f32, i16::MAX as f32) as i16
-        })
-        .collect()
-}
-
 fn dequantize_vec_i16(values: &[i16], scale: i32) -> Vec<f32> {
     let denom = scale as f32;
     values.iter().map(|&x| x as f32 / denom).collect()
-}
-
-fn json_str<'a>(v: &'a Value, key: &str) -> Result<&'a str, String> {
-    v.get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("missing string field {key}"))
-}
-
-fn json_usize_opt(v: &Value, key: &str) -> Option<usize> {
-    v.get(key)
-        .and_then(Value::as_u64)
-        .and_then(|x| usize::try_from(x).ok())
-}
-
-fn json_f32_opt(v: &Value, key: &str) -> Option<f32> {
-    v.get(key).and_then(Value::as_f64).map(|x| x as f32)
-}
-
-fn json_f32_array(v: &Value, key: &str) -> Result<Vec<f32>, String> {
-    let raw = v
-        .get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("missing array field {key}"))?;
-    raw.iter()
-        .map(|x| {
-            x.as_f64()
-                .map(|v| v as f32)
-                .ok_or_else(|| format!("non-numeric item in {key}"))
-        })
-        .collect()
 }
 
 #[cfg(test)]

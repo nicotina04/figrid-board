@@ -109,8 +109,8 @@ const CRITICAL_SOURCES: [(&str, &[u8]); 44] = [
         include_bytes!("../src/threat_field.rs"),
     ),
     (
-        "src/token_delta.rs",
-        include_bytes!("../src/token_delta.rs"),
+        "audit/provenance/cb2vec-0.1.0-journal.rs.snapshot",
+        include_bytes!("../audit/provenance/cb2vec-0.1.0-journal.rs.snapshot"),
     ),
     (
         "src/transposition.rs",

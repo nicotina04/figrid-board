@@ -79,7 +79,7 @@ const CRITICAL_SOURCES: [&str; 16] = [
     "src/search.rs",
     "src/transposition.rs",
     "src/codebook_eval.rs",
-    "src/token_delta.rs",
+    "audit/provenance/cb2vec-0.1.0-journal.rs.snapshot",
     "src/pattern_table.rs",
     "src/factored_codebook.rs",
     "bin/cb_gh0_hash_cost.rs",

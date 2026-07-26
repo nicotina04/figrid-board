@@ -25,6 +25,7 @@ exclude = [
     "!/experiments/2026-07-26/cb_gh1_threat_graph_preregister.md",
     "!/experiments/2026-07-26/cb_qat1_integer_lattice_preregister.md",
     "!/experiments/2026-07-26/cb_al1_active_distillation_preregister.md",
+    "!/experiments/2026-07-26/cb_p1_bounded_dfpn_preregister.md",
 ]
 
 [features]
@@ -52,6 +53,8 @@ cb-f1-flat-asset = ["codebook-eval"]
 # CB-AL1 preregistered audit surface. Default-off and used only by the
 # label-blind selector binary to compare factored access with flat replay.
 cb-al1-audit = ["codebook-eval"]
+# CB-P1 exact bounded-DFPN census. Audit-only and default-off.
+cb-p1-audit = []
 
 [dependencies]
 noru = { version = "2.2" }
@@ -204,6 +207,11 @@ required-features = ["codebook-eval"]
 name = "cb-al1-selector"
 path = "bin/cb_al1_selector.rs"
 required-features = ["cb-al1-audit"]
+
+[[bin]]
+name = "cb-p1-census"
+path = "bin/cb_p1_census.rs"
+required-features = ["cb-p1-audit"]
 
 [profile.release]
 opt-level = 3

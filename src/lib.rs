@@ -62,6 +62,11 @@ pub use vct::{
     VctConfig, VctSearchResult, VctSearchStats, search_vct, search_vct_audit_json,
     search_vct_with_stats,
 };
+#[cfg(feature = "cb-p1-audit")]
+pub use vct::dfpn::{
+    BoundedDfpnConfig, BoundedDfpnSession, DfpnCertificateReplay, DfpnCheckpoint, DfpnError,
+    DfpnStatus, DfpnWidthBin,
+};
 
 /// Possible errors returned from this crate.
 #[derive(Clone, Debug, PartialEq)]

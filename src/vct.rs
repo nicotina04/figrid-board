@@ -18,6 +18,9 @@
 //! 승리 Threat(Five/OpenFour/DoubleFour/FourThree/DoubleThree)을 만들면 해당
 //! 수를 반환하고 즉시 성공. 그 외 Forcing Threat(ClosedFour/OpenThree)은 재귀.
 
+#[cfg(feature = "cb-p1-audit")]
+pub mod dfpn;
+
 use crate::board::{
     BOARD_SIZE, BitBoard, Board, BoardSearchState, Move, NUM_CELLS, RuleSet, Stone,
 };

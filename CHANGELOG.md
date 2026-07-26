@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.8.4 (2026-07-26)
+
+* **Promote the reusable codebook runtime into the independent
+  [`cb2vec`](https://crates.io/crates/cb2vec) crate.** CB2Vec 0.1.0 now owns
+  the game-independent floating-point and quantized model representations,
+  exact embedding lookup and replacement deltas, flat and factored artifacts,
+  scoring helpers, and the preallocated reversible token journal.
+* `figrid-board` consumes CB2Vec through the optional `codebook-eval` feature
+  while preserving the 0.8.3 public codebook facade and legacy `NORUCBF1`
+  artifact input. Pattern4 token mapping, action legality, search, and policy
+  remain game-specific FIGRID responsibilities.
+* The extraction is a numerical no-op, not a speed or playing-strength claim.
+  The 100,000-operation journal, factored-model, and directional-transition
+  audits retained zero mismatches. A fresh 1,022-root VCT-OFF comparison
+  retained identical moves, scores, depths, and node fields over 4,488,455
+  nodes.
+* **Archive the bounded-DFPN codebook proofability census as an audit-only
+  no-go.** The default-off CB-P1 implementation and its preregistered evidence
+  remain reproducible, but the measured census did not justify promotion into
+  product search.
+* Crates.io packages retain a versioned CB2Vec journal provenance snapshot so
+  the historical AL1, GH0, GH1, and QAT1 audit binaries remain buildable
+  without relying on a nested workspace dependency source.
+
 ## 0.8.3 (2026-07-26)
 
 * **Promote exact directional deltas for the quantized codebook evaluator.**

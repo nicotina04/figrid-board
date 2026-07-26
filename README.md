@@ -24,7 +24,7 @@
   - `pbrain-figrid-legacy` — preserves the original pre-NNUE engine by [wuwbobo2021](https://github.com/wuwbobo2021), kept as a reference baseline.
 
 The reusable categorical-codebook layer now lives in the sibling
-[CB2Vec (`cb2vec`)](crates/cb2vec) package. It owns the game-independent model,
+[CB2Vec (`cb2vec`)](https://crates.io/crates/cb2vec) package. It owns the game-independent model,
 quantized artifact, scoring, and reversible token-journal primitives.
 `figrid-board` keeps Pattern4 mapping, board updates, Gomoku policy, and
 search integration. The dependency is optional and is activated only by the
@@ -165,6 +165,19 @@ On PowerShell, set `RUSTFLAGS` first:
 $env:RUSTFLAGS='-C target-cpu=native'
 cargo build --release
 ```
+
+**Reproduce the GitHub Windows x86_64-v3 release asset** with the native MSVC
+target, static C runtime, and deterministic linker mode:
+
+```powershell
+$env:RUSTFLAGS='-C target-cpu=x86-64-v3 -C target-feature=+crt-static -C link-arg=/Brepro'
+cargo build --release --locked --target x86_64-pc-windows-msvc `
+    --bin pbrain-figrid `
+    --features embed-weights,codebook-eval
+```
+
+Release preparation builds this command in two clean target directories and
+requires byte-identical executables before packaging.
 
 **Reproduce the portable Gomocup 2026 build** — `-C target-cpu=native` is
 wrong for a portable binary because it targets the build host. The 2026

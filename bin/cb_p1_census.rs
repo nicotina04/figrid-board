@@ -15,30 +15,90 @@ use figrid_board::vct::dfpn::{
     BoundedDfpnConfig, BoundedDfpnSession, DfpnCheckpoint, DfpnError, DfpnStatus,
 };
 use serde_json::{Map, Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const FORMAT: &str = "cb-p1-bounded-dfpn-census-v1";
+const FORMAT: &str = "cb-p1-bounded-dfpn-census-p0b-v1";
 const INPUT_FORMAT: &str = "rq547-tactical-position-v1";
-const PREREGISTER_COMMIT: &str = "0f0c1e483582a3586a8530342bad8a6019c775ad";
-const PREREGISTER_DOCUMENT: &str = "experiments/2026-07-26/cb_p1_bounded_dfpn_preregister.md";
+const P0_PREREGISTER_COMMIT: &str = "0f0c1e483582a3586a8530342bad8a6019c775ad";
+const P0_PREREGISTER_DOCUMENT: &str = "experiments/2026-07-26/cb_p1_bounded_dfpn_preregister.md";
+const P0_INVALID_DOCUMENT: &str = "experiments/2026-07-26/cb_p1_p0_invalid.md";
+const MANIFEST_DOCUMENT: &str = "experiments/2026-07-26/cb_p1_p0b_dedup_manifest.json";
+const PREREGISTER_COMMIT: &str = "5deaae1c7dd72db1e2f38ceed69fd3722441baa8";
+const PREREGISTER_DOCUMENT: &str = "experiments/2026-07-26/cb_p1_p0b_preregister.md";
 const REGISTERED_CWD: &str =
     r"C:\Users\concreate\.codex\worktrees\06f2\noru-tactic\target\figrid-release-0.8.2";
 const REGISTERED_INPUT: &str = r"C:\Users\concreate\Documents\workspace\noru-tactic\experiments\2026-07-05\rq547a_tactical_positions.jsonl";
-const REGISTERED_OUTPUT: &str = "experiments/2026-07-26/cb_p1_bounded_dfpn_census.json";
+const REGISTERED_OUTPUT: &str = "experiments/2026-07-26/cb_p1_bounded_dfpn_census_p0b.json";
 const INPUT_BYTES: u64 = 309_683;
 const INPUT_SHA256: &str = "F02663E51716A13F54E0AB22829F7B6FBC7D237F843FAA79BCF62CE3A8EA171F";
-const PREREGISTER_BYTES: u64 = 16_275;
-const PREREGISTER_SHA256: &str = "655E71928F41FF469D095AB1E30F08A3C1FBD5AA49D283C4FF2A809604802DD0";
+const P0_PREREGISTER_BYTES: u64 = 16_275;
+const P0_PREREGISTER_SHA256: &str =
+    "655E71928F41FF469D095AB1E30F08A3C1FBD5AA49D283C4FF2A809604802DD0";
+const P0_INVALID_BYTES: u64 = 3_435;
+const P0_INVALID_SHA256: &str = "C10282D2B5C214CE3C34C1DF8E91D7DD7527927052D71ED9D526F586EA536E6B";
+const MANIFEST_BYTES: u64 = 56_742;
+const MANIFEST_SHA256: &str = "AECADEEB31F7BE5ED1DA481586D4F3A4B348A23C54393A46B9719C7FA1176086";
+const RETAINED_ORDER_SHA256: &str =
+    "D877F832C596EFF72AD7012E238AFCD576D68D9DAE72739A5941E9ABE756055A";
+const PREREGISTER_BYTES: u64 = 15_914;
+const PREREGISTER_SHA256: &str = "EA2691DFB2C0E170E70955F92751E03EBEA1BB8B6A47CC398655198FA906A882";
+const CARGO_TOML_BYTES: u64 = 6_286;
+const CARGO_TOML_SHA256: &str = "2941532F431E756B4052EEFB56848C9D39778768C4171B588ACEDAE4249A725F";
 const CARGO_LOCK_BYTES: u64 = 11_841;
 const CARGO_LOCK_SHA256: &str = "6A6B62449A235ABA53C777484C5D34E18EDB556155B1964A4B2BA6DA7DE2059C";
-const EXPECTED_ROWS: usize = 307;
+const FROZEN_SUPPORT_SOURCES: [(&str, u64, &str); 7] = [
+    ("Cargo.lock", CARGO_LOCK_BYTES, CARGO_LOCK_SHA256),
+    (
+        "src/lib.rs",
+        2_750,
+        "78186D8290AB9EA8A83DFEEF31942C55AD323A9DDC9ABFE573E21CB5CD6F0F6A",
+    ),
+    (
+        "src/board.rs",
+        62_634,
+        "E233F3550710768D9861043C181DDE890F1559F276DCAD1A1E01B6E86C009038",
+    ),
+    (
+        "src/vct.rs",
+        114_527,
+        "50F30D02874E94165516B4E32810612D4C185F86BB43B406A7A65455633B5853",
+    ),
+    (
+        "src/vct/dfpn.rs",
+        59_306,
+        "2CA097B35F666F7790955DA92F6B9C8BD068974E9C763913029CB97FE13BA4AD",
+    ),
+    (
+        "src/pattern_table.rs",
+        23_045,
+        "E16B06744A02AE6DDDDBECE2CC3C15DCB7D65A7FACBB67FA1A70A72E9992DE93",
+    ),
+    (
+        "bin/cb_al1_selector/hash.rs",
+        12_601,
+        "C78991EB3FB4405BA34716AF9CC87F274246453DC3DE6ABEDE09A630AF62D773",
+    ),
+];
+const EXPECTED_RAW_ROWS: usize = 307;
+const EXPECTED_ROOTS: usize = 232;
+const EXPECTED_BLACK_ROOTS: usize = 91;
+const EXPECTED_WHITE_ROOTS: usize = 141;
+const EXPECTED_SINGLETON_ROOTS: usize = 159;
+const EXPECTED_DUPLICATE_GROUPS: usize = 73;
+const EXPECTED_EXCESS_DUPLICATES: usize = 75;
+const MEMORY_ROOT_LIMIT: usize = 11;
+const CEILING_PROOF_GATE: usize = 30;
+const BUDGET_SENSITIVE_GATE: usize = 10;
+const COLOR_SENSITIVE_GATE: usize = 3;
+const ORACLE_ADDED_GATE: usize = 10;
 const CANONICAL_RUSTFLAGS: &str = "-C target-cpu=x86-64-v3";
 const CANONICAL_BUILD: &str =
     "cargo build --release --locked --features cb-p1-audit --bin cb-p1-census";
@@ -84,10 +144,24 @@ const CRITICAL_SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("cb_al1_selector/hash.rs"),
     ),
     (
-        PREREGISTER_DOCUMENT,
+        P0_PREREGISTER_DOCUMENT,
         include_bytes!("../experiments/2026-07-26/cb_p1_bounded_dfpn_preregister.md"),
     ),
+    (
+        P0_INVALID_DOCUMENT,
+        include_bytes!("../experiments/2026-07-26/cb_p1_p0_invalid.md"),
+    ),
+    (
+        MANIFEST_DOCUMENT,
+        include_bytes!("../experiments/2026-07-26/cb_p1_p0b_dedup_manifest.json"),
+    ),
+    (
+        PREREGISTER_DOCUMENT,
+        include_bytes!("../experiments/2026-07-26/cb_p1_p0b_preregister.md"),
+    ),
 ];
+
+static DFPN_ROOT_CALLS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 struct Args {
@@ -98,9 +172,48 @@ struct Args {
 #[derive(Clone)]
 struct Root {
     ordinal: usize,
+    raw_line: usize,
     uid: String,
     side: Stone,
     board: Board,
+}
+
+#[derive(Clone)]
+struct RawRoot {
+    raw_line: usize,
+    uid: String,
+    side: Stone,
+    exact_key: Vec<u8>,
+    board: Board,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MaterializedState {
+    black: (u128, u128),
+    white: (u128, u128),
+    side: u8,
+    rule: u8,
+    line_patterns: Vec<u16>,
+    zobrist: u64,
+}
+
+#[derive(Clone, Debug)]
+struct LoadMetadata {
+    raw_rows: usize,
+    counted_roots: usize,
+    black_roots: usize,
+    white_roots: usize,
+    singleton_roots: usize,
+    duplicate_groups: usize,
+    excess_duplicate_instances: usize,
+    duplicate_materialization_checks: usize,
+    retained_order_sha256: String,
+    retained_raw_lines: Vec<usize>,
+}
+
+struct LoadResult {
+    roots: Vec<Root>,
+    metadata: LoadMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,16 +271,39 @@ fn main() {
         return;
     }
     if let Err(error) = run(arguments) {
-        if error.starts_with("UNSOUND ") {
+        let exit_code = terminal_error_exit_code(&error);
+        if exit_code == 2 {
             eprintln!("CB-P1 UNSOUND: {}", error.trim_start_matches("UNSOUND "));
-            std::process::exit(2);
+        } else {
+            eprintln!("CB-P1 INVALID_CB_P1_P0B: {error}");
         }
-        eprintln!("CB-P1 INVALID_CB_P1_P0: {error}");
-        std::process::exit(1);
+        std::process::exit(exit_code);
     }
 }
 
+fn terminal_error_exit_code(error: &str) -> i32 {
+    if error.starts_with("UNSOUND ") { 2 } else { 1 }
+}
+
+fn reject_aggregate_unsound(gates: &Value) -> Result<(), String> {
+    if gates.get("final_label").and_then(Value::as_str) != Some("UNSOUND") {
+        return Ok(());
+    }
+    Err(format!(
+        "UNSOUND aggregate gate audit: exact_alias_errors={}, missing_certificates={}",
+        gates
+            .get("exact_alias_errors")
+            .map_or_else(|| "missing".to_string(), Value::to_string),
+        gates
+            .get("missing_certificates")
+            .map_or_else(|| "missing".to_string(), Value::to_string),
+    ))
+}
+
 fn run(arguments: Vec<OsString>) -> Result<(), String> {
+    if DFPN_ROOT_CALLS.load(Ordering::SeqCst) != 0 {
+        return Err("DFPN root-call counter was nonzero before P0b load".to_string());
+    }
     let args = parse_args(&arguments)?;
     validate_registered_paths(&args)?;
     refuse_existing(&args.output)?;
@@ -176,15 +312,32 @@ fn run(arguments: Vec<OsString>) -> Result<(), String> {
     let provenance_before = provenance_identity(&arguments)?;
     let input_before =
         hash::require_file_seal(&args.input, INPUT_BYTES, INPUT_SHA256, "CB-P1 input")?;
-    let roots = load_roots(&args.input)?;
+    let manifest_path = PathBuf::from(REGISTERED_CWD).join(MANIFEST_DOCUMENT);
+    let manifest_before = hash::require_file_seal(
+        &manifest_path,
+        MANIFEST_BYTES,
+        MANIFEST_SHA256,
+        "CB-P1 P0b manifest",
+    )?;
+    let loaded = load_roots(&args.input, &manifest_path)?;
+    if DFPN_ROOT_CALLS.load(Ordering::SeqCst) != 0 {
+        return Err("DFPN was called before P0b loader validation completed".to_string());
+    }
+    let roots = loaded.roots;
+    let load_metadata = loaded.metadata;
+    if roots.iter().enumerate().any(|(ordinal, root)| {
+        root.ordinal != ordinal || root.raw_line != load_metadata.retained_raw_lines[ordinal]
+    }) {
+        return Err("retained root order diverged from validated loader metadata".to_string());
+    }
 
     let mut runs = Vec::with_capacity(roots.len());
     for root in &roots {
-        runs.push(run_root(root)?);
+        runs.push(run_counted_root(root)?);
     }
-    if runs.len() != EXPECTED_ROWS {
+    if runs.len() != EXPECTED_ROOTS {
         return Err(format!(
-            "incomplete run: got {} roots, expected {EXPECTED_ROWS}",
+            "incomplete run: got {} roots, expected {EXPECTED_ROOTS}",
             runs.len()
         ));
     }
@@ -202,7 +355,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), String> {
     let rerun_indices = determinism_indices(&runs);
     let mut determinism_errors = Vec::new();
     for &index in &rerun_indices {
-        let rerun = run_root(&roots[index])?;
+        let rerun = run_counted_root(&roots[index])?;
         if rerun.scientific != runs[index].scientific {
             determinism_errors.push(json!({
                 "ordinal": index,
@@ -243,10 +396,20 @@ fn run(arguments: Vec<OsString>) -> Result<(), String> {
     if input_after != input_before {
         return Err("input seal changed during census".to_string());
     }
+    let manifest_after = hash::require_file_seal(
+        &manifest_path,
+        MANIFEST_BYTES,
+        MANIFEST_SHA256,
+        "CB-P1 P0b manifest recheck",
+    )?;
+    if manifest_after != manifest_before {
+        return Err("manifest seal changed during census".to_string());
+    }
     let provenance_after = provenance_identity(&arguments)?;
     if provenance_after != provenance_before {
         return Err("source, executable, environment, or git provenance changed during run".into());
     }
+    reject_aggregate_unsound(&gates)?;
     let finished_unix_ms = unix_millis()?;
 
     let roots_json = runs.iter().map(root_run_json).collect::<Vec<_>>();
@@ -266,17 +429,56 @@ fn run(arguments: Vec<OsString>) -> Result<(), String> {
         "preregistration": {
             "commit": PREREGISTER_COMMIT,
             "document": PREREGISTER_DOCUMENT,
+            "p0_lineage_commit": P0_PREREGISTER_COMMIT,
+            "p0_lineage_document": P0_PREREGISTER_DOCUMENT,
+            "p0_terminal_record": P0_INVALID_DOCUMENT,
         },
         "input": {
             "bytes": input_before.bytes.to_string(),
             "sha256": input_before.sha256,
-            "rows": roots.len(),
+            "raw_rows": load_metadata.raw_rows,
+            "counted_roots": load_metadata.counted_roots,
             "format": INPUT_FORMAT,
             "deserialized_root_fields": [
                 "format", "source_path", "game_id", "ply",
                 "side_to_move", "position_history"
             ],
             "history_fields": ["x", "y", "color"],
+        },
+        "population": {
+            "raw_rows": load_metadata.raw_rows,
+            "counted_unique_roots": load_metadata.counted_roots,
+            "black_roots": load_metadata.black_roots,
+            "white_roots": load_metadata.white_roots,
+            "singleton_roots": load_metadata.singleton_roots,
+            "duplicate_groups": load_metadata.duplicate_groups,
+            "excess_duplicate_instances": load_metadata.excess_duplicate_instances,
+            "duplicate_multiplicity_contributes_to_solver_or_gates": false,
+        },
+        "manifest": {
+            "document": MANIFEST_DOCUMENT,
+            "bytes": manifest_before.bytes.to_string(),
+            "sha256": manifest_before.sha256,
+            "format": "cb-p1-exact-dedup-manifest-v1",
+            "every_field_recomputed_and_matched": true,
+        },
+        "retained_order": {
+            "policy": "lowest 1-based raw line per exact root, retained in first-occurrence order",
+            "sha256": load_metadata.retained_order_sha256,
+            "registered_sha256": RETAINED_ORDER_SHA256,
+            "raw_lines": load_metadata.retained_raw_lines,
+            "unique_ordinals_contiguous": true,
+        },
+        "duplicate_materialization": {
+            "counted_sessions_for_dropped_histories": 0,
+            "groups_checked": load_metadata.duplicate_groups,
+            "dropped_instances_checked": load_metadata.duplicate_materialization_checks,
+            "mismatches": 0,
+            "equal_fields": [
+                "black bitboard", "white bitboard", "side to move",
+                "effective Freestyle rule", "line-pattern state", "zobrist"
+            ],
+            "deliberately_excluded_fields": ["position_history", "last_move"],
         },
         "policy": {
             "horizon": 14,
@@ -322,7 +524,8 @@ fn run(arguments: Vec<OsString>) -> Result<(), String> {
     });
     let output_seal = write_new_json(&args.output, &report)?;
     println!(
-        "CB-P1 {final_label}: roots={} proofs={} oracle_added={} output_bytes={} output_sha256={}",
+        "CB-P1 P0b {final_label}: raw_rows={} roots={} proofs={} oracle_added={} output_bytes={} output_sha256={}",
+        load_metadata.raw_rows,
         roots.len(),
         runs.iter()
             .filter(|run| run.checkpoints[CEILING_CAP_INDEX].status == "ProvenWin")
@@ -416,6 +619,11 @@ fn run_root(root: &Root) -> Result<RootRun, String> {
         certificate,
         scientific,
     })
+}
+
+fn run_counted_root(root: &Root) -> Result<RootRun, String> {
+    DFPN_ROOT_CALLS.fetch_add(1, Ordering::SeqCst);
+    run_root(root)
 }
 
 fn classify_dfpn_error(ordinal: usize, cap: u64, error: DfpnError) -> String {
@@ -514,37 +722,36 @@ fn determinism_indices(runs: &[RootRun]) -> Vec<usize> {
     indices.into_iter().collect()
 }
 
-fn load_roots(path: &Path) -> Result<Vec<Root>, String> {
+fn load_roots(path: &Path, manifest_path: &Path) -> Result<LoadResult, String> {
     let file =
         File::open(path).map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-    let mut roots = Vec::with_capacity(EXPECTED_ROWS);
+    let mut raw_roots = Vec::with_capacity(EXPECTED_RAW_ROWS);
     let mut source_game_pairs = BTreeSet::new();
-    let mut exact_roots = BTreeSet::new();
+    let mut uid_keys = BTreeMap::<String, Vec<u8>>::new();
     for (line_index, line) in BufReader::new(file).lines().enumerate() {
-        let line =
-            line.map_err(|error| format!("input line {} read error: {error}", line_index + 1))?;
+        let raw_line = line_index + 1;
+        let line = line.map_err(|error| format!("input line {raw_line} read error: {error}"))?;
         if line.trim().is_empty() {
-            return Err(format!("blank input line {}", line_index + 1));
+            return Err(format!("blank input line {raw_line}"));
         }
         let object = project_allowed_root_fields(line.as_bytes())
-            .map_err(|error| format!("input line {} JSON projection: {error}", line_index + 1))?;
-        require_string(&object, "format", line_index + 1).and_then(|format| {
+            .map_err(|error| format!("input line {raw_line} JSON projection: {error}"))?;
+        require_string(&object, "format", raw_line).and_then(|format| {
             (format == INPUT_FORMAT).then_some(()).ok_or_else(|| {
                 format!(
                     "input line {} format {:?}, expected {INPUT_FORMAT:?}",
-                    line_index + 1,
-                    format
+                    raw_line, format
                 )
             })
         })?;
-        let source_path = require_string(&object, "source_path", line_index + 1)?;
+        let source_path = require_string(&object, "source_path", raw_line)?;
         let game_id = object
             .get("game_id")
-            .ok_or_else(|| format!("input line {} missing game_id", line_index + 1))?;
+            .ok_or_else(|| format!("input line {raw_line} missing game_id"))?;
         if !(game_id.is_string() || game_id.is_u64() || game_id.is_i64()) {
             return Err(format!(
                 "input line {} game_id must be string or integer",
-                line_index + 1
+                raw_line
             ));
         }
         let pair = format!(
@@ -555,83 +762,372 @@ fn load_roots(path: &Path) -> Result<Vec<Root>, String> {
         );
         if !source_game_pairs.insert(pair) {
             return Err(format!(
-                "input line {} duplicates (source_path, game_id)",
-                line_index + 1
+                "input line {raw_line} duplicates (source_path, game_id)"
             ));
         }
 
         let ply_u64 = object
             .get("ply")
             .and_then(Value::as_u64)
-            .ok_or_else(|| format!("input line {} ply is not u64", line_index + 1))?;
+            .ok_or_else(|| format!("input line {raw_line} ply is not u64"))?;
         let ply = usize::try_from(ply_u64)
-            .map_err(|_| format!("input line {} ply exceeds usize", line_index + 1))?;
+            .map_err(|_| format!("input line {raw_line} ply exceeds usize"))?;
         let side = parse_stone(
-            require_string(&object, "side_to_move", line_index + 1)?,
-            &format!("input line {} side_to_move", line_index + 1),
+            require_string(&object, "side_to_move", raw_line)?,
+            &format!("input line {raw_line} side_to_move"),
         )?;
         let history_values = object
             .get("position_history")
             .and_then(Value::as_array)
-            .ok_or_else(|| {
-                format!(
-                    "input line {} position_history is not an array",
-                    line_index + 1
-                )
-            })?;
+            .ok_or_else(|| format!("input line {raw_line} position_history is not an array"))?;
         if ply != history_values.len() {
             return Err(format!(
                 "input line {} ply {ply} != history length {}",
-                line_index + 1,
+                raw_line,
                 history_values.len()
             ));
         }
-        let board = replay_history(history_values, line_index + 1)?;
+        let board = replay_history(history_values, raw_line)?;
         if board.side_to_move != side {
             return Err(format!(
                 "input line {} stored side {} != replay side {}",
-                line_index + 1,
+                raw_line,
                 stone_name(side),
                 stone_name(board.side_to_move)
+            ));
+        }
+        if board.effective_rule_set() != RuleSet::Freestyle {
+            return Err(format!(
+                "input line {raw_line} effective rule is not Freestyle"
             ));
         }
         let (black_win, white_win) = complete_winners(&board);
         if black_win || white_win || board.move_count == NUM_CELLS {
             return Err(format!(
                 "input line {} root is terminal: black_win={black_win} white_win={white_win} full={}",
-                line_index + 1,
+                raw_line,
                 board.move_count == NUM_CELLS
             ));
         }
         let exact_key = exact_root_key(&board);
-        if !exact_roots.insert(exact_key.clone()) {
-            return Err(format!(
-                "input line {} duplicates exact (black, white, side, rule) root",
-                line_index + 1
-            ));
-        }
         let uid = hash::sha256_hex(
             [b"CB-P1-exact-root-v1\0".as_slice(), exact_key.as_slice()]
                 .concat()
                 .as_slice(),
         );
-        roots.push(Root {
-            ordinal: line_index,
+        if let Some(previous) = uid_keys.get(&uid) {
+            if previous != &exact_key {
+                return Err(format!(
+                    "root UID collision between distinct exact keys at raw line {raw_line}"
+                ));
+            }
+        } else {
+            uid_keys.insert(uid.clone(), exact_key.clone());
+        }
+        raw_roots.push(RawRoot {
+            raw_line,
             uid,
             side,
+            exact_key,
             board,
         });
     }
-    if roots.len() != EXPECTED_ROWS {
+    if raw_roots.len() != EXPECTED_RAW_ROWS {
         return Err(format!(
-            "input contains {} rows, expected {EXPECTED_ROWS}",
-            roots.len()
+            "input contains {} rows, expected {EXPECTED_RAW_ROWS}",
+            raw_roots.len()
         ));
     }
-    if source_game_pairs.len() != EXPECTED_ROWS || exact_roots.len() != EXPECTED_ROWS {
-        return Err("input uniqueness census did not retain all 307 roots".to_string());
+    if source_game_pairs.len() != EXPECTED_RAW_ROWS {
+        return Err(format!(
+            "input has {} unique source/game pairs, expected {EXPECTED_RAW_ROWS}",
+            source_game_pairs.len()
+        ));
     }
-    Ok(roots)
+
+    let mut groups = BTreeMap::<Vec<u8>, Vec<usize>>::new();
+    let mut retained_keys = Vec::<Vec<u8>>::new();
+    for (index, raw) in raw_roots.iter().enumerate() {
+        if let Some(group) = groups.get_mut(&raw.exact_key) {
+            group.push(index);
+        } else {
+            retained_keys.push(raw.exact_key.clone());
+            groups.insert(raw.exact_key.clone(), vec![index]);
+        }
+    }
+    if groups.len() != EXPECTED_ROOTS || retained_keys.len() != EXPECTED_ROOTS {
+        return Err(format!(
+            "independent dedup found {} exact roots, expected {EXPECTED_ROOTS}",
+            groups.len()
+        ));
+    }
+
+    let mut roots = Vec::with_capacity(EXPECTED_ROOTS);
+    let mut retained_entries = Vec::with_capacity(EXPECTED_ROOTS);
+    let mut duplicate_entries = Vec::with_capacity(EXPECTED_DUPLICATE_GROUPS);
+    let mut retained_stream = Vec::with_capacity(8 + EXPECTED_ROOTS * 41);
+    retained_stream.extend_from_slice(&(EXPECTED_ROOTS as u64).to_le_bytes());
+    let mut black_roots = 0usize;
+    let mut white_roots = 0usize;
+    let mut singleton_roots = 0usize;
+    let mut duplicate_groups = 0usize;
+    let mut excess_duplicate_instances = 0usize;
+    let mut duplicate_materialization_checks = 0usize;
+    let mut retained_raw_lines = Vec::with_capacity(EXPECTED_ROOTS);
+
+    for (unique_ordinal, key) in retained_keys.iter().enumerate() {
+        let indices = groups
+            .get(key)
+            .ok_or_else(|| format!("retained key {unique_ordinal} missing from partition"))?;
+        if indices.is_empty() {
+            return Err(format!("retained key {unique_ordinal} has an empty group"));
+        }
+        let retained = &raw_roots[indices[0]];
+        if indices
+            .windows(2)
+            .any(|pair| raw_roots[pair[0]].raw_line >= raw_roots[pair[1]].raw_line)
+        {
+            return Err(format!(
+                "duplicate raw lines are not strictly increasing for {}",
+                retained.uid
+            ));
+        }
+        if retained.raw_line
+            != indices
+                .iter()
+                .map(|&index| raw_roots[index].raw_line)
+                .min()
+                .ok_or_else(|| "nonempty group lost its minimum".to_string())?
+        {
+            return Err(format!(
+                "retained raw line is not the first occurrence for {}",
+                retained.uid
+            ));
+        }
+
+        let baseline = materialized_state(&retained.board);
+        for &duplicate_index in &indices[1..] {
+            duplicate_materialization_checks += 1;
+            let duplicate = &raw_roots[duplicate_index];
+            if materialized_state(&duplicate.board) != baseline {
+                return Err(format!(
+                    "duplicate materialization mismatch for {}: retained line {}, duplicate line {}",
+                    retained.uid, retained.raw_line, duplicate.raw_line
+                ));
+            }
+        }
+
+        match retained.side {
+            Stone::Black => black_roots += 1,
+            Stone::White => white_roots += 1,
+        }
+        if indices.len() == 1 {
+            singleton_roots += 1;
+        } else {
+            duplicate_groups += 1;
+            excess_duplicate_instances += indices.len() - 1;
+            duplicate_entries.push(json!({
+                "root_uid": retained.uid,
+                "side": stone_name(retained.side),
+                "retained_line": retained.raw_line,
+                "raw_lines": indices
+                    .iter()
+                    .map(|&index| raw_roots[index].raw_line)
+                    .collect::<Vec<_>>(),
+            }));
+        }
+
+        retained_stream.extend_from_slice(&(retained.raw_line as u64).to_le_bytes());
+        retained_stream.extend_from_slice(&decode_upper_hex_32(&retained.uid)?);
+        retained_stream.push(stone_code(retained.side));
+        retained_raw_lines.push(retained.raw_line);
+        retained_entries.push(json!({
+            "unique_ordinal": unique_ordinal,
+            "raw_line": retained.raw_line,
+            "root_uid": retained.uid,
+            "side": stone_name(retained.side),
+        }));
+        roots.push(Root {
+            ordinal: unique_ordinal,
+            raw_line: retained.raw_line,
+            uid: retained.uid.clone(),
+            side: retained.side,
+            board: retained.board.clone(),
+        });
+    }
+
+    let retained_order_sha256 = hash::sha256_hex(&retained_stream);
+    let metadata = LoadMetadata {
+        raw_rows: raw_roots.len(),
+        counted_roots: roots.len(),
+        black_roots,
+        white_roots,
+        singleton_roots,
+        duplicate_groups,
+        excess_duplicate_instances,
+        duplicate_materialization_checks,
+        retained_order_sha256: retained_order_sha256.clone(),
+        retained_raw_lines,
+    };
+    validate_p0b_counts(&metadata)?;
+    if retained_order_sha256 != RETAINED_ORDER_SHA256 {
+        return Err(format!(
+            "retained-order digest {retained_order_sha256} != registered {RETAINED_ORDER_SHA256}"
+        ));
+    }
+    if roots
+        .iter()
+        .enumerate()
+        .any(|(ordinal, root)| root.ordinal != ordinal)
+    {
+        return Err("retained root ordinals are not contiguous".to_string());
+    }
+
+    let expected_manifest = json!({
+        "format": "cb-p1-exact-dedup-manifest-v1",
+        "sealed_input": {
+            "path": REGISTERED_INPUT,
+            "bytes": INPUT_BYTES,
+            "sha256": INPUT_SHA256,
+        },
+        "census": {
+            "raw_rows": EXPECTED_RAW_ROWS,
+            "unique_roots": EXPECTED_ROOTS,
+            "singleton": EXPECTED_SINGLETON_ROOTS,
+            "duplicate_groups": EXPECTED_DUPLICATE_GROUPS,
+            "excess_instances": EXPECTED_EXCESS_DUPLICATES,
+        },
+        "policy": {
+            "exact_key": "black.lo u128le || black.hi u128le || white.lo u128le || white.hi u128le || side u8 (Black=0, White=1) || rule u8 (Freestyle=0)",
+            "root_uid": "uppercase SHA256 hex of ASCII \"CB-P1-exact-root-v1\", followed by one NUL byte, followed by exact_key bytes",
+            "retention": "retain the first raw row for each exact key in frozen input file order",
+        },
+        "retained_order_encoding": "u64le retained_count; then, in retained first-occurrence order, fixed-size records of u64le raw_line (1-based) || 32 raw root_uid bytes decoded from hex || u8 side (Black=0, White=1); no separators",
+        "retained_order_sha256": RETAINED_ORDER_SHA256,
+        "retained_roots": retained_entries,
+        "duplicate_groups": duplicate_entries,
+        "validations": {
+            "allowed_top_level_fields": [
+                "format", "source_path", "game_id", "ply",
+                "side_to_move", "position_history"
+            ],
+            "allowed_history_fields": ["color", "x", "y"],
+            "raw_rows_checked": EXPECTED_RAW_ROWS,
+            "schema_errors": 0,
+            "post_terminal_history_errors": 0,
+            "terminal_root_errors": 0,
+            "unique_source_game_pairs": EXPECTED_RAW_ROWS,
+            "root_uid_collisions": 0,
+            "sealed_input_matches_registered_seal": true,
+            "all_duplicate_groups_retain_minimum_raw_line": true,
+            "all_duplicate_raw_lines_strictly_increasing": true,
+            "all_retained_roots_in_first_occurrence_order": true,
+            "all_raw_lines_partitioned_by_exact_root": true,
+            "partition_counts_consistent": true,
+            "retained_order_sha256_recomputed": true,
+        },
+    });
+    let manifest_bytes = fs::read(manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    let observed_manifest: Value = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("manifest JSON parse failed: {error}"))?;
+    if observed_manifest != expected_manifest {
+        let observed = serde_json::to_vec(&observed_manifest)
+            .map_err(|error| format!("observed manifest serialization: {error}"))?;
+        let expected = serde_json::to_vec(&expected_manifest)
+            .map_err(|error| format!("expected manifest serialization: {error}"))?;
+        return Err(format!(
+            "independently reconstructed manifest mismatch: observed_compact_sha256={} expected_compact_sha256={}",
+            hash::sha256_hex(&observed),
+            hash::sha256_hex(&expected)
+        ));
+    }
+
+    Ok(LoadResult { roots, metadata })
+}
+
+fn validate_p0b_counts(metadata: &LoadMetadata) -> Result<(), String> {
+    let expected = [
+        ("raw rows", metadata.raw_rows, EXPECTED_RAW_ROWS),
+        ("counted roots", metadata.counted_roots, EXPECTED_ROOTS),
+        ("Black roots", metadata.black_roots, EXPECTED_BLACK_ROOTS),
+        ("White roots", metadata.white_roots, EXPECTED_WHITE_ROOTS),
+        (
+            "singleton roots",
+            metadata.singleton_roots,
+            EXPECTED_SINGLETON_ROOTS,
+        ),
+        (
+            "duplicate groups",
+            metadata.duplicate_groups,
+            EXPECTED_DUPLICATE_GROUPS,
+        ),
+        (
+            "excess duplicate instances",
+            metadata.excess_duplicate_instances,
+            EXPECTED_EXCESS_DUPLICATES,
+        ),
+        (
+            "duplicate materialization checks",
+            metadata.duplicate_materialization_checks,
+            EXPECTED_EXCESS_DUPLICATES,
+        ),
+    ];
+    for (label, observed, registered) in expected {
+        if observed != registered {
+            return Err(format!(
+                "{label} census {observed} != registered {registered}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn materialized_state(board: &Board) -> MaterializedState {
+    MaterializedState {
+        black: (board.black.lo, board.black.hi),
+        white: (board.white.lo, board.white.hi),
+        side: stone_code(board.side_to_move),
+        rule: rule_code(board.effective_rule_set()),
+        line_patterns: board
+            .line_pattern_ids
+            .iter()
+            .flat_map(|directions| directions.iter().copied())
+            .collect(),
+        zobrist: board.zobrist,
+    }
+}
+
+fn stone_code(stone: Stone) -> u8 {
+    match stone {
+        Stone::Black => 0,
+        Stone::White => 1,
+    }
+}
+
+fn decode_upper_hex_32(value: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+    {
+        return Err(format!(
+            "root UID must be exactly 64 uppercase hex characters: {value:?}"
+        ));
+    }
+    let mut output = [0u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        output[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Ok(output)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!("invalid uppercase hex byte 0x{byte:02X}")),
+    }
 }
 
 /// Project a sealed top-level JSON object without materializing forbidden
@@ -1268,16 +1764,16 @@ fn evaluate_gates(runs: &[RootRun], oracle: &OracleResult) -> Value {
     let unsound = alias_errors != 0 || missing_certificates != 0;
     let within_budget = oracle.assigned_cost <= oracle.reference_budget;
     let all_upper = !unsound
-        && memory_roots <= 15
-        && ceiling_proofs >= 30
-        && budget_sensitive.len() >= 10
-        && sensitive_black >= 3
-        && sensitive_white >= 3
+        && memory_roots <= MEMORY_ROOT_LIMIT
+        && ceiling_proofs >= CEILING_PROOF_GATE
+        && budget_sensitive.len() >= BUDGET_SENSITIVE_GATE
+        && sensitive_black >= COLOR_SENSITIVE_GATE
+        && sensitive_white >= COLOR_SENSITIVE_GATE
         && within_budget
-        && oracle.added_proofs >= 10;
+        && oracle.added_proofs >= ORACLE_ADDED_GATE;
     let final_label = if unsound {
         "UNSOUND"
-    } else if memory_roots > 15 {
+    } else if memory_roots > MEMORY_ROOT_LIMIT {
         "NO_GO_STATE_EXPLOSION"
     } else if all_upper {
         "GO_PROTOTYPE"
@@ -1292,19 +1788,24 @@ fn evaluate_gates(runs: &[RootRun], oracle: &OracleResult) -> Value {
         "observed_collisions_separated_by_exact_equality": alias_errors == 0,
         "exact_alias_errors": alias_errors.to_string(),
         "missing_certificates": missing_certificates,
-        "memory_roots_at_most_15": memory_roots <= 15,
+        "memory_root_limit": MEMORY_ROOT_LIMIT,
+        "memory_roots_within_limit": memory_roots <= MEMORY_ROOT_LIMIT,
         "memory_roots": memory_roots,
-        "ceiling_proofs_at_least_30": ceiling_proofs >= 30,
+        "ceiling_proof_gate": CEILING_PROOF_GATE,
+        "ceiling_proofs_pass": ceiling_proofs >= CEILING_PROOF_GATE,
         "ceiling_proofs": ceiling_proofs,
-        "budget_sensitive_at_least_10": budget_sensitive.len() >= 10,
+        "budget_sensitive_gate": BUDGET_SENSITIVE_GATE,
+        "budget_sensitive_pass": budget_sensitive.len() >= BUDGET_SENSITIVE_GATE,
         "budget_sensitive_roots": budget_sensitive.len(),
-        "budget_sensitive_black_at_least_3": sensitive_black >= 3,
+        "color_sensitive_gate_each": COLOR_SENSITIVE_GATE,
+        "budget_sensitive_black_pass": sensitive_black >= COLOR_SENSITIVE_GATE,
         "budget_sensitive_black": sensitive_black,
-        "budget_sensitive_white_at_least_3": sensitive_white >= 3,
+        "budget_sensitive_white_pass": sensitive_white >= COLOR_SENSITIVE_GATE,
         "budget_sensitive_white": sensitive_white,
         "oracle_within_actual_reference_budget": within_budget,
         "oracle_preserves_reference_proofs": true,
-        "oracle_adds_at_least_10": oracle.added_proofs >= 10,
+        "oracle_added_gate": ORACLE_ADDED_GATE,
+        "oracle_added_pass": oracle.added_proofs >= ORACLE_ADDED_GATE,
         "oracle_added_proofs": oracle.added_proofs,
     })
 }
@@ -1576,17 +2077,43 @@ fn validate_build_environment() -> Result<(), String> {
 
 fn source_identity(cwd: &Path) -> Result<Value, String> {
     hash::require_file_seal(
+        &cwd.join("Cargo.toml"),
+        CARGO_TOML_BYTES,
+        CARGO_TOML_SHA256,
+        "CB-P1 P0b final Cargo.toml",
+    )?;
+    hash::require_file_seal(
+        &cwd.join(P0_PREREGISTER_DOCUMENT),
+        P0_PREREGISTER_BYTES,
+        P0_PREREGISTER_SHA256,
+        "CB-P1 P0 preregistration",
+    )?;
+    hash::require_file_seal(
+        &cwd.join(P0_INVALID_DOCUMENT),
+        P0_INVALID_BYTES,
+        P0_INVALID_SHA256,
+        "CB-P1 P0 terminal record",
+    )?;
+    hash::require_file_seal(
+        &cwd.join(MANIFEST_DOCUMENT),
+        MANIFEST_BYTES,
+        MANIFEST_SHA256,
+        "CB-P1 P0b dedup manifest",
+    )?;
+    hash::require_file_seal(
         &cwd.join(PREREGISTER_DOCUMENT),
         PREREGISTER_BYTES,
         PREREGISTER_SHA256,
-        "CB-P1 preregistration",
+        "CB-P1 P0b preregistration",
     )?;
-    hash::require_file_seal(
-        &cwd.join("Cargo.lock"),
-        CARGO_LOCK_BYTES,
-        CARGO_LOCK_SHA256,
-        "registered Cargo.lock",
-    )?;
+    for &(relative, bytes, sha256) in &FROZEN_SUPPORT_SOURCES {
+        hash::require_file_seal(
+            &cwd.join(relative),
+            bytes,
+            sha256,
+            &format!("CB-P1 P0b frozen support source {relative}"),
+        )?;
+    }
     let mut aggregate = hash::Sha256::new();
     let mut files = Vec::with_capacity(CRITICAL_SOURCES.len());
     for &(relative, compiled) in CRITICAL_SOURCES {
@@ -1898,6 +2425,53 @@ mod tests {
         }
     }
 
+    fn passing_gate_fixture() -> (Vec<RootRun>, OracleResult) {
+        let runs = (0..CEILING_PROOF_GATE)
+            .map(|ordinal| {
+                let budget_sensitive = ordinal < BUDGET_SENSITIVE_GATE;
+                let statuses = if budget_sensitive {
+                    [
+                        "UnknownNodeBudget",
+                        "UnknownNodeBudget",
+                        "ProvenWin",
+                        "ProvenWin",
+                        "ProvenWin",
+                    ]
+                } else {
+                    ["ProvenWin"; CAPS.len()]
+                };
+                let mut run = fake_run(
+                    ordinal,
+                    if ordinal < BUDGET_SENSITIVE_GATE / 2 {
+                        Stone::Black
+                    } else {
+                        Stone::White
+                    },
+                    statuses,
+                    [1; CAPS.len()],
+                );
+                run.certificate = Some(CertificateRecord {
+                    scientific: Value::Null,
+                });
+                run
+            })
+            .collect::<Vec<_>>();
+        let oracle = OracleResult {
+            reference_budget: CEILING_PROOF_GATE as u64,
+            reference_proofs: CEILING_PROOF_GATE - ORACLE_ADDED_GATE,
+            oracle_proofs: CEILING_PROOF_GATE,
+            added_proofs: ORACLE_ADDED_GATE,
+            assigned_caps: vec![CAPS[0]; CEILING_PROOF_GATE],
+            assigned_cost: CEILING_PROOF_GATE as u64,
+        };
+        (runs, oracle)
+    }
+
+    fn assert_gate_label(runs: &[RootRun], oracle: &OracleResult, expected: &str) {
+        let gates = evaluate_gates(runs, oracle);
+        assert_eq!(gates["final_label"].as_str(), Some(expected), "{gates}");
+    }
+
     #[test]
     fn oracle_uses_actual_cost_and_lexicographically_skips_earlier_optional_root() {
         let runs = vec![
@@ -2005,5 +2579,172 @@ mod tests {
         }
         board.last_move = None;
         assert_eq!(complete_winners(&board), (true, false));
+    }
+
+    #[test]
+    fn p0b_fixed_gate_constants_match_registration() {
+        assert_eq!(MEMORY_ROOT_LIMIT, 11);
+        assert_eq!(CEILING_PROOF_GATE, 30);
+        assert_eq!(BUDGET_SENSITIVE_GATE, 10);
+        assert_eq!(COLOR_SENSITIVE_GATE, 3);
+        assert_eq!(ORACLE_ADDED_GATE, 10);
+    }
+
+    #[test]
+    fn p0b_positive_gates_pass_at_boundary_and_fail_one_below() {
+        let (passing_runs, passing_oracle) = passing_gate_fixture();
+        assert_gate_label(&passing_runs, &passing_oracle, "GO_PROTOTYPE");
+
+        let mut below_ceiling = passing_runs.clone();
+        below_ceiling[CEILING_PROOF_GATE - 1].checkpoints[CEILING_CAP_INDEX].status =
+            "UnknownNodeBudget";
+        below_ceiling[CEILING_PROOF_GATE - 1].certificate = None;
+        assert_gate_label(&below_ceiling, &passing_oracle, "NO_GO_PRECONDITION");
+
+        let mut below_budget_sensitive = passing_runs.clone();
+        below_budget_sensitive[BUDGET_SENSITIVE_GATE - 1].checkpoints[1].status = "ProvenWin";
+        assert_gate_label(
+            &below_budget_sensitive,
+            &passing_oracle,
+            "NO_GO_PRECONDITION",
+        );
+
+        let mut below_black = passing_runs.clone();
+        for run in &mut below_black[COLOR_SENSITIVE_GATE - 1..BUDGET_SENSITIVE_GATE / 2] {
+            run.side = Stone::White;
+        }
+        assert_gate_label(&below_black, &passing_oracle, "NO_GO_PRECONDITION");
+
+        let mut below_white = passing_runs.clone();
+        for run in &mut below_white
+            [BUDGET_SENSITIVE_GATE / 2 + COLOR_SENSITIVE_GATE - 1..BUDGET_SENSITIVE_GATE]
+        {
+            run.side = Stone::Black;
+        }
+        assert_gate_label(&below_white, &passing_oracle, "NO_GO_PRECONDITION");
+
+        let mut below_oracle = passing_oracle.clone();
+        below_oracle.added_proofs = ORACLE_ADDED_GATE - 1;
+        below_oracle.oracle_proofs = below_oracle.reference_proofs + below_oracle.added_proofs;
+        assert_gate_label(&passing_runs, &below_oracle, "NO_GO_PRECONDITION");
+    }
+
+    #[test]
+    fn p0b_memory_gate_changes_label_only_above_eleven() {
+        let unknown_memory = ["UnknownMemory"; CAPS.len()];
+        let expansions = [1; CAPS.len()];
+        let runs_at_limit = (0..MEMORY_ROOT_LIMIT)
+            .map(|ordinal| {
+                fake_run(
+                    ordinal,
+                    if ordinal % 2 == 0 {
+                        Stone::Black
+                    } else {
+                        Stone::White
+                    },
+                    unknown_memory,
+                    expansions,
+                )
+            })
+            .collect::<Vec<_>>();
+        let oracle_at_limit = OracleResult {
+            reference_budget: MEMORY_ROOT_LIMIT as u64,
+            reference_proofs: 0,
+            oracle_proofs: 0,
+            added_proofs: 0,
+            assigned_caps: vec![0; MEMORY_ROOT_LIMIT],
+            assigned_cost: 0,
+        };
+        let gates_at_limit = evaluate_gates(&runs_at_limit, &oracle_at_limit);
+        assert_eq!(
+            gates_at_limit["final_label"].as_str(),
+            Some("NO_GO_PRECONDITION")
+        );
+        assert_eq!(gates_at_limit["memory_roots"].as_u64(), Some(11));
+        assert_eq!(
+            gates_at_limit["memory_roots_within_limit"].as_bool(),
+            Some(true)
+        );
+
+        let mut runs_above_limit = runs_at_limit;
+        runs_above_limit.push(fake_run(
+            MEMORY_ROOT_LIMIT,
+            Stone::White,
+            unknown_memory,
+            expansions,
+        ));
+        let oracle_above_limit = OracleResult {
+            reference_budget: (MEMORY_ROOT_LIMIT + 1) as u64,
+            reference_proofs: 0,
+            oracle_proofs: 0,
+            added_proofs: 0,
+            assigned_caps: vec![0; MEMORY_ROOT_LIMIT + 1],
+            assigned_cost: 0,
+        };
+        let gates_above_limit = evaluate_gates(&runs_above_limit, &oracle_above_limit);
+        assert_eq!(
+            gates_above_limit["final_label"].as_str(),
+            Some("NO_GO_STATE_EXPLOSION")
+        );
+        assert_eq!(gates_above_limit["memory_roots"].as_u64(), Some(12));
+        assert_eq!(
+            gates_above_limit["memory_roots_within_limit"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn aggregate_unsound_is_rejected_with_exit_two_before_output() {
+        let (mut alias_runs, oracle) = passing_gate_fixture();
+        alias_runs[0].checkpoints[CEILING_CAP_INDEX].scientific["exact_alias_errors"] = json!("1");
+        let alias_gates = evaluate_gates(&alias_runs, &oracle);
+        assert_eq!(alias_gates["final_label"].as_str(), Some("UNSOUND"));
+        let alias_error = reject_aggregate_unsound(&alias_gates).unwrap_err();
+        assert!(alias_error.starts_with("UNSOUND "), "{alias_error}");
+        assert_eq!(terminal_error_exit_code(&alias_error), 2);
+
+        let (mut certificate_runs, oracle) = passing_gate_fixture();
+        certificate_runs[0].certificate = None;
+        let certificate_gates = evaluate_gates(&certificate_runs, &oracle);
+        assert_eq!(certificate_gates["final_label"].as_str(), Some("UNSOUND"));
+        let certificate_error = reject_aggregate_unsound(&certificate_gates).unwrap_err();
+        assert!(
+            certificate_error.starts_with("UNSOUND "),
+            "{certificate_error}"
+        );
+        assert_eq!(terminal_error_exit_code(&certificate_error), 2);
+
+        assert!(
+            reject_aggregate_unsound(&json!({
+                "final_label": "GO_PROTOTYPE"
+            }))
+            .is_ok()
+        );
+        assert_eq!(terminal_error_exit_code("ordinary invalid failure"), 1);
+    }
+
+    #[test]
+    #[ignore = "explicit label-blind P0b loader-only preflight"]
+    fn p0b_loader_preflight_zero_dfpn_calls() {
+        DFPN_ROOT_CALLS.store(0, Ordering::SeqCst);
+        let input = Path::new(REGISTERED_INPUT);
+        let manifest = PathBuf::from(REGISTERED_CWD).join(MANIFEST_DOCUMENT);
+        hash::require_file_seal(input, INPUT_BYTES, INPUT_SHA256, "P0b preflight input").unwrap();
+        hash::require_file_seal(
+            &manifest,
+            MANIFEST_BYTES,
+            MANIFEST_SHA256,
+            "P0b preflight manifest",
+        )
+        .unwrap();
+
+        let loaded = load_roots(input, &manifest).unwrap();
+        validate_p0b_counts(&loaded.metadata).unwrap();
+        assert_eq!(loaded.roots.len(), EXPECTED_ROOTS);
+        assert_eq!(loaded.metadata.retained_order_sha256, RETAINED_ORDER_SHA256);
+        assert!(loaded.roots.iter().enumerate().all(|(ordinal, root)| {
+            root.ordinal == ordinal && root.raw_line == loaded.metadata.retained_raw_lines[ordinal]
+        }));
+        assert_eq!(DFPN_ROOT_CALLS.load(Ordering::SeqCst), 0);
     }
 }

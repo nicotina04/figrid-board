@@ -26,6 +26,9 @@ exclude = [
     "!/experiments/2026-07-26/cb_qat1_integer_lattice_preregister.md",
     "!/experiments/2026-07-26/cb_al1_active_distillation_preregister.md",
     "!/experiments/2026-07-26/cb_p1_bounded_dfpn_preregister.md",
+    "!/experiments/2026-07-26/cb_p1_p0_invalid.md",
+    "!/experiments/2026-07-26/cb_p1_p0b_dedup_manifest.json",
+    "!/experiments/2026-07-26/cb_p1_p0b_preregister.md",
 ]
 
 [features]

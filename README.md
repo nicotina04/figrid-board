@@ -23,9 +23,10 @@
   - `pbrain-figrid` — the NNUE engine, powered by [noru](https://crates.io/crates/noru). Speaks the Piskvork pbrain protocol and is the binary intended for tournament play.
   - `pbrain-figrid-legacy` — preserves the original pre-NNUE engine by [wuwbobo2021](https://github.com/wuwbobo2021), kept as a reference baseline.
 
-The reusable categorical-codebook layer now lives in the sibling
-[CB2Vec (`cb2vec`)](https://crates.io/crates/cb2vec) package. It owns the game-independent model,
-quantized artifact, scoring, and reversible token-journal primitives.
+The reusable categorical-codebook layer now lives in the standalone
+[CB2Vec (`cb2vec`)](https://github.com/nicotina04/cb2vec) package, published
+on [crates.io](https://crates.io/crates/cb2vec). It owns the game-independent
+model, quantized artifact, scoring, and reversible token-journal primitives.
 `figrid-board` keeps Pattern4 mapping, board updates, Gomoku policy, and
 search integration. The dependency is optional and is activated only by the
 `codebook-eval` feature; the default board/rules build does not pull it in.
@@ -35,7 +36,7 @@ search integration. The dependency is optional and is activated only by the
 - Pure Rust, no C dependencies. With embedded weights and a statically linked
   C runtime, the engine can be packaged as one self-contained binary.
 - NNUE-based evaluation through [noru](https://crates.io/crates/noru), with incremental accumulator updates.
-- Optional `codebook-eval` through the sibling `cb2vec` crate. The embedded
+- Optional `codebook-eval` through the standalone `cb2vec` crate. The embedded
   swap-closed model supplies the deployed quantized leaf evaluator while
   `figrid-board` supplies all game-specific token and search semantics.
 - α-β search with transposition table, threat-aware move ordering, killer/history heuristics, late-move pruning, and a quiescence layer for forcing sequences.
@@ -148,7 +149,7 @@ library callers opt in through `set_use_packed_line_windows`,
 `set_use_candidate_frontier`, and
 `set_use_codebook_directional_delta`. Enabling `codebook-eval` also activates
 the optional `cb2vec` dependency. Consumers that only need the generic
-codebook and reversible-journal primitives can use the sibling package
+codebook and reversible-journal primitives can use the standalone package
 directly.
 
 ## Build
@@ -211,7 +212,8 @@ The [Gomocup 2026](https://gomocup.org/) submission deadline and June 5–7
 tournament have passed. The compatible build recipes remain above for
 reproducibility. Current 0.8.x maintenance favors exact, independently
 reversible changes with full-rebuild audits and same-binary measurements.
-Reusable codebook mechanics are developed in `cb2vec`; Gomoku-specific
+Reusable codebook mechanics are developed in
+[CB2Vec](https://github.com/nicotina04/cb2vec); Gomoku-specific
 evaluation, search, and protocol policy remain in `figrid-board`.
 
 Pre-NNUE technical debt inherited from the 0.3.x series is tracked in [`docs/INHERITED_TODO.md`](docs/INHERITED_TODO.md).

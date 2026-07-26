@@ -96,7 +96,10 @@ const FROZEN_CARGO_LOCK_SHA256: &str =
 
 const CRITICAL_SOURCES: &[(&str, &[u8])] = &[
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
-    ("Cargo.lock", include_bytes!("../Cargo.lock")),
+    (
+        "Cargo.lock",
+        include_bytes!("../audit/provenance/figrid-0.8.2-Cargo.lock.snapshot"),
+    ),
     ("src/lib.rs", include_bytes!("../src/lib.rs")),
     ("src/board.rs", include_bytes!("../src/board.rs")),
     (
@@ -1266,7 +1269,7 @@ fn require_registered_executable_path() -> Result<(), String> {
 fn critical_source_stream_identity() -> Result<Value, String> {
     require_frozen_compiled_file(
         "Cargo.lock",
-        include_bytes!("../Cargo.lock"),
+        include_bytes!("../audit/provenance/figrid-0.8.2-Cargo.lock.snapshot"),
         FROZEN_CARGO_LOCK_BYTES,
         FROZEN_CARGO_LOCK_SHA256,
     )?;

@@ -33,6 +33,8 @@ const PREREGISTER_DOCUMENT: &str = "experiments/2026-07-26/cb_qat1_integer_latti
 const EXECUTABLE_STEM: &str = "cb-qat1-headroom";
 const CANONICAL_BUILD: &str =
     "cargo build --release --locked --features codebook-eval --bin cb-qat1-headroom";
+#[cfg(test)]
+const FROZEN_CARGO_LOCK_SNAPSHOT: &str = "audit/provenance/figrid-0.8.2-Cargo.lock.snapshot";
 const REGISTERED_CARGO_LOCK_BYTES: usize = 11_841;
 const REGISTERED_CARGO_LOCK_SHA256: &str =
     "3F90AA762C0D7B1F0172C22397588835C79B9C924BB5A931D162B2A5714A202C";
@@ -43,7 +45,10 @@ const REGISTERED_CARGO: &str = "cargo 1.88.0 (873a06493 2025-05-10)";
 
 const CRITICAL_SOURCES: &[(&str, &[u8])] = &[
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
-    ("Cargo.lock", include_bytes!("../Cargo.lock")),
+    (
+        "Cargo.lock",
+        include_bytes!("../audit/provenance/figrid-0.8.2-Cargo.lock.snapshot"),
+    ),
     ("src/board.rs", include_bytes!("../src/board.rs")),
     ("src/book.rs", include_bytes!("../src/book.rs")),
     (
@@ -531,7 +536,7 @@ fn cargo_identity() -> Result<Value, String> {
 }
 
 fn validate_registered_build_contract(rustc: &Value, cargo: &Value) -> Result<(), String> {
-    const LOCK: &[u8] = include_bytes!("../Cargo.lock");
+    const LOCK: &[u8] = include_bytes!("../audit/provenance/figrid-0.8.2-Cargo.lock.snapshot");
     if LOCK.len() != REGISTERED_CARGO_LOCK_BYTES {
         return Err(format!(
             "registered Cargo.lock byte mismatch: got {}, expected {REGISTERED_CARGO_LOCK_BYTES}",
@@ -733,10 +738,15 @@ mod tests {
     }
 
     #[test]
-    fn compiled_critical_sources_match_the_build_worktree() {
+    fn compiled_critical_sources_match_the_frozen_inputs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for &(relative, compiled_bytes) in CRITICAL_SOURCES {
-            let disk = std::fs::read(root.join(relative)).unwrap();
+            let disk_relative = if relative == "Cargo.lock" {
+                FROZEN_CARGO_LOCK_SNAPSHOT
+            } else {
+                relative
+            };
+            let disk = std::fs::read(root.join(disk_relative)).unwrap();
             assert_eq!(
                 disk, compiled_bytes,
                 "compiled source bytes differ for {relative}"

@@ -147,22 +147,11 @@ fn packed_factored_paths_and_return_types_remain_compatible() {
 }
 
 #[test]
-fn packaged_journal_provenance_snapshot_matches_the_workspace_dependency() {
+fn packaged_journal_provenance_snapshot_is_frozen() {
+    // The standalone dependency now resolves from crates.io. This source
+    // snapshot remains pinned to its published 0.1.0 provenance so historical
+    // audit binaries can be rebuilt without a nested dependency checkout.
     assert_eq!(CB2VEC_JOURNAL_V0_1_0.len(), 16_090);
-
-    // A crates.io package resolves cb2vec from the registry and therefore has
-    // no nested dependency source. A repository/worktree build does have it,
-    // so use that environment to prevent an unversioned snapshot drift.
-    let workspace_source =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/cb2vec/src/journal.rs");
-    if workspace_source.exists() {
-        let live = std::fs::read(&workspace_source).expect("read workspace cb2vec journal");
-        assert_eq!(
-            CB2VEC_JOURNAL_V0_1_0,
-            live.as_slice(),
-            "versioned FIGRID provenance snapshot drifted from cb2vec 0.1.0"
-        );
-    }
 }
 
 fn assert_quantized_shape(weights: &QuantizedCodebookWeights) {

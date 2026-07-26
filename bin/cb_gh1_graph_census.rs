@@ -29,9 +29,14 @@ const PREREGISTER_COMMIT: &str = "3e52280";
 const EXECUTABLE_STEM: &str = "cb-gh1-graph-census";
 const CANONICAL_BUILD: &str =
     "cargo build --release --locked --features codebook-eval --bin cb-gh1-graph-census";
+#[cfg(test)]
+const FROZEN_CARGO_LOCK_SNAPSHOT: &str = "audit/provenance/figrid-0.8.2-Cargo.lock.snapshot";
 const CRITICAL_SOURCES: [(&str, &[u8]); 44] = [
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
-    ("Cargo.lock", include_bytes!("../Cargo.lock")),
+    (
+        "Cargo.lock",
+        include_bytes!("../audit/provenance/figrid-0.8.2-Cargo.lock.snapshot"),
+    ),
     ("src/board.rs", include_bytes!("../src/board.rs")),
     ("src/book.rs", include_bytes!("../src/book.rs")),
     (
@@ -760,10 +765,15 @@ mod tests {
     }
 
     #[test]
-    fn compiled_critical_sources_match_the_build_worktree() {
+    fn compiled_critical_sources_match_the_frozen_inputs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for &(relative, compiled_bytes) in &CRITICAL_SOURCES {
-            let disk = std::fs::read(root.join(relative)).unwrap();
+            let disk_relative = if relative == "Cargo.lock" {
+                FROZEN_CARGO_LOCK_SNAPSHOT
+            } else {
+                relative
+            };
+            let disk = std::fs::read(root.join(disk_relative)).unwrap();
             assert_eq!(
                 disk, compiled_bytes,
                 "compiled source bytes differ for {relative}"

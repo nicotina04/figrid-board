@@ -42,15 +42,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
-name = "cb2vec"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e3187d776721492d6bdc0aa47d3f0e5d1025eb3a090713548ac13cb2a02bd84"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -165,9 +156,8 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "figrid-board"
-version = "0.8.4"
+version = "0.8.2"
 dependencies = [
- "cb2vec",
  "criterion",
  "flate2",
  "noru",

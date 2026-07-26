@@ -119,9 +119,20 @@ pub(crate) fn source_identity(
 
     let mut files = Vec::with_capacity(critical_sources.len());
     for &(relative, compiled_bytes) in critical_sources {
-        invoke_git(&manifest, &["ls-files", "--error-unmatch", "--", relative])
-            .map_err(|error| format!("critical source is not tracked ({relative}): {error}"))?;
-        let disk_path = manifest.join(relative);
+        // Cargo.lock is a preregistered logical input. The live lock may
+        // advance, so archival audit builds materialize those exact bytes
+        // from the versioned provenance snapshot.
+        let disk_relative = if relative == "Cargo.lock" {
+            "audit/provenance/figrid-0.8.2-Cargo.lock.snapshot"
+        } else {
+            relative
+        };
+        invoke_git(
+            &manifest,
+            &["ls-files", "--error-unmatch", "--", disk_relative],
+        )
+        .map_err(|error| format!("critical source is not tracked ({relative}): {error}"))?;
+        let disk_path = manifest.join(disk_relative);
         let disk_bytes = fs::read(&disk_path)
             .map_err(|error| format!("failed to read critical source {relative}: {error}"))?;
         if disk_bytes != compiled_bytes {

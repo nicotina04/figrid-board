@@ -54,6 +54,7 @@ const CARGO_TOML_BYTES: u64 = 6_286;
 const CARGO_TOML_SHA256: &str = "2941532F431E756B4052EEFB56848C9D39778768C4171B588ACEDAE4249A725F";
 const CARGO_LOCK_BYTES: u64 = 11_841;
 const CARGO_LOCK_SHA256: &str = "6A6B62449A235ABA53C777484C5D34E18EDB556155B1964A4B2BA6DA7DE2059C";
+const FROZEN_CARGO_LOCK_SNAPSHOT: &str = "audit/provenance/figrid-0.8.3-Cargo.lock.snapshot";
 const FROZEN_SUPPORT_SOURCES: [(&str, u64, &str); 7] = [
     ("Cargo.lock", CARGO_LOCK_BYTES, CARGO_LOCK_SHA256),
     (
@@ -129,7 +130,10 @@ const COMPILE_TIME_FORBIDDEN: &[(&str, Option<&str>)] = &[
 
 const CRITICAL_SOURCES: &[(&str, &[u8])] = &[
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
-    ("Cargo.lock", include_bytes!("../Cargo.lock")),
+    (
+        "Cargo.lock",
+        include_bytes!("../audit/provenance/figrid-0.8.3-Cargo.lock.snapshot"),
+    ),
     ("src/lib.rs", include_bytes!("../src/lib.rs")),
     ("src/board.rs", include_bytes!("../src/board.rs")),
     ("src/vct.rs", include_bytes!("../src/vct.rs")),
@@ -2107,8 +2111,13 @@ fn source_identity(cwd: &Path) -> Result<Value, String> {
         "CB-P1 P0b preregistration",
     )?;
     for &(relative, bytes, sha256) in &FROZEN_SUPPORT_SOURCES {
+        let disk_relative = if relative == "Cargo.lock" {
+            FROZEN_CARGO_LOCK_SNAPSHOT
+        } else {
+            relative
+        };
         hash::require_file_seal(
-            &cwd.join(relative),
+            &cwd.join(disk_relative),
             bytes,
             sha256,
             &format!("CB-P1 P0b frozen support source {relative}"),
@@ -2117,7 +2126,12 @@ fn source_identity(cwd: &Path) -> Result<Value, String> {
     let mut aggregate = hash::Sha256::new();
     let mut files = Vec::with_capacity(CRITICAL_SOURCES.len());
     for &(relative, compiled) in CRITICAL_SOURCES {
-        let disk_path = cwd.join(relative);
+        let disk_relative = if relative == "Cargo.lock" {
+            FROZEN_CARGO_LOCK_SNAPSHOT
+        } else {
+            relative
+        };
+        let disk_path = cwd.join(disk_relative);
         let disk = fs::read(&disk_path)
             .map_err(|error| format!("critical source {} read: {error}", disk_path.display()))?;
         if disk != compiled {
@@ -2392,6 +2406,13 @@ fn process_peak_working_set() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frozen_0_8_3_lock_snapshot_matches_registered_contract() {
+        let lock = include_bytes!("../audit/provenance/figrid-0.8.3-Cargo.lock.snapshot");
+        assert_eq!(lock.len() as u64, CARGO_LOCK_BYTES);
+        assert_eq!(hash::sha256_hex(lock), CARGO_LOCK_SHA256);
+    }
 
     fn fake_run(
         ordinal: usize,

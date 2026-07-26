@@ -1,15 +1,21 @@
 # Changes
 
-## Unreleased
+## 0.8.5 (2026-07-27)
 
 * Consume standalone
-  [`cb2vec` 0.1.1](https://github.com/nicotina04/cb2vec) directly from
+  [`cb2vec`](https://github.com/nicotina04/cb2vec) directly from
   crates.io and remove the temporary nested workspace copy. This changes
   dependency provenance only; FIGRID's public API and runtime behavior are
   unchanged.
 * Preserve the historical 0.8.2 and 0.8.3 `Cargo.lock` bytes under
   `audit/provenance` for archival audit builds while the live dependency lock
   advances to registry CB2Vec.
+* Advance the optional dependency to CB2Vec 0.2.2,
+  making the current standalone training, PTQ, native binding, and adoption
+  documentation discoverable without changing FIGRID's evaluator arithmetic.
+* Describe the engine as a combination of a NORU NNUE ordering model and an
+  optional CB2Vec codebook leaf evaluator. Update the crates.io package
+  description so FIGRID is no longer presented as NNUE-only.
 
 ## 0.8.4 (2026-07-26)
 

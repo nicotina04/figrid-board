@@ -43,9 +43,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cb2vec"
-version = "0.1.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e3187d776721492d6bdc0aa47d3f0e5d1025eb3a090713548ac13cb2a02bd84"
+checksum = "d14e61c41b309c63635f2392a89e252533044740b86b8e1319c8bc130883a4f6"
 dependencies = [
  "serde_json",
 ]
@@ -165,7 +165,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "figrid-board"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "cb2vec",
  "criterion",
@@ -251,9 +251,9 @@ dependencies = [
 
 [[package]]
 name = "noru"
-version = "2.2.0"
+version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83654c4f008197f515f315b6760a4781c6f734a6f0205e522b90119a8e1d29f2"
+checksum = "9f960f24742e5ec378952a7afe711bf6a98bf3ddccd9e7e9b16cc0f6cc11bf6f"
 
 [[package]]
 name = "num-traits"

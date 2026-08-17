@@ -25,7 +25,6 @@
     [CB2Vec](https://crates.io/crates/cb2vec) codebook leaf evaluator, speaks
     the Piskvork pbrain protocol, and is the binary intended for tournament
     play.
-  - `pbrain-figrid-legacy` — preserves the original pre-NNUE engine by [wuwbobo2021](https://github.com/wuwbobo2021), kept as a reference baseline.
 
 The reusable categorical-codebook layer now lives in the standalone
 [CB2Vec (`cb2vec`)](https://github.com/nicotina04/cb2vec) package, published
@@ -220,11 +219,9 @@ Reusable codebook mechanics are developed in
 [CB2Vec](https://github.com/nicotina04/cb2vec); Gomoku-specific
 evaluation, search, and protocol policy remain in `figrid-board`.
 
-Pre-NNUE technical debt inherited from the 0.3.x series is tracked in [`docs/INHERITED_TODO.md`](docs/INHERITED_TODO.md).
-
 ## Maintainership
 
-As of 2026-04-20, primary maintainership has been transferred from the original author [wuwbobo2021](https://github.com/wuwbobo2021) to [nicotina04](https://github.com/nicotina04). Future development targets a stronger NNUE-based engine while preserving the existing board / rule / tree library surface.
+As of 2026-04-20, primary maintainership has been transferred from the original author [wuwbobo2021](https://github.com/wuwbobo2021) to [nicotina04](https://github.com/nicotina04). Future development targets a stronger NNUE-based engine; some of the board / rule / tree library features in the 0.3.x series versions might be refactored and introduced again in the future (if needed).
 
 ## Legacy users
 
@@ -232,9 +229,9 @@ Users who need the pre-Rust `figrid-board` as a Linux alternative to Renlib can 
 
 ## Acknowledgments
 
-- [wuwbobo2021](https://github.com/wuwbobo2021) for the original engine and for entrusting `figrid-board` to its current maintainer.
 - [Rapfi](https://github.com/dhbloo/rapfi) for advancing public NNUE work in Gomoku and for serving as a reference point during evaluation development.
 - [noru](https://crates.io/crates/noru) for the underlying Rust NNUE training and inference stack.
+- [wuwbobo2021](https://github.com/wuwbobo2021) for the original engine and for entrusting `figrid-board` to its current maintainer.
 - [CB2Vec](https://crates.io/crates/cb2vec) for the reusable categorical
   training, quantization, artifact, scoring, and reversible token-update
   primitives used by the codebook evaluator.

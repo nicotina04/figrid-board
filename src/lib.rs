@@ -36,8 +36,6 @@ pub mod vct;
 #[cfg(feature = "codebook-eval")]
 pub(crate) mod white_root_order;
 
-pub mod legacy;
-
 pub use board::{
     BOARD_SIZE, BitBoard, Board, GameResult, Move, NUM_CELLS, RuleSet, Stone, to_idx, to_rc,
 };

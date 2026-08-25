@@ -2,8 +2,7 @@
 name = "figrid-board"
 version = "0.8.6"
 authors = [
-    "nicotina04 <devherdson@gmail.com>",
-    "wuwbobo2021 <wuwbobo@outlook.com>",
+    "Hogyung Choi <devherdson@gmail.com>",
 ]
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -78,10 +77,6 @@ harness = false
 [lib]
 name = "figrid_board"
 path = "src/lib.rs"
-
-[[bin]]
-name = "pbrain-figrid-legacy"
-path = "main.rs"
 
 [[bin]]
 name = "pbrain-figrid"

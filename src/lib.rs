@@ -3,10 +3,7 @@
 //! Starting from 0.4.0 the primary engine is NNUE-based (powered by the
 //! [`noru`](https://crates.io/crates/noru) core). The pre-0.4 symbolic
 //! evaluator, rule/rec/tree stack, and generic `Eval<SZ>` trait live under
-//! the [`legacy`] module — it is preserved alongside the new NNUE engine
-//! so the original `pbrain-figrid-legacy` executable and any 0.3.x
-//! downstream users still work. This preservation is a maintainer choice,
-//! not a promise of ABI stability.
+//! the [`legacy`] module in 0.8.x versions.
 
 pub mod board;
 pub mod book;
@@ -35,8 +32,6 @@ pub mod tss;
 pub mod vct;
 #[cfg(feature = "codebook-eval")]
 pub(crate) mod white_root_order;
-
-pub mod legacy;
 
 pub use board::{
     BOARD_SIZE, BitBoard, Board, GameResult, Move, NUM_CELLS, RuleSet, Stone, to_idx, to_rc,

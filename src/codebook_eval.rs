@@ -822,8 +822,12 @@ impl QuantUndoRecord {
 }
 
 impl IncrementalQuantizedCodebookEval {
+    /// 0.8.6: the directional-delta materialization path (bit-identical to
+    /// the legacy full-recompute path, roughly 2x faster on it) is now the
+    /// default for every consumer. Use [`Self::new_with_directional_delta`]
+    /// with `false` only to A/B the legacy path.
     pub fn new(weights: &QuantizedCodebookWeights) -> Self {
-        Self::new_with_directional_delta(weights, false)
+        Self::new_with_directional_delta(weights, true)
     }
 
     pub fn new_with_directional_delta(

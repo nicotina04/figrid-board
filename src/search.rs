@@ -1486,8 +1486,10 @@ impl Searcher {
             use_packed_line_windows: false,
             use_d4_hash_sidecar: false,
             use_root_vct_for_audit: true,
+            // 0.8.6: directional delta is the default eval path (bit-exact,
+            // ~2x cheaper materialization); the setter remains for A/B only.
             #[cfg(feature = "codebook-eval")]
-            use_codebook_directional_delta: false,
+            use_codebook_directional_delta: true,
             board_search_state: None,
             move_picker_stats: MovePickerStats::default(),
             shape_stats: SearchShapeStats::default(),
@@ -4766,14 +4768,16 @@ mod tests {
     #[cfg(feature = "codebook-eval")]
     #[test]
     fn directional_delta_selector_supports_rollback() {
+        // 0.8.6: directional delta is the default; the setter still allows
+        // rolling back to the legacy path for A/B measurement.
         let mut searcher = Searcher::new();
-        assert!(!searcher.use_codebook_directional_delta);
-
-        searcher.set_use_codebook_directional_delta(true);
         assert!(searcher.use_codebook_directional_delta);
 
         searcher.set_use_codebook_directional_delta(false);
         assert!(!searcher.use_codebook_directional_delta);
+
+        searcher.set_use_codebook_directional_delta(true);
+        assert!(searcher.use_codebook_directional_delta);
     }
 
     #[cfg(feature = "codebook-eval")]

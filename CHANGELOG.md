@@ -1,5 +1,17 @@
 # Changes
 
+## 0.8.6 (2026-08-25)
+
+* **Directional-delta codebook materialization is now the default** for
+  `IncrementalQuantizedCodebookEval::new` and for `Searcher`. The path is
+  bit-identical to the legacy full-recompute materialization (verified by
+  replaying 500 archived games — 8,873 incremental evaluations — with
+  byte-identical value dumps) and roughly halves materialization cost;
+  in engine profiling the switch lifts search throughput by ~1.7x at a
+  2-second time budget. `new_with_directional_delta(_, false)` and
+  `Searcher::set_use_codebook_directional_delta(false)` remain available
+  to A/B the legacy path; no new options are introduced.
+
 ## 0.8.5 (2026-07-27)
 
 * Consume standalone

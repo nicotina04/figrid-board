@@ -1,4 +1,3 @@
-#[cfg(feature = "codebook-eval")]
 use crate::board::RuleSet;
 /// ????????ㅻ깹???????????????袁ｋ쨨?? ??????轅붽틓?????(NNUE ???)
 ///
@@ -3714,52 +3713,92 @@ impl Searcher {
             GameResult::Ongoing => {}
         }
 
-        let profile_start = self.profile_start();
-        let (stand_pat, detail) = inc.eval(board, self.profile.enabled);
-        self.profile_add(SearchProfileBucket::Eval, profile_start);
-        self.profile.add_eval_state_detail(detail);
-        if qply >= QSEARCH_MAX_PLY {
+        // An opponent win next turn makes passing illegal for stand-pat purposes.
+        // Detect it before either the static cutoff or the optional qsearch cap.
+        let candidates = self.board_candidate_moves(board);
+        let opp_kinds: Vec<ThreatKind> = candidates
+            .iter()
+            .map(|&mv| classify_move_fast(board, mv, board.side_to_move.opponent()))
+            .collect();
+        let winning_replies = opp_kinds
+            .iter()
+            .filter(|&&kind| kind == ThreatKind::Five)
+            .count();
+        let must_reply = winning_replies > 0;
+        let caro_defense = must_reply && board.effective_rule_set() == RuleSet::Caro;
+        let mut caro_replies = Vec::new();
+        if must_reply {
+            // Winning now takes precedence over defending, including at the cap.
+            if candidates.iter().any(|&mv| {
+                classify_move_fast(board, mv, board.side_to_move) == ThreatKind::Five
+            }) {
+                self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
+                return WIN_SCORE - (ply as i32 + 1);
+            }
+            // In Caro, closing the other end can also invalidate an exact five.
+            // Two winning cells therefore do not certify a loss under that rule.
+            if winning_replies >= 2 && !caro_defense {
+                self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
+                return -(WIN_SCORE - (ply as i32 + 2));
+            }
+            if caro_defense {
+                // A new defender stone can remove, but cannot create, an opponent
+                // winning cell. Check every legal defense against all current
+                // winning cells, including defenses that close the other end.
+                let mut probe = board.clone();
+                for mv in board.legal_moves() {
+                    probe.make_move(mv);
+                    let loses_next = candidates.iter().zip(&opp_kinds).any(|(&win, &kind)| {
+                        kind == ThreatKind::Five
+                            && probe.is_empty(win)
+                            && classify_move_fast(&probe, win, board.side_to_move.opponent())
+                                == ThreatKind::Five
+                    });
+                    probe.undo_move();
+                    if !loses_next {
+                        caro_replies.push(mv);
+                    }
+                }
+                if caro_replies.is_empty() {
+                    self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
+                    return -(WIN_SCORE - (ply as i32 + 2));
+                }
+            }
+        }
+
+        let stand_pat = if must_reply {
+            -INF
+        } else {
+            let profile_start = self.profile_start();
+            let (value, detail) = inc.eval(board, self.profile.enabled);
+            self.profile_add(SearchProfileBucket::Eval, profile_start);
+            self.profile.add_eval_state_detail(detail);
+            value
+        };
+        if qply >= QSEARCH_MAX_PLY && !must_reply {
             self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
-        if stand_pat >= beta {
+        if stand_pat >= beta && !must_reply {
             self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
-        if stand_pat > alpha {
+        if stand_pat > alpha && !must_reply {
             alpha = stand_pat;
         }
 
-        let candidates = self.board_candidate_moves(board);
         if candidates.is_empty() {
             self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
 
-        let (my, opp) = match board.side_to_move {
-            Stone::Black => (&board.black, &board.white),
-            Stone::White => (&board.white, &board.black),
-        };
-
-        // 0.6.9: cache opp_kind by scanning candidates once instead of letting
-        // (a) the must-block precheck and (b) the per-move OpenFour-block
-        // check each call `classify_move(opp, my, mv)` again ??together they
-        // had been costing up to 2N calls. 0.7.0 swaps the per-call body for
-        // the Pattern4 fast path (~10x cheaper per call), so we keep the
-        // cache to lock the call count at N as well.
-        let opp_side = match board.side_to_move {
-            Stone::Black => Stone::White,
-            Stone::White => Stone::Black,
-        };
-        let _ = (my, opp); // moved into classify_move_fast(board, mv, side) form
-        let opp_kinds: Vec<ThreatKind> = candidates
-            .iter()
-            .map(|&m| classify_move_fast(board, m, opp_side))
-            .collect();
-        let opp_has_five = opp_kinds.iter().any(|&k| matches!(k, ThreatKind::Five));
-
         let mut forcing: Vec<(Move, i32)> = Vec::new();
-        for (i, &mv) in candidates.iter().enumerate() {
+        // The cap limits optional forcing moves, not compulsory replies. Normal
+        // node/deadline limits still apply; every extension consumes a board cell.
+        if caro_defense {
+            forcing.extend(caro_replies.into_iter().map(|mv| (mv, 900_000)));
+        }
+        for (i, &mv) in candidates.iter().enumerate().filter(|_| !caro_defense) {
             let opp_kind = opp_kinds[i];
             let my_kind = classify_move_fast(board, mv, board.side_to_move);
 
@@ -3769,7 +3808,7 @@ impl Searcher {
                 continue;
             }
 
-            if opp_has_five {
+            if must_reply {
                 // Must-block ????븐뼐???????????븐뼔???? ??? Five ????븐뼐??????⑤슢?????壤굿??띾?????????
                 if matches!(opp_kind, ThreatKind::Five) {
                     forcing.push((mv, 900_000));
@@ -3797,7 +3836,7 @@ impl Searcher {
 
         forcing.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-        let mut best = stand_pat;
+        let mut best = if must_reply { -INF } else { stand_pat };
         for &(mv, _) in &forcing {
             let make_undo_profile_start = self.profile_start();
             let profile_start = self.profile_start();
@@ -5193,3 +5232,7 @@ mod tests {
         assert_eq!(risk, DefensiveOpen4Risk::ImmediateWinningThreat);
     }
 }
+
+#[cfg(test)]
+#[path = "search_qsearch_tests.rs"]
+mod qsearch_tests;

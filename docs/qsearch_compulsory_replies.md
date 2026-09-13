@@ -59,3 +59,52 @@ No outcome-dependent retuning or additional games were used.
 This change repairs a demonstrated invalid bound. The remaining teacher-rated
 regressions require separate investigation; the correctness fix is not a claim
 that the earlier TRI-D2 performance-selection gate was passed.
+
+## Prospective strength measurement, 2026-09-13/14
+
+A separate fixed-size comparison used 200 new four-stone openings, removing
+D4-equivalent colored boards and the previous smoke-test openings. The primary
+5-second condition used the first 100 openings and both engine colors (200 games);
+the secondary 1-second condition used all 200 openings (400 games). Both used
+Freestyle, default root VCT, identical embedded assets, four concurrent game
+workers, fresh processes per game, and a 180-ply cap. The existing 150 ms margin
+gave effective search budgets of 4,850 and 850 ms. No outcome-based stopping,
+retuning, or pooling with the previous experiments was used.
+
+| Requested time | Corrected W/D/L | Score rate | Paired bootstrap 95% interval | Exact paired two-sided p |
+|---|---:|---:|---:|---:|
+| 5 seconds (primary) | 100 / 2 / 98 | 50.50% | 50.00–51.50% | 1.000 |
+| 1 second (secondary) | 201 / 0 / 199 | 50.25% | 49.00–51.50% | 1.000 |
+
+Each opening's color-swapped games form one statistical cluster. The intervals
+use 50,000 whole-pair bootstrap replicates. The exact test randomizes the signs
+of pair differences, conditional on their magnitudes. Neither condition met
+the registered improvement criterion (interval lower bound above 50% and p<0.05).
+
+Only 1 of 100 primary pairs was nonneutral: corrected won both games at seed
+913113. Of the other 99 pairs, 98 split wins and one had two capped draws
+(seed 913125). At 1 second, corrected swept four pairs and baseline swept three;
+193 pairs were neutral. Entire move histories matched across engine color swaps
+in 97/100 primary pairs and 176/200 secondary pairs.
+
+With so few nonneutral pairs, the narrow bootstrap interval must not be read as
+proof that regressions are impossible. A separately labeled post-hoc sensitivity
+bound used the exact 95% upper bound U on nonneutral-pair probability and the
+conservative expected-score range 0.5 +/- U/2: 47.67–52.33% at 5 seconds and
+46.76–53.24% at 1 second. It does not replace the registered analysis.
+
+All 600 games and 18,654 engine moves passed independent legality, result,
+pairing, hash and statistics verification. There were no protocol failures,
+illegal moves, or responses exceeding the requested move time. Both draws were
+the registered 180-ply cap. The opening population was strongly favorable to
+Black; these measurements do not establish strength against other opponents or
+opening distributions.
+
+The result supports classifying this patch as a demonstrated correctness repair,
+without claiming a measured playing-strength increase. The measured code commit
+is `1a7397280fede045b3e58af83546476a37044284`; subsequent validation documentation
+does not change the measured engine code.
+
+Machine-readable conditions, per-opening scores, summaries, audit hashes and
+post-hoc sensitivity are preserved in
+[the validation record](validation/qsearch_strength_2026-09-14.json).

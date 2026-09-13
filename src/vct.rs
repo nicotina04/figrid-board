@@ -2383,11 +2383,15 @@ fn find_defenses_with_counters(
     };
     let mut counter_classify_calls = 0u64;
     let mut counter_classify_ns = 0u128;
+    // A defender's broken four can force the attacker to abandon its VCT.
+    // Include these counters even when optional attacking gap-fours are off.
+    // Keep the indexed and both classifier paths on the same defense policy.
+    const COUNTER_GAP_FOUR: bool = true;
     if let Some(index) = threat_index {
         for idx in index.forcing_moves_in_cell_order(
             board.side_to_move,
             jump_three.counter,
-            jump_three.gap_four,
+            COUNTER_GAP_FOUR,
         ) {
             if reach_mask.is_some_and(|mask| !mask.get(idx)) {
                 continue;
@@ -2426,7 +2430,7 @@ fn find_defenses_with_counters(
                 idx,
                 board.side_to_move,
                 jump_three.counter,
-                jump_three.gap_four,
+                COUNTER_GAP_FOUR,
             )
         } else {
             classify_move_rules_with_flags(
@@ -2436,7 +2440,7 @@ fn find_defenses_with_counters(
                 board.side_to_move,
                 rule_set,
                 jump_three.counter,
-                jump_three.gap_four,
+                COUNTER_GAP_FOUR,
             )
         };
         // Winning 위협뿐 아니라 Forcing(ClosedFour/OpenThree) 반격도 포함해야
@@ -2665,6 +2669,14 @@ fn tt_result_json(result: TtResult) -> &'static str {
         TtResult::Fails => "fails",
     }
 }
+
+#[cfg(test)]
+#[path = "vct_counter_regression.rs"]
+mod counter_regression;
+
+#[cfg(test)]
+#[path = "vct_followup_regression.rs"]
+mod followup_regression;
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,24 @@
 # Changes
 
+## 0.8.7 (2026-09-13)
+
+* Fix missing defender broken-four counters in VCT search. A move creating
+  `X.XXX`, `XX.XX`, or `XXX.X` can force the attacker to respond even when
+  optional attacking gap-fours are disabled. The indexed, fast, and scalar
+  counter classifiers now include these threats independently of that attack
+  option, preventing the reproduced false winning proofs.
+* Add regression coverage for three recorded counterexamples, board
+  restoration, both colors, and rotated/reflected positions. Attack generation,
+  evaluator weights, and the deployed codebook runtime are unchanged.
+* Fix builds of the optional graph and quantization census tools after the legacy engine
+  removal by dropping its obsolete source references. Historical provenance
+  snapshots and census calculations are unchanged.
+* This is a correctness fix. A separate 256-game comparison using identical
+  research Mix9svq weights finished 129 wins and 127 losses for the fix
+  (50.39%; paired 95% interval 49.22%–51.56%). It did not establish a
+  playing-strength improvement and is not a measurement of the deployed
+  CB2Vec evaluator.
+
 ## 0.8.6 (2026-08-25)
 
 * **Directional-delta codebook materialization is now the default** for

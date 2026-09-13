@@ -31,7 +31,9 @@ const CANONICAL_BUILD: &str =
     "cargo build --release --locked --features codebook-eval --bin cb-gh1-graph-census";
 #[cfg(test)]
 const FROZEN_CARGO_LOCK_SNAPSHOT: &str = "audit/provenance/figrid-0.8.2-Cargo.lock.snapshot";
-const CRITICAL_SOURCES: [(&str, &[u8]); 44] = [
+// The removed legacy engine is not a dependency of this census. Track the
+// current compiled sources; retain the explicit historical snapshots below.
+const CRITICAL_SOURCES: [(&str, &[u8]); 36] = [
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
     (
         "Cargo.lock",
@@ -64,29 +66,6 @@ const CRITICAL_SOURCES: [(&str, &[u8]); 44] = [
     ),
     ("src/features.rs", include_bytes!("../src/features.rs")),
     ("src/heuristic.rs", include_bytes!("../src/heuristic.rs")),
-    (
-        "src/legacy/evaluator.rs",
-        include_bytes!("../src/legacy/evaluator.rs"),
-    ),
-    ("src/legacy/mod.rs", include_bytes!("../src/legacy/mod.rs")),
-    ("src/legacy/rec.rs", include_bytes!("../src/legacy/rec.rs")),
-    (
-        "src/legacy/rec_base.rs",
-        include_bytes!("../src/legacy/rec_base.rs"),
-    ),
-    (
-        "src/legacy/rec_checker.rs",
-        include_bytes!("../src/legacy/rec_checker.rs"),
-    ),
-    ("src/legacy/row.rs", include_bytes!("../src/legacy/row.rs")),
-    (
-        "src/legacy/rule.rs",
-        include_bytes!("../src/legacy/rule.rs"),
-    ),
-    (
-        "src/legacy/tree.rs",
-        include_bytes!("../src/legacy/tree.rs"),
-    ),
     ("src/lib.rs", include_bytes!("../src/lib.rs")),
     (
         "src/pattern_dense.rs",

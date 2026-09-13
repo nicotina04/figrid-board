@@ -43,6 +43,8 @@ const REGISTERED_RUSTC_COMMIT: &str = "commit-hash: 6b00bc3880198600130e1cf62b8f
 const REGISTERED_LLVM: &str = "LLVM version: 20.1.5";
 const REGISTERED_CARGO: &str = "cargo 1.88.0 (873a06493 2025-05-10)";
 
+// The removed legacy engine is not a dependency of this census. Track the
+// current compiled sources; retain the explicit historical snapshots below.
 const CRITICAL_SOURCES: &[(&str, &[u8])] = &[
     ("Cargo.toml", include_bytes!("../Cargo.toml")),
     (
@@ -76,29 +78,6 @@ const CRITICAL_SOURCES: &[(&str, &[u8])] = &[
     ),
     ("src/features.rs", include_bytes!("../src/features.rs")),
     ("src/heuristic.rs", include_bytes!("../src/heuristic.rs")),
-    (
-        "src/legacy/evaluator.rs",
-        include_bytes!("../src/legacy/evaluator.rs"),
-    ),
-    ("src/legacy/mod.rs", include_bytes!("../src/legacy/mod.rs")),
-    ("src/legacy/rec.rs", include_bytes!("../src/legacy/rec.rs")),
-    (
-        "src/legacy/rec_base.rs",
-        include_bytes!("../src/legacy/rec_base.rs"),
-    ),
-    (
-        "src/legacy/rec_checker.rs",
-        include_bytes!("../src/legacy/rec_checker.rs"),
-    ),
-    ("src/legacy/row.rs", include_bytes!("../src/legacy/row.rs")),
-    (
-        "src/legacy/rule.rs",
-        include_bytes!("../src/legacy/rule.rs"),
-    ),
-    (
-        "src/legacy/tree.rs",
-        include_bytes!("../src/legacy/tree.rs"),
-    ),
     ("src/lib.rs", include_bytes!("../src/lib.rs")),
     (
         "src/pattern_dense.rs",

@@ -1,5 +1,17 @@
 # Changes
 
+## 0.8.8 (2026-09-16)
+
+* Speed up `Board::candidate_moves` with precomputed neighborhood bitmasks,
+  preserving the complete candidate order, public Board layout, and evaluator.
+  The existing incremental candidate-frontier path remains unchanged.
+* Verify 180,000 make/undo candidate vectors, 1,200 root replay records, and
+  12 complete fixed-node games with root VCT disabled. Library/product tests
+  pass with default and all features. See [the audit](docs/candidate_mask_0_8_8.md).
+* Non-frontier search took about 4–5% less time in the measured corpus.
+  The shipped pbrain already uses the frontier and showed no demonstrated
+  speed improvement. This release makes no playing-strength claim.
+
 ## 0.8.7 (2026-09-13)
 
 * Fix missing defender broken-four counters in VCT search. A move creating

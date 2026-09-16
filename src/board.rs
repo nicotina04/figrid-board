@@ -61,6 +61,32 @@ pub struct BitBoard {
     pub hi: u128,
 }
 
+// Clipped radius-two neighborhoods. Enumerating stones and each newly seen
+// neighborhood in ascending order preserves the legacy candidate tie-breaking.
+const CANDIDATE_NEIGHBOURS: [BitBoard; NUM_CELLS] = {
+    let mut masks = [BitBoard { lo: 0, hi: 0 }; NUM_CELLS];
+    let mut cell = 0;
+    while cell < NUM_CELLS {
+        let mut row = 0;
+        while row < BOARD_SIZE {
+            let mut col = 0;
+            while col < BOARD_SIZE {
+                if (row as i32 - (cell / BOARD_SIZE) as i32).abs() <= 2
+                    && (col as i32 - (cell % BOARD_SIZE) as i32).abs() <= 2
+                {
+                    let idx = row * BOARD_SIZE + col;
+                    if idx < 128 { masks[cell].lo |= 1u128 << idx; }
+                    else { masks[cell].hi |= 1u128 << (idx - 128); }
+                }
+                col += 1;
+            }
+            row += 1;
+        }
+        cell += 1;
+    }
+    masks
+};
+
 impl BitBoard {
     pub const EMPTY: Self = Self { lo: 0, hi: 0 };
 
@@ -774,6 +800,7 @@ impl Board {
         state
     }
 
+    #[cfg(test)]
     fn candidate_moves_legacy(&self) -> Vec<Move> {
         let occupied = self.black.or(&self.white);
         let mut seen = [false; NUM_CELLS];
@@ -812,7 +839,17 @@ impl Board {
             // 첫 수: 천원
             return vec![to_idx(7, 7)];
         }
-        return self.candidate_moves_legacy();
+        let occupied = self.black.or(&self.white);
+        let mut seen = occupied;
+        let mut moves = Vec::with_capacity(64);
+        for cell in occupied.iter_ones() {
+            let mask = CANDIDATE_NEIGHBOURS[cell];
+            let fresh = BitBoard { lo: mask.lo & !seen.lo, hi: mask.hi & !seen.hi };
+            moves.extend(fresh.iter_ones());
+            seen.lo |= mask.lo;
+            seen.hi |= mask.hi;
+        }
+        moves
     }
 
     fn candidate_moves_from_frontier(&self, frontier: &CandidateFrontierState) -> Vec<Move> {
@@ -1646,6 +1683,29 @@ mod tests {
         let board = Board::new();
         let moves = board.candidate_moves();
         assert_eq!(moves, vec![to_idx(7, 7)]);
+    }
+
+    #[test]
+    fn candidate_masks_preserve_legacy_order_through_make_undo() {
+        let mut rng = 9168200u64;
+        for _ in 0..400 {
+            let mut cells: Vec<_> = (0..NUM_CELLS).collect();
+            for i in (1..NUM_CELLS).rev() {
+                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                cells.swap(i, rng as usize % (i + 1));
+            }
+            let mut board = Board::new();
+            for cell in cells {
+                board.make_move(cell);
+                assert_eq!(board.candidate_moves(), board.candidate_moves_legacy());
+            }
+            for _ in 0..NUM_CELLS {
+                board.undo_move();
+                let expected = if board.move_count == 0 { vec![to_idx(7, 7)] }
+                    else { board.candidate_moves_legacy() };
+                assert_eq!(board.candidate_moves(), expected);
+            }
+        }
     }
 
     fn assert_candidate_frontier_matches_full_rebuild(

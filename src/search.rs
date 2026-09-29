@@ -2370,7 +2370,8 @@ impl Searcher {
                     break current;
                 }
                 if score <= alpha {
-                    // fail-low: alpha ??????                    delta = (delta * 2).min(INF / 4);
+                    // fail-low: alpha ??????
+                    delta = (delta * 2).min(INF / 4);
                     alpha = (alpha - delta).max(-INF);
                     if alpha == -INF {
                         // ?????????耀붾굝????????????full window??break???????

@@ -176,10 +176,11 @@ println!("{:?}", board.side_to_move); // Black (the side about to move)
 ```
 
 NNUE weights and the search struct are exposed for users who want to drive the engine programmatically rather than through the Piskvork protocol.
-The A2, A3, and D1 accelerators are off in a newly constructed `Searcher`;
-library callers opt in through `set_use_packed_line_windows`,
-`set_use_candidate_frontier`, and
-`set_use_codebook_directional_delta`. Enabling `codebook-eval` also activates
+The A2 and A3 accelerators are off in a newly constructed `Searcher`; library
+callers opt in through `set_use_packed_line_windows` and
+`set_use_candidate_frontier`. The D1 directional-delta path has been on by
+default since 0.8.6 (`set_use_codebook_directional_delta(false)` restores full
+refreshes). Enabling `codebook-eval` also activates
 the optional `cb2vec` dependency. Consumers that only need the generic
 codebook and reversible-journal primitives can use the standalone package
 directly.

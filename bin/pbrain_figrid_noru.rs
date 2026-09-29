@@ -74,15 +74,108 @@ fn pbrain_fixed_depth() -> bool {
     static VALUE: OnceLock<bool> = OnceLock::new();
     *VALUE.get_or_init(|| {
         std::env::var("NORU_PBRAIN_FIXED_DEPTH")
-            .map(|raw| {
-                let trimmed = raw.trim();
-                !(trimmed == "0"
-                    || trimmed.eq_ignore_ascii_case("false")
-                    || trimmed.eq_ignore_ascii_case("off")
-                    || trimmed.eq_ignore_ascii_case("no"))
-            })
+            .map(|raw| env_bool_default(&raw, false))
             .unwrap_or(false)
     })
+}
+
+/// Engine variables a release pbrain accepts. Any other non-empty `NORU_*`
+/// / `FIGRID_*` variable is a stale or misspelled switch and aborts startup
+/// (fail-closed: a removed flag must never be silently ignored in a match).
+const KNOWN_ENGINE_VARS: &[&str] = &[
+    // Model files and codebook.
+    "FIGRID_WEIGHTS",
+    "FIGRID_CODEBOOK_WEIGHTS",
+    "NORU_CODEBOOK_EVAL_SCALE",
+    "NORU_CODEBOOK_FACTORED",
+    "NORU_CODEBOOK_DIRECTIONAL_DELTA",
+    "FIGRID_WHITE_ROOT_ORDER",
+    // Search.
+    "NORU_PACKED_LINE_WINDOWS",
+    "NORU_CANDIDATE_FRONTIER",
+    "NORU_POLICY_ORDER",
+    "NORU_POLICY_REDUCE",
+    "NORU_FORCED_REPLY_RESTRICTION",
+    "NORU_PBRAIN_FIXED_DEPTH",
+    "NORU_PBRAIN_MAX_DEPTH",
+    // Tooling (profiling, tests, benches).
+    "NORU_SEARCH_PROFILE",
+    "NORU_TEST_WEIGHTS",
+    "FIGRID_BENCH_WEIGHTS",
+];
+const KNOWN_ENGINE_VAR_PREFIXES: &[&str] = &["FIGRID_VCT_"];
+
+/// Names of non-empty `NORU_*` / `FIGRID_*` variables outside the known
+/// list. Names are compared ASCII-case-insensitively (Windows env lookups
+/// are case-insensitive); empty values are ignored so wrappers can blank
+/// old variables.
+fn unknown_engine_vars() -> Vec<String> {
+    unknown_engine_var_names(
+        std::env::vars_os()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(name, _)| name.to_string_lossy().into_owned()),
+    )
+}
+
+fn unknown_engine_var_names(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut unknown: Vec<String> = names
+        .filter(|name| {
+            let upper = name.to_ascii_uppercase();
+            if !(upper.starts_with("NORU_") || upper.starts_with("FIGRID_")) {
+                return false;
+            }
+            let known = KNOWN_ENGINE_VARS.contains(&upper.as_str())
+                || KNOWN_ENGINE_VAR_PREFIXES
+                    .iter()
+                    .any(|prefix| upper.starts_with(prefix));
+            !known
+        })
+        .collect();
+    unknown.sort();
+    unknown
+}
+
+#[cfg(test)]
+mod engine_var_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_engine_vars_fail_closed_on_removed_switches() {
+        let names = [
+            "NORU_ROOT_VCT",
+            "noru_policy_order",
+            "FIGRID_CODEBOOK_EVAL",
+            "FIGRID_VCT_PROFILE",
+            "FIGRID_CODEBOOK_WEIGHTS",
+            "PATH",
+            "NORU_CANDIDATE_RANKER",
+            "NORU_CANDIDATE_FRONTIER",
+        ]
+        .map(String::from);
+        assert_eq!(
+            unknown_engine_var_names(names.into_iter()),
+            vec!["FIGRID_CODEBOOK_EVAL", "NORU_CANDIDATE_RANKER", "NORU_ROOT_VCT"]
+        );
+    }
+
+    #[test]
+    fn empty_boolean_values_mean_default() {
+        assert!(env_bool_default("", true));
+        assert!(!env_bool_default("  ", false));
+        assert!(env_bool_default("on", false));
+        assert!(!env_bool_default("off", true));
+    }
+}
+
+#[cfg(feature = "embed-weights")]
+fn weights_label() -> String {
+    "embedded".to_string()
+}
+
+#[cfg(not(feature = "embed-weights"))]
+fn weights_label() -> String {
+    std::env::var("FIGRID_WEIGHTS")
+        .unwrap_or_else(|_| "models/gomoku_v52_5stone_conv_93k.bin".into())
 }
 
 #[cfg(all(feature = "codebook-eval", feature = "cb-f1-flat-asset"))]
@@ -422,6 +515,38 @@ fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
     }))
 }
 
+/// `codebook=...; ...` part of the startup config line.
+#[cfg(feature = "codebook-eval")]
+fn codebook_config_summary(codebook: &Option<CodebookRuntimeWeights>, searcher: &Searcher) -> String {
+    let on_off = |enabled: bool| if enabled { "on" } else { "off" };
+    let (source, kernel, ids) = match codebook {
+        None => return "codebook=off".to_string(),
+        Some(CodebookRuntimeWeights::Quantized { weights, embedded }) => (
+            if *embedded {
+                "embedded".to_string()
+            } else {
+                std::env::var("FIGRID_CODEBOOK_WEIGHTS")
+                    .map(|path| path.trim().to_string())
+                    .unwrap_or_default()
+            },
+            "quantized-flat",
+            weights.num_ids(),
+        ),
+        Some(CodebookRuntimeWeights::FactoredQuantized { weights, .. }) => (
+            "embedded".to_string(),
+            "quantized-factored",
+            weights.token_count(),
+        ),
+    };
+    format!(
+        "codebook={source}; codebook_kernel={kernel}; codebook_ids={ids}; scale={}; \
+         directional_delta={}; white_root_order={}",
+        figrid_board::search::codebook_eval_scale(),
+        on_off(codebook_directional_delta_enabled()),
+        on_off(searcher.white_root_order_enabled()),
+    )
+}
+
 #[cfg(all(test, feature = "codebook-eval"))]
 mod codebook_loader_tests {
     use super::*;
@@ -632,6 +757,9 @@ struct Engine {
     weights: NnueWeights,
     #[cfg(feature = "codebook-eval")]
     codebook_weights: Option<CodebookRuntimeWeights>,
+    /// One-line effective configuration, announced before the first START
+    /// reply.
+    config_line: String,
     searcher: Searcher,
     info: ProtocolInfo,
     started: bool,
@@ -654,12 +782,32 @@ impl Engine {
         searcher.set_use_codebook_directional_delta(codebook_directional_delta_enabled());
         searcher.set_use_candidate_frontier(candidate_frontier_enabled());
         searcher.set_use_packed_line_windows(packed_line_windows_enabled());
+        // Resolving the search switches here reports a bad NORU_POLICY_ORDER
+        // (or NORU_POLICY_REDUCE without a table) at startup instead of at the
+        // first search.
+        let search_config = figrid_board::search::runtime_config_summary()?;
+        #[cfg(feature = "codebook-eval")]
+        let codebook_config = codebook_config_summary(&codebook_weights, &searcher);
+        #[cfg(not(feature = "codebook-eval"))]
+        let codebook_config = "codebook=unsupported".to_string();
+        let on_off = |enabled: bool| if enabled { "on" } else { "off" };
+        let config_line = format!(
+            "version={}; weights={}; {codebook_config}; packed_line_windows={}; \
+             candidate_frontier={}; {search_config}; pbrain_fixed_depth={}; pbrain_max_depth={}",
+            env!("CARGO_PKG_VERSION"),
+            weights_label(),
+            on_off(packed_line_windows_enabled()),
+            on_off(candidate_frontier_enabled()),
+            on_off(pbrain_fixed_depth()),
+            pbrain_max_depth(),
+        );
         let board = Board::new();
         Ok(Self {
             board,
             weights,
             #[cfg(feature = "codebook-eval")]
             codebook_weights,
+            config_line,
             searcher,
             info: ProtocolInfo::new(),
             started: false,
@@ -762,6 +910,18 @@ fn idx_to_xy(idx: usize) -> (u8, u8) {
 }
 
 fn main() {
+    // Fail closed on stale or misspelled switches before anything reads the
+    // environment or the manager sends a command.
+    let unknown = unknown_engine_vars();
+    if !unknown.is_empty() {
+        let mut stdout = io::stdout().lock();
+        for name in &unknown {
+            writeln!(stdout, "ERROR unknown engine variable {name}").ok();
+        }
+        stdout.flush().ok();
+        std::process::exit(2);
+    }
+
     let mut engine = match Engine::new() {
         Ok(e) => e,
         Err(e) => {
@@ -774,6 +934,7 @@ fn main() {
     let mut stdout = io::stdout().lock();
     let mut reader = stdin.lock();
     let mut line = String::new();
+    let mut config_announced = false;
 
     loop {
         line.clear();
@@ -815,6 +976,12 @@ fn main() {
                     .board
                     .set_rule_set(engine.info.rule_set().unwrap_or(RuleSet::Freestyle));
                 engine.started = true;
+                // Same shape as the per-move `MESSAGE Speed ...` telemetry: a
+                // protocol-legal MESSAGE ahead of the reply, once per process.
+                if !config_announced {
+                    writeln!(stdout, "MESSAGE config: {}", engine.config_line).ok();
+                    config_announced = true;
+                }
                 writeln!(stdout, "OK").ok();
             }
             "BEGIN" => {

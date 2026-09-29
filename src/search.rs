@@ -48,6 +48,10 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|raw| {
             let trimmed = raw.trim();
+            // An empty value means "unset" (wrappers blank variables to clear them).
+            if trimmed.is_empty() {
+                return default;
+            }
             !(trimmed == "0"
                 || trimmed.eq_ignore_ascii_case("false")
                 || trimmed.eq_ignore_ascii_case("off")
@@ -229,6 +233,30 @@ fn forced_restriction_enabled_by_env() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("NORU_FORCED_REPLY_RESTRICTION", false))
 }
 
+/// Resolves every env-driven search switch now (instead of lazily at the
+/// first search) and returns their effective state as `key=value` pairs
+/// joined by `"; "`. A set-but-invalid `NORU_POLICY_ORDER` or a
+/// `NORU_POLICY_REDUCE` without a table is reported as `Err` here rather
+/// than panicking mid-game.
+pub fn runtime_config_summary() -> Result<String, String> {
+    let policy_order = match policy_order_table_init() {
+        Ok(None) => "off".to_string(),
+        Ok(Some((path, table))) => match table.desat_k() {
+            Some(k) => format!("{path} (desat k={k:.4})"),
+            None => format!("{path} (desat none)"),
+        },
+        Err(e) => return Err(e.clone()),
+    };
+    let policy_reduce = policy_reduce_init().clone()?;
+    let on_off = |b: bool| if b { "on" } else { "off" };
+    Ok(format!(
+        "policy_order={policy_order}; policy_reduce={}; forced_reply_restriction={}; search_profile={}",
+        on_off(policy_reduce),
+        on_off(forced_restriction_enabled_by_env()),
+        on_off(search_profile_enabled()),
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchThreatFieldMode {
     Off,
@@ -239,8 +267,10 @@ enum SearchThreatFieldMode {
 #[cfg(feature = "codebook-eval")]
 const DEFAULT_CODEBOOK_EVAL_SCALE: f32 = 15.720162;
 
+/// Effective codebook eval scale (`NORU_CODEBOOK_EVAL_SCALE` if it parses
+/// to a finite positive float, else the built-in default).
 #[cfg(feature = "codebook-eval")]
-fn codebook_eval_scale() -> f32 {
+pub fn codebook_eval_scale() -> f32 {
     static VALUE: OnceLock<f32> = OnceLock::new();
     *VALUE.get_or_init(|| {
         std::env::var("NORU_CODEBOOK_EVAL_SCALE")

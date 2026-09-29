@@ -1,5 +1,75 @@
 # Changes
 
+## 0.9.0 (2026-09-30)
+
+### Breaking
+
+* Removed closed, default-off experiment stacks together with their
+  environment variables and modules: the root-candidate stack
+  (`candidate_local_ensemble`, `candidate_ranker`, `codebook_sidecar`,
+  `relation_fusion_gate`, `relation_lite`, and the public `rq423_root_accept`
+  module; `NORU_CANDIDATE_LOCAL_*`, `NORU_CANDIDATE_RANKER*`,
+  `NORU_MULTI_HEAD_SELECTOR`, `NORU_RQ423_*`, `NORU_RELATION_LITE_*`,
+  `NORU_RELATION_FUSION_*`, `NORU_DEF_RELATION_*`, `NORU_CODEBOOK_SIDECAR`,
+  `NORU_CODEBOOK_SCORE_MODE`, `NORU_CODEBOOK_SCORE_SCALE`,
+  `NORU_CODEBOOK_MIN_PLY`, `NORU_CODEBOOK_ROOT_*`), relation UE features
+  (`NORU_RELATION_UE`; `features::RELATION_UE_*`,
+  `features::relation_ue_pair_index`, `features::relation_ue_multi_index`),
+  the defensive open-four probe (`NORU_DEFENSIVE_OPEN4_PROBE*`), and the root
+  defensive VCT veto (`NORU_ROOT_DEFENSIVE_VCT_VETO*`).
+* Removed `Searcher::audit_root_candidates`, `search::RootSearchAudit`, and
+  `search::RootCandidateAudit`, and the `relation-lite-val`,
+  `relation-root-audit`, and `rq423-feature-dump` binaries.
+* Removed switches whose default was the only behavior in use; that default
+  is now hardcoded: `NORU_ROOT_VCT` (root VCT always runs),
+  `NORU_WEAK_ATTACK_CAP` / `NORU_WEAK_ATTACK_CAP_ROOT_ONLY` (no cap),
+  `NORU_FIVE_STONE`, `NORU_CONV_KERNELS`, and `NORU_NO_COMPOUND` (all NNUE
+  feature sections always emitted), and the threat-field / staged move-picker
+  environment switches (`NORU_USE_THREAT_FIELD`, `NORU_USE_LAZY_THREAT_FIELD`,
+  `NORU_STRESS_THREAT_FIELD`, `NORU_USE_TAIL_THREAT_MATERIALIZE`,
+  `NORU_USE_MOVE_PICKER`; the `Searcher::set_use_*` setters remain).
+* `pbrain-figrid` always uses the quantized codebook kernel
+  (`FIGRID_CODEBOOK_QUANT` / `NORU_CODEBOOK_EVAL_QUANT` removed), and
+  `FIGRID_CODEBOOK_WEIGHTS` is the single codebook loader knob
+  (`FIGRID_CODEBOOK_EVAL`, `NORU_CODEBOOK_EVAL`, and
+  `NORU_CODEBOOK_EVAL_MODEL` removed; use `FIGRID_CODEBOOK_WEIGHTS=off` or a
+  path instead).
+* `pbrain-figrid` fails closed: any non-empty `NORU_*` / `FIGRID_*` variable
+  outside its known list prints `ERROR unknown engine variable <NAME>` and
+  exits with status 2. An empty value now means "default" for boolean
+  switches (previously an empty value enabled some of them).
+
+### Added
+
+* Full-vocabulary codebook models: the untruncated 199,827-id pattern space
+  (`pattern_table::FULL_PATTERN_NUM_IDS`, `full_ids_for_cell`,
+  `full_swap_id`, `warm_full_vocab`) next to the legacy 4,266-id table. Codebook
+  weights of either size load, quantize, and evaluate on both the float and
+  the quantized incremental path, including the directional-delta journal;
+  `CodebookWeights::num_ids`, `is_full_vocab`, and
+  `deterministic_with_num_ids`. Legacy models evaluate bit-identically.
+* NGCB1 binary codebook weight format (`CodebookWeights::from_ngcb1_bytes`,
+  `to_ngcb1_bytes`, and `from_bytes_auto`, which detects NGCB1 or JSON), used
+  by `pbrain-figrid` for external models. New `ngcb-convert` and
+  `t1-eval-dump` (bit-exact static-eval dump) binaries.
+* Opt-in search features, all off by default: policy-table quiet-move
+  ordering (`NORU_POLICY_ORDER`, legacy or full-vocabulary `PCB1v1` tables,
+  with order-preserving desaturation at load), policy-rank reductions
+  (`NORU_POLICY_REDUCE`), and the sound forced-reply restriction
+  (`NORU_FORCED_REPLY_RESTRICTION`, `Searcher::set_use_forced_restriction`)
+  with the new `p4r0_census` module and `p4r0-forced-census` binary.
+* `pbrain-figrid` announces its effective configuration once as a
+  `MESSAGE config: ...` line before the first `START` reply and reports an
+  invalid policy table at startup. New `search::runtime_config_summary`;
+  `search::codebook_eval_scale` is now public.
+
+### Fixed
+
+* Aspiration windows in `Searcher::search` widen again on fail-low: the
+  window-doubling statement had been lost inside a comment, so fail-low
+  re-searches stepped by a constant margin. The codebook search paths were
+  not affected.
+
 ## 0.8.8 (2026-09-16)
 
 * Speed up `Board::candidate_moves` with precomputed neighborhood bitmasks,

@@ -104,11 +104,15 @@ Add `target/release/pbrain-figrid` (or `.exe` on Windows) to Piskvork as an AI p
 
 If you build without `embed-weights`, set `FIGRID_WEIGHTS=path/to/weights.bin`
 or place the file at `./models/` so the binary can locate the ordering weights
-at startup. In a `codebook-eval` build,
-`FIGRID_CODEBOOK_EVAL=off` or `FIGRID_CODEBOOK_WEIGHTS=off` disables the
-codebook leaf evaluator and returns to the v52-lineage NNUE leaf evaluator.
-This fallback is different from the flat i16 representation used by the
-normal codebook runtime.
+at startup. In a `codebook-eval` build, `FIGRID_CODEBOOK_WEIGHTS` is the
+single codebook knob: unset loads the embedded codebook, a path loads that
+model (JSON or the NGCB1 binary format, detected by content, with either the
+legacy 4,266-id or the full 199,827-id pattern vocabulary), and
+`off`/`0`/`false`/`no`/empty disables the codebook leaf evaluator and returns
+to the v52-lineage NNUE leaf evaluator. This fallback is different from the
+flat i16 representation used by the normal codebook runtime. The codebook
+always runs through the quantized kernel; `NORU_CODEBOOK_EVAL_SCALE=<float>`
+overrides the eval scale.
 
 The embedded artifact uses compact factored storage, but direct factored
 evaluation is not the default. Leave `NORU_CODEBOOK_FACTORED` unset or set it
@@ -118,8 +122,7 @@ the 0.8.3 audit measured wall ratios `1.038437` with VCT off and `1.012149`
 with product VCT on, so it was not promoted.
 
 `FIGRID_WHITE_ROOT_ORDER` accepts `auto` (default), `on`, or `off`. Explicit
-`on` fails closed unless the embedded quantized codebook is active and no
-other root rank/replace/veto hook is configured.
+`on` fails closed unless the embedded quantized codebook is active.
 
 The state-update optimizations have independent rollback switches:
 
@@ -130,11 +133,37 @@ The state-update optimizations have independent rollback switches:
   for the quantized codebook evaluator instead of the 0.8.3 directional
   delta journal.
 
+Opt-in search switches (all off by default):
+
+- `NORU_POLICY_ORDER=path/to/table.bin` ranks quiet moves with a learned
+  pattern-conditioned policy table (`PCB1v1` format, legacy or full
+  vocabulary). Threat tiers and killers keep precedence. Tables whose scores
+  could saturate the ordering band are rescaled once at load.
+- `NORU_POLICY_REDUCE=on` (requires `NORU_POLICY_ORDER`) adds policy-rank late
+  move reductions and an earlier late-move-pruning cutoff.
+- `NORU_FORCED_REPLY_RESTRICTION=on` searches only the rules-determined reply
+  when the opponent threatens an immediate five (Freestyle and Standard).
+
+An empty value means "default" for every boolean switch. `pbrain-figrid`
+fails closed on stale or misspelled switches: any non-empty `NORU_*` /
+`FIGRID_*` variable outside its known list (the variables above plus
+`NORU_PBRAIN_FIXED_DEPTH`, `NORU_PBRAIN_MAX_DEPTH`, `NORU_SEARCH_PROFILE`,
+`NORU_TEST_WEIGHTS`, `FIGRID_BENCH_WEIGHTS`, and `FIGRID_VCT_*`) makes it print
+`ERROR unknown engine variable <NAME>` and exit. The effective configuration
+is announced once as a `MESSAGE config: ...` line before the first `START`
+reply.
+
+Model tools (with `codebook-eval`): `ngcb-convert IN.json OUT.ngcb` converts a
+JSON codebook to NGCB1 with a bit-exact round-trip check, and
+`FIGRID_CODEBOOK_WEIGHTS=<model> t1-eval-dump --input games.jsonl --output
+dump.csv [--stride N]` writes a bit-exact static-eval dump
+(`game_id,ply,value_bits`) for comparing builds.
+
 ### Use as a library
 
 ```toml
 [dependencies]
-figrid-board = "0.8"
+figrid-board = "0.9"
 ```
 
 ```rust

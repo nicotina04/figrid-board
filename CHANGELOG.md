@@ -1,5 +1,14 @@
 # Changes
 
+## 0.9.1 (2026-09-30)
+
+### Fixed
+
+* `pbrain-figrid` now answers `START` with `OK` as its first line and prints the
+  one-time `MESSAGE config:` line after it. 0.9.0 printed the config message
+  first, which broke managers and harnesses that read the `START` reply
+  strictly.
+
 ## 0.9.0 (2026-09-30)
 
 ### Breaking

@@ -1,6 +1,6 @@
 [package]
 name = "figrid-board"
-version = "0.9.0"
+version = "0.9.1"
 authors = [
     "Hogyung Choi <devherdson@gmail.com>",
 ]

@@ -976,13 +976,14 @@ fn main() {
                     .board
                     .set_rule_set(engine.info.rule_set().unwrap_or(RuleSet::Freestyle));
                 engine.started = true;
-                // Same shape as the per-move `MESSAGE Speed ...` telemetry: a
-                // protocol-legal MESSAGE ahead of the reply, once per process.
+                // The reply to START must be the first line: managers (and
+                // harnesses) read OK strictly. The config MESSAGE follows it,
+                // once per process.
+                writeln!(stdout, "OK").ok();
                 if !config_announced {
                     writeln!(stdout, "MESSAGE config: {}", engine.config_line).ok();
                     config_announced = true;
                 }
-                writeln!(stdout, "OK").ok();
             }
             "BEGIN" => {
                 if !engine.started {

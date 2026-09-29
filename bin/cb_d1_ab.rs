@@ -185,16 +185,10 @@ fn is_figrid(name: &str) -> bool {
     name.to_ascii_lowercase().contains("figrid")
 }
 
+/// Root VCT is unconditional since 0.9.0 (the `NORU_ROOT_VCT` switch was
+/// removed); the field is kept so reports stay comparable.
 fn root_vct_enabled() -> bool {
-    std::env::var("NORU_ROOT_VCT")
-        .map(|raw| {
-            let value = raw.trim();
-            !(value == "0"
-                || value.eq_ignore_ascii_case("false")
-                || value.eq_ignore_ascii_case("off")
-                || value.eq_ignore_ascii_case("no"))
-        })
-        .unwrap_or(true)
+    true
 }
 
 fn main() -> Result<(), String> {

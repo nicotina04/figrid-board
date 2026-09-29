@@ -54,20 +54,8 @@ const CRITICAL_SOURCES: &[(&str, &[u8])] = &[
     ("src/board.rs", include_bytes!("../src/board.rs")),
     ("src/book.rs", include_bytes!("../src/book.rs")),
     (
-        "src/candidate_local_ensemble.rs",
-        include_bytes!("../src/candidate_local_ensemble.rs"),
-    ),
-    (
-        "src/candidate_ranker.rs",
-        include_bytes!("../src/candidate_ranker.rs"),
-    ),
-    (
         "src/codebook_eval.rs",
         include_bytes!("../src/codebook_eval.rs"),
-    ),
-    (
-        "src/codebook_sidecar.rs",
-        include_bytes!("../src/codebook_sidecar.rs"),
     ),
     ("src/coord.rs", include_bytes!("../src/coord.rs")),
     ("src/d4_hash.rs", include_bytes!("../src/d4_hash.rs")),
@@ -84,20 +72,12 @@ const CRITICAL_SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("../src/pattern_dense.rs"),
     ),
     (
+        "src/p4r0_census.rs",
+        include_bytes!("../src/p4r0_census.rs"),
+    ),
+    (
         "src/pattern_table.rs",
         include_bytes!("../src/pattern_table.rs"),
-    ),
-    (
-        "src/relation_fusion_gate.rs",
-        include_bytes!("../src/relation_fusion_gate.rs"),
-    ),
-    (
-        "src/relation_lite.rs",
-        include_bytes!("../src/relation_lite.rs"),
-    ),
-    (
-        "src/rq423_root_accept.rs",
-        include_bytes!("../src/rq423_root_accept.rs"),
     ),
     ("src/search.rs", include_bytes!("../src/search.rs")),
     (

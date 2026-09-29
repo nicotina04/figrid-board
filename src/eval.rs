@@ -7,12 +7,10 @@ use crate::features::{
     MAX_ACTIVE_FEATURES, broken_index, compound_index, conv_k3_bucket, conv_kernel_index,
     count_bucket, cross_line_hash, cross_line_index, density_index, five_stone_index,
     five_stone_swap_perspective, last_move_index, length_bucket, local_density_bucket,
-    lp_rich_index, open_bucket, phase_bucket, phase_index, ps_index, relation_ue_multi_index,
-    relation_ue_pair_index, zone_for,
+    lp_rich_index, open_bucket, phase_bucket, phase_index, ps_index, zone_for,
 };
 use crate::heuristic::{DIR, scan_line};
 use noru::network::{Accumulator, FeatureDelta, NnueWeights, forward};
-use std::sync::OnceLock;
 
 /// Incremental update시 한 수로 인해 feature가 바뀔 가능성이 있는 cell 집합 반환.
 ///
@@ -37,27 +35,6 @@ pub(crate) fn affected_cells(mv: usize) -> Vec<usize> {
     cells
 }
 
-static COMPOUND_ENABLED: OnceLock<bool> = OnceLock::new();
-
-fn compound_enabled() -> bool {
-    *COMPOUND_ENABLED.get_or_init(|| std::env::var("NORU_NO_COMPOUND").is_err())
-}
-
-static RELATION_UE_ENABLED: OnceLock<bool> = OnceLock::new();
-
-fn relation_ue_enabled() -> bool {
-    *RELATION_UE_ENABLED.get_or_init(|| {
-        std::env::var("NORU_RELATION_UE")
-            .map(|v| {
-                matches!(
-                    v.as_str(),
-                    "1" | "true" | "TRUE" | "on" | "ON" | "yes" | "YES"
-                )
-            })
-            .unwrap_or(false)
-    })
-}
-
 /// 보드 상태에서 활성 피처를 추출.
 ///
 /// cell-centric 구조: 각 cell에서 `features_from_cell`로 A/B/C/E/F 섹션의
@@ -73,11 +50,9 @@ pub fn compute_active_features(board: &Board) -> (Vec<usize>, Vec<usize>) {
     let mut stm = Vec::with_capacity(MAX_ACTIVE_FEATURES);
     let mut nstm = Vec::with_capacity(MAX_ACTIVE_FEATURES);
 
-    let compound_on = compound_enabled();
-
     // A/B/C/E/F/G: cell 단위 추출.
     for sq in my_bb.iter_ones().chain(opp_bb.iter_ones()) {
-        features_from_cell(board, sq, compound_on, &mut stm, &mut nstm);
+        features_from_cell(board, sq, &mut stm, &mut nstm);
     }
 
     // D: Density — global + last_move 기반 local.
@@ -97,7 +72,6 @@ pub fn compute_active_features(board: &Board) -> (Vec<usize>, Vec<usize>) {
 pub(crate) fn features_from_cell(
     board: &Board,
     sq: usize,
-    compound_on: bool,
     stm: &mut Vec<usize>,
     nstm: &mut Vec<usize>,
 ) {
@@ -135,17 +109,15 @@ pub(crate) fn features_from_cell(
     }
 
     // C: Compound — 4방향 threats 수집 후 combo (단일 위협은 None 반환됨)
-    if compound_on {
-        let mut threats = [Threat::None; 4];
-        for (di, &(dr, dc)) in DIR.iter().enumerate() {
-            let info = scan_line(stones, opponent, row, col, dr, dc);
-            let open = info.open_front as u32 + info.open_back as u32;
-            threats[di] = classify_threat(info.count, open);
-        }
-        if let Some(combo) = compound_combo_id(&threats) {
-            stm.push(compound_index(persp_mine, combo));
-            nstm.push(compound_index(persp_opp, combo));
-        }
+    let mut threats = [Threat::None; 4];
+    for (di, &(dr, dc)) in DIR.iter().enumerate() {
+        let info = scan_line(stones, opponent, row, col, dr, dc);
+        let open = info.open_front as u32 + info.open_back as u32;
+        threats[di] = classify_threat(info.count, open);
+    }
+    if let Some(combo) = compound_combo_id(&threats) {
+        stm.push(compound_index(persp_mine, combo));
+        nstm.push(compound_index(persp_opp, combo));
     }
 
     // E: Cross-line 3×3 window (stm-perspective + nstm-perspective)
@@ -166,34 +138,32 @@ pub(crate) fn features_from_cell(
         );
     }
 
-    // I: 5-stone window (env-gated NORU_FIVE_STONE=1). 이 cell anchor로 4방향
+    // I: 5-stone window (always on; v52 weights 필수). 이 cell anchor로 4방향
     // 5-cell 윈도우 emit. 보드 벗어나면 skip. own↔opp swap을 pattern id에서
     // 적용해 stm/nstm 양 perspective 표현. 활성 시 v52 weights 호환.
-    if five_stone_enabled() {
-        for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
-            let er = row + dr * 4;
-            let ec = col + dc * 4;
-            if er < 0 || er >= BOARD_SIZE as i32 || ec < 0 || ec >= BOARD_SIZE as i32 {
-                continue;
-            }
-            let mut pat: usize = 0;
-            for k in 0..5i32 {
-                let r = (row + dr * k) as usize;
-                let c = (col + dc * k) as usize;
-                let cell = r * BOARD_SIZE + c;
-                let digit = if my_bb.get(cell) {
-                    1
-                } else if opp_bb.get(cell) {
-                    2
-                } else {
-                    0
-                };
-                pat = pat * 3 + digit;
-            }
-            stm.push(five_stone_index(persp_mine, dir_idx, pat));
-            let pat_swapped = five_stone_swap_perspective(pat);
-            nstm.push(five_stone_index(persp_opp, dir_idx, pat_swapped));
+    for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
+        let er = row + dr * 4;
+        let ec = col + dc * 4;
+        if er < 0 || er >= BOARD_SIZE as i32 || ec < 0 || ec >= BOARD_SIZE as i32 {
+            continue;
         }
+        let mut pat: usize = 0;
+        for k in 0..5i32 {
+            let r = (row + dr * k) as usize;
+            let c = (col + dc * k) as usize;
+            let cell = r * BOARD_SIZE + c;
+            let digit = if my_bb.get(cell) {
+                1
+            } else if opp_bb.get(cell) {
+                2
+            } else {
+                0
+            };
+            pat = pat * 3 + digit;
+        }
+        stm.push(five_stone_index(persp_mine, dir_idx, pat));
+        let pat_swapped = five_stone_swap_perspective(pat);
+        nstm.push(five_stone_index(persp_opp, dir_idx, pat_swapped));
     }
 }
 
@@ -240,39 +210,8 @@ fn push_density_features(
     stm.push(phase_idx);
     nstm.push(phase_idx);
 
-    // J: Conv kernels (env-gated NORU_CONV_KERNELS=1). v52 weights 호환.
-    if conv_kernels_enabled() {
-        push_conv_kernel_features(my_bb, opp_bb, stm, nstm);
-    }
-
-    // K: Relation UE candidate summary. Off by default until relation-UE
-    // weights are trained; old weights have random values in this reserved tail.
-    if relation_ue_enabled() {
-        push_relation_ue_features(board, my_bb, opp_bb, stm, nstm);
-    }
-}
-
-/// Whether to emit `I` (5-stone window) features. **ON by default for figrid
-/// 0.6.8+** since the bundled v52 weights are trained with these features.
-/// Allow disabling via `NORU_FIVE_STONE=0` for ablation testing only.
-fn five_stone_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("NORU_FIVE_STONE")
-            .map(|v| v != "0")
-            .unwrap_or(true)
-    })
-}
-
-/// Whether to emit `J` (conv kernel) features. **ON by default for figrid
-/// 0.6.8+** for the same reason as 5-stone above.
-fn conv_kernels_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("NORU_CONV_KERNELS")
-            .map(|v| v != "0")
-            .unwrap_or(true)
-    })
+    // J: Conv kernels (always on; v52 weights 필수).
+    push_conv_kernel_features(my_bb, opp_bb, stm, nstm);
 }
 
 /// J: Conv kernel emit. K1 (3×3 own), K2 (3×3 opp), K3 (5×5 diamond own).
@@ -352,74 +291,6 @@ fn push_conv_kernel_features(
 ///
 /// `perspective_mine` / `perspective_opp`: stm 관점에서 "내 돌"이 0, "상대 돌"이 1.
 #[allow(clippy::too_many_arguments)]
-fn push_relation_ue_features(
-    _board: &Board,
-    my_bb: &crate::board::BitBoard,
-    opp_bb: &crate::board::BitBoard,
-    stm: &mut Vec<usize>,
-    nstm: &mut Vec<usize>,
-) {
-    for cell in 0..NUM_CELLS {
-        if my_bb.get(cell) || opp_bb.get(cell) {
-            continue;
-        }
-
-        let (attack1, attack2) = candidate_relation_threat_buckets(my_bb, opp_bb, cell);
-        let (block1, block2) = candidate_relation_threat_buckets(opp_bb, my_bb, cell);
-        if attack1 == 0 && block1 == 0 {
-            continue;
-        }
-
-        let row = (cell / BOARD_SIZE) as i32;
-        let col = (cell % BOARD_SIZE) as i32;
-        let zone = zone_for(row, col);
-
-        stm.push(relation_ue_pair_index(0, attack1, block1, zone));
-        stm.push(relation_ue_pair_index(1, block1, attack1, zone));
-        nstm.push(relation_ue_pair_index(0, block1, attack1, zone));
-        nstm.push(relation_ue_pair_index(1, attack1, block1, zone));
-
-        if attack2 != 0 || block2 != 0 {
-            stm.push(relation_ue_multi_index(0, attack2, block2));
-            stm.push(relation_ue_multi_index(1, block2, attack2));
-            nstm.push(relation_ue_multi_index(0, block2, attack2));
-            nstm.push(relation_ue_multi_index(1, attack2, block2));
-        }
-    }
-}
-
-fn candidate_relation_threat_buckets(
-    stones: &crate::board::BitBoard,
-    opp: &crate::board::BitBoard,
-    cell: usize,
-) -> (usize, usize) {
-    let row = (cell / BOARD_SIZE) as i32;
-    let col = (cell % BOARD_SIZE) as i32;
-    let mut placed = *stones;
-    placed.set(cell);
-
-    let mut buckets = [0usize; 4];
-    for (dir_idx, &(dr, dc)) in DIR.iter().enumerate() {
-        let info = scan_line(&placed, opp, row, col, dr, dc);
-        let open = info.open_front as u32 + info.open_back as u32;
-        buckets[dir_idx] = relation_threat_bucket(classify_threat(info.count, open));
-    }
-    buckets.sort_unstable_by(|a, b| b.cmp(a));
-    (buckets[0], buckets[1])
-}
-
-#[inline]
-fn relation_threat_bucket(threat: Threat) -> usize {
-    match threat {
-        Threat::None => 0,
-        Threat::OpenTwo => 1,
-        Threat::ClosedThree => 2,
-        Threat::OpenThree => 3,
-        Threat::ClosedFour => 4,
-        Threat::OpenFour | Threat::Five => 5,
-    }
-}
-
 fn detect_broken_and_push(
     stones: &crate::board::BitBoard,
     opp: &crate::board::BitBoard,
@@ -764,8 +635,7 @@ pub fn evaluate_base(board: &Board, weights: &NnueWeights) -> i32 {
 
 /// 보드를 평가 (전체 재계산)
 pub fn evaluate(board: &Board, weights: &NnueWeights) -> i32 {
-    let base = evaluate_base(board, weights);
-    crate::relation_lite::apply_sidecar(board, base)
+    evaluate_base(board, weights)
 }
 
 /// Compute the Pattern4 dense input vector and apply it to the accumulator
@@ -824,7 +694,6 @@ impl IncrementalEval {
             Stone::Black => (&board.black, &board.white),
             Stone::White => (&board.white, &board.black),
         };
-        let compound_on = compound_enabled();
 
         // cell_features 채우기
         for i in 0..NUM_CELLS {
@@ -833,7 +702,7 @@ impl IncrementalEval {
         }
         for sq in my_bb.iter_ones().chain(opp_bb.iter_ones()) {
             let entry = &mut self.cell_features[sq];
-            features_from_cell(board, sq, compound_on, &mut entry.0, &mut entry.1);
+            features_from_cell(board, sq, &mut entry.0, &mut entry.1);
         }
 
         // density_features
@@ -892,7 +761,6 @@ impl IncrementalEval {
             Stone::Black => (&board.black, &board.white),
             Stone::White => (&board.white, &board.black),
         };
-        let compound_on = compound_enabled();
 
         // 2. Affected cells 계산 + 각 cell의 new features 구해 delta 적용
         let cells = affected_cells(mv);
@@ -902,7 +770,7 @@ impl IncrementalEval {
         for &c in &cells {
             new_stm_buf.clear();
             new_nstm_buf.clear();
-            features_from_cell(board, c, compound_on, &mut new_stm_buf, &mut new_nstm_buf);
+            features_from_cell(board, c, &mut new_stm_buf, &mut new_nstm_buf);
 
             let (old_stm, old_nstm) = &self.cell_features[c];
             if old_stm.as_slice() == new_stm_buf.as_slice()
@@ -987,8 +855,7 @@ impl IncrementalEval {
     }
 
     pub fn eval(&self, weights: &NnueWeights, board: &Board) -> i32 {
-        let base = self.eval_base(weights, board);
-        crate::relation_lite::apply_sidecar(board, base)
+        self.eval_base(weights, board)
     }
 }
 
@@ -1086,9 +953,8 @@ mod tests {
     use crate::board::Board;
     use crate::features::{
         BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE, GOMOKU_NNUE_CONFIG,
-        HALF_FEATURE_SIZE, LP_BASE, MAX_ACTIVE_FEATURES, PS_BASE, RELATION_UE_BASE,
-        RELATION_UE_TOTAL, TOTAL_FEATURE_SIZE, broken_index, compound_index,
-        relation_ue_pair_index,
+        HALF_FEATURE_SIZE, LP_BASE, MAX_ACTIVE_FEATURES, PS_BASE, TOTAL_FEATURE_SIZE, broken_index,
+        compound_index,
     };
 
     #[test]
@@ -1133,36 +999,6 @@ mod tests {
                 "feature {f} >= {TOTAL_FEATURE_SIZE}"
             );
         }
-    }
-
-    #[test]
-    fn relation_ue_direct_emit_open_three_candidate() {
-        let mut board = Board::new();
-        board.make_move(7 * 15 + 6); // B
-        board.make_move(0); // W
-        board.make_move(7 * 15 + 7); // B
-        board.make_move(1); // W
-
-        let mut stm = Vec::new();
-        let mut nstm = Vec::new();
-        push_relation_ue_features(&board, &board.black, &board.white, &mut stm, &mut nstm);
-
-        assert!(
-            !stm.is_empty(),
-            "two connected stones should expose relation UE candidate features"
-        );
-        for &f in stm.iter().chain(nstm.iter()) {
-            assert!(
-                (RELATION_UE_BASE..RELATION_UE_BASE + RELATION_UE_TOTAL).contains(&f),
-                "relation UE feature {f} outside reserved tail"
-            );
-        }
-
-        let expected = relation_ue_pair_index(0, 3, 0, zone_for(7, 8));
-        assert!(
-            stm.contains(&expected),
-            "expected open-three candidate relation feature {expected}; stm={stm:?}"
-        );
     }
 
     #[test]

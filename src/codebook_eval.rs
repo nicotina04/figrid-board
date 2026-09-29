@@ -3042,79 +3042,6 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "RQ542 gate: set FIGRID_RQ542_GAMES_JSONL to rq535_accept_off_100g_games.jsonl"]
-    fn codebook_incremental_rq535_trace_gate() {
-        let path = std::env::var("FIGRID_RQ542_GAMES_JSONL")
-            .expect("set FIGRID_RQ542_GAMES_JSONL to rq535 game JSONL");
-        let games = load_trace_games(&path);
-        assert!(!games.is_empty(), "no games loaded from {path}");
-
-        let weights = CodebookWeights::deterministic(16, 8);
-        let mut transitions = 0usize;
-        let mut mismatch = 0usize;
-        let mut undo_fail = 0usize;
-        let mut passes = 0usize;
-        let mut dirty_counts = Vec::with_capacity(100_000);
-
-        while transitions < 100_000 {
-            passes += 1;
-            for game in &games {
-                if transitions >= 100_000 {
-                    break;
-                }
-                let mut board = Board::new();
-                let mut inc = IncrementalCodebookEval::new(&weights);
-                inc.refresh(&board, &weights);
-                let mut played = 0usize;
-                for &mv in game {
-                    if transitions >= 100_000 {
-                        break;
-                    }
-                    assert!(board.is_empty(mv), "illegal trace move {mv} in {path}");
-                    board.make_move(mv);
-                    inc.push_move(&board, mv, &weights);
-                    dirty_counts.push(inc.last_dirty_cells());
-                    transitions += 1;
-                    played += 1;
-
-                    if !close(inc.value(&board, &weights), evaluate_full(&board, &weights)) {
-                        mismatch += 1;
-                    }
-                }
-                for _ in 0..played {
-                    board.undo_move();
-                    inc.pop_move(&weights);
-                    if !close(inc.value(&board, &weights), evaluate_full(&board, &weights)) {
-                        undo_fail += 1;
-                    }
-                }
-            }
-        }
-
-        dirty_counts.sort_unstable();
-        let avg_dirty = dirty_counts.iter().sum::<usize>() as f32 / dirty_counts.len() as f32;
-        let p95_dirty = dirty_counts[dirty_counts.len() * 95 / 100] as f32;
-        let avg_ratio = avg_dirty / NUM_CELLS as f32;
-        let p95_ratio = p95_dirty / NUM_CELLS as f32;
-        eprintln!(
-            "RQ542 trace_gate path={path} passes={passes} transitions={transitions} \
-             mismatch={mismatch} undo_fail={undo_fail} avg_dirty_ratio={avg_ratio:.6} \
-             p95_dirty_ratio={p95_ratio:.6}"
-        );
-
-        assert_eq!(mismatch, 0, "full-vs-increment mismatch count");
-        assert_eq!(undo_fail, 0, "undo roundtrip failure count");
-        assert!(
-            (0.12..=0.16).contains(&avg_ratio),
-            "avg dirty ratio {avg_ratio:.6} drifted away from Board pattern-cache dirty set"
-        );
-        assert!(
-            (0.17..=0.20).contains(&p95_ratio),
-            "p95 dirty ratio {p95_ratio:.6} drifted away from Board pattern-cache dirty set"
-        );
-    }
-
     fn assert_close(a: f32, b: f32) {
         assert!(
             close(a, b),
@@ -3230,43 +3157,5 @@ mod tests {
             self.0 ^= self.0 << 17;
             (self.0 as usize) % n
         }
-    }
-
-    fn load_trace_games(path: &str) -> Vec<Vec<Move>> {
-        let text =
-            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-        let mut games = Vec::new();
-        for (line_no, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let value: Value = serde_json::from_str(line)
-                .unwrap_or_else(|e| panic!("failed to parse {path}:{}: {e}", line_no + 1));
-            let moves = value
-                .get("moves")
-                .and_then(Value::as_array)
-                .unwrap_or_else(|| panic!("missing moves array in {path}:{}", line_no + 1));
-            let mut out = Vec::with_capacity(moves.len());
-            for mv in moves {
-                let x = mv
-                    .get("x")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_else(|| panic!("missing move x in {path}:{}", line_no + 1))
-                    as usize;
-                let y = mv
-                    .get("y")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_else(|| panic!("missing move y in {path}:{}", line_no + 1))
-                    as usize;
-                assert!(
-                    x < BOARD_SIZE && y < BOARD_SIZE,
-                    "out-of-board move in {path}"
-                );
-                out.push(y * BOARD_SIZE + x);
-            }
-            games.push(out);
-        }
-        games
     }
 }

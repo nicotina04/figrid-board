@@ -101,18 +101,6 @@ path = "bin/t1_eval_dump.rs"
 required-features = ["codebook-eval"]
 
 [[bin]]
-name = "relation-lite-val"
-path = "bin/relation_lite_val.rs"
-
-[[bin]]
-name = "relation-root-audit"
-path = "bin/relation_root_audit.rs"
-
-[[bin]]
-name = "rq423-feature-dump"
-path = "bin/rq423_feature_dump.rs"
-
-[[bin]]
 name = "rq544-eval-scale"
 path = "bin/rq544_eval_scale.rs"
 required-features = ["codebook-eval"]

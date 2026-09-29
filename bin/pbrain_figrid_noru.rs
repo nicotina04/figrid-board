@@ -93,9 +93,10 @@ const EMBEDDED_CODEBOOK_CBF: &[u8] =
 const EMBEDDED_CODEBOOK_CBF: &[u8] =
     include_bytes!("../models/gomoku_codebook_v1_swapclosed_factored.cbf");
 
+/// The codebook always runs through the quantized i16/s32/s64 kernel; the
+/// float kernel remains available to library callers only.
 #[cfg(feature = "codebook-eval")]
 enum CodebookRuntimeWeights {
-    Float(CodebookWeights),
     Quantized {
         weights: QuantizedCodebookWeights,
         embedded: bool,
@@ -159,17 +160,6 @@ fn codebook_directional_delta_enabled() -> bool {
     })
 }
 
-#[cfg(feature = "codebook-eval")]
-fn codebook_quantized_enabled() -> bool {
-    static VALUE: OnceLock<bool> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("FIGRID_CODEBOOK_QUANT")
-            .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_QUANT"))
-            .map(|raw| env_bool_default(&raw, true))
-            .unwrap_or(true)
-    })
-}
-
 /// CB-F1 is an opt-in prototype. The embedded artifact is compact in either
 /// mode, but the runtime keeps the established flat quantized representation
 /// unless this selector is explicitly enabled.
@@ -180,17 +170,6 @@ fn codebook_factored_enabled() -> bool {
         std::env::var("NORU_CODEBOOK_FACTORED")
             .map(|raw| env_bool_default(&raw, false))
             .unwrap_or(false)
-    })
-}
-
-#[cfg(feature = "codebook-eval")]
-fn codebook_eval_enabled() -> bool {
-    static VALUE: OnceLock<bool> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("FIGRID_CODEBOOK_EVAL")
-            .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL"))
-            .map(|raw| env_bool_default(&raw, true))
-            .unwrap_or(true)
     })
 }
 
@@ -284,21 +263,12 @@ fn configure_white_root_order_mode(
             | Some(CodebookRuntimeWeights::FactoredQuantized { embedded: true, .. })
     );
     match mode {
-        WhiteRootOrderMode::Auto if supported => {
-            // Auto mode is conservative: an independently configured root
-            // rank/replace/veto hook keeps the established path unchanged.
-            match searcher.set_white_root_order_enabled(true) {
-                Ok(()) => Ok(()),
-                Err(error) if error.starts_with("white root ordering conflicts with ") => {
-                    searcher.set_white_root_order_enabled(false)
-                }
-                Err(error) => Err(error),
-            }
+        WhiteRootOrderMode::Auto | WhiteRootOrderMode::On if supported => {
+            searcher.set_white_root_order_enabled(true)
         }
         WhiteRootOrderMode::Auto | WhiteRootOrderMode::Off => {
             searcher.set_white_root_order_enabled(false)
         }
-        WhiteRootOrderMode::On if supported => searcher.set_white_root_order_enabled(true),
         WhiteRootOrderMode::On => Err(
             "FIGRID_WHITE_ROOT_ORDER=on requires the embedded quantized codebook evaluator"
                 .to_string(),
@@ -353,7 +323,6 @@ mod white_root_order_tests {
                     embedded: false,
                 })
             }
-            CodebookRuntimeWeights::Float(_) => unreachable!(),
             CodebookRuntimeWeights::FactoredQuantized { .. } => unreachable!(),
         };
         let mut custom_searcher = Searcher::new();
@@ -369,8 +338,7 @@ mod white_root_order_tests {
     #[cfg(not(feature = "cb-f1-flat-asset"))]
     #[test]
     fn auto_and_on_support_the_embedded_factored_path() {
-        let factored =
-            Some(load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true, true).unwrap());
+        let factored = Some(load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true).unwrap());
         assert!(matches!(
             factored,
             Some(CodebookRuntimeWeights::FactoredQuantized { embedded: true, .. })
@@ -387,16 +355,10 @@ mod white_root_order_tests {
 #[cfg(feature = "codebook-eval")]
 fn load_embedded_codebook_weights(
     bytes: &[u8],
-    quantized: bool,
     factored: bool,
 ) -> Result<CodebookRuntimeWeights, String> {
     let artifact = PackedCodebookArtifact::parse(bytes)
         .map_err(|e| format!("failed to parse embedded packed codebook: {e}"))?;
-    if !quantized {
-        return Ok(CodebookRuntimeWeights::Float(
-            artifact.into_source_weights(),
-        ));
-    }
     if factored {
         let weights = artifact.into_factored_quantized().map_err(|e| {
             format!("NORU_CODEBOOK_FACTORED=on requires a factored embedded codebook: {e}")
@@ -417,31 +379,20 @@ fn load_embedded_codebook_weights(
 }
 
 #[cfg(feature = "codebook-eval")]
+/// `FIGRID_CODEBOOK_WEIGHTS` is the single codebook loader knob: unset = the
+/// embedded codebook, a path = that `.ngcb`/`.json` file, and
+/// `""`/`0`/`off`/`false`/`no` = no codebook (flat NNUE eval).
 fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
-    if !codebook_eval_enabled() {
-        return Ok(None);
-    }
-
     let configured_path = match std::env::var_os("FIGRID_CODEBOOK_WEIGHTS") {
         Some(path) => Some(
             path.into_string()
                 .map_err(|_| "FIGRID_CODEBOOK_WEIGHTS is not valid Unicode".to_string())?,
         ),
-        None => match std::env::var_os("NORU_CODEBOOK_EVAL_MODEL") {
-            Some(path) => Some(
-                path.into_string()
-                    .map_err(|_| "NORU_CODEBOOK_EVAL_MODEL is not valid Unicode".to_string())?,
-            ),
-            None => None,
-        },
+        None => None,
     };
     let Some(configured_path) = configured_path else {
-        return load_embedded_codebook_weights(
-            EMBEDDED_CODEBOOK_CBF,
-            codebook_quantized_enabled(),
-            codebook_factored_enabled(),
-        )
-        .map(Some);
+        return load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, codebook_factored_enabled())
+            .map(Some);
     };
     let path = configured_path.trim();
     if path.is_empty()
@@ -465,14 +416,10 @@ fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
         // never lands inside the first move's clock.
         figrid_board::pattern_table::warm_full_vocab();
     }
-    if codebook_quantized_enabled() {
-        Ok(Some(CodebookRuntimeWeights::Quantized {
-            weights: weights.quantize_i16_s32_s64(),
-            embedded: false,
-        }))
-    } else {
-        Ok(Some(CodebookRuntimeWeights::Float(weights)))
-    }
+    Ok(Some(CodebookRuntimeWeights::Quantized {
+        weights: weights.quantize_i16_s32_s64(),
+        embedded: false,
+    }))
 }
 
 #[cfg(all(test, feature = "codebook-eval"))]
@@ -480,18 +427,8 @@ mod codebook_loader_tests {
     use super::*;
 
     #[test]
-    fn embedded_quant_off_uses_exact_source_floats() {
-        let runtime = load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, false, true).unwrap();
-        let CodebookRuntimeWeights::Float(weights) = runtime else {
-            panic!("quantized-off embedded codebook must use source floats");
-        };
-        assert_eq!(weights.dim, 16);
-        assert_eq!(weights.fm_rank, 8);
-    }
-
-    #[test]
     fn embedded_factored_off_uses_the_existing_flat_quantizer() {
-        let runtime = load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true, false).unwrap();
+        let runtime = load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, false).unwrap();
         assert!(matches!(
             runtime,
             CodebookRuntimeWeights::Quantized { embedded: true, .. }
@@ -501,7 +438,7 @@ mod codebook_loader_tests {
     #[cfg(not(feature = "cb-f1-flat-asset"))]
     #[test]
     fn embedded_factored_on_keeps_only_the_factored_runtime() {
-        let runtime = load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true, true).unwrap();
+        let runtime = load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true).unwrap();
         assert!(matches!(
             runtime,
             CodebookRuntimeWeights::FactoredQuantized { embedded: true, .. }
@@ -511,7 +448,7 @@ mod codebook_loader_tests {
     #[cfg(feature = "cb-f1-flat-asset")]
     #[test]
     fn flat_counterfactual_fails_closed_when_factored_is_requested() {
-        let error = match load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true, true) {
+        let error = match load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, true) {
             Ok(_) => panic!("flat counterfactual must reject the factored selector"),
             Err(error) => error,
         };
@@ -771,15 +708,6 @@ impl Engine {
         let search_start = Instant::now();
         #[cfg(feature = "codebook-eval")]
         let result = match &self.codebook_weights {
-            Some(CodebookRuntimeWeights::Float(codebook_weights)) => {
-                self.searcher.search_codebook_eval(
-                    &mut self.board,
-                    &self.weights,
-                    codebook_weights,
-                    max_depth,
-                    time_limit,
-                )
-            }
             Some(CodebookRuntimeWeights::Quantized {
                 weights: codebook_weights,
                 ..

@@ -52,24 +52,6 @@ pub const CONV_PER_PERSP: usize = NUM_SQUARES * CONV_TOTAL_BUCKETS; // 225 × 16
 pub const RESERVED_BASE: usize = CONV_KERNEL_BASE + CONV_PER_PERSP * 2; // 13222
 pub const TOTAL_FEATURE_SIZE: usize = 14336;
 
-// ===== K. Relation UE reserved-tail features =====
-//
-// RQ409: static candidate-relation summary for UE training. These features
-// intentionally live in the reserved tail, so older weights keep their layout.
-// Emit is env-gated in eval.rs (`NORU_RELATION_UE=1`) until retrained weights
-// exist.
-pub const RELATION_UE_BASE: usize = RESERVED_BASE;
-pub const RELATION_UE_THREAT_BUCKETS: usize = 6;
-pub const RELATION_UE_ZONES: usize = 9;
-pub const RELATION_UE_PAIR_PER_PERSP: usize =
-    RELATION_UE_THREAT_BUCKETS * RELATION_UE_THREAT_BUCKETS * RELATION_UE_ZONES; // 324
-pub const RELATION_UE_PAIR_BASE: usize = RELATION_UE_BASE;
-pub const RELATION_UE_MULTI_PER_PERSP: usize =
-    RELATION_UE_THREAT_BUCKETS * RELATION_UE_THREAT_BUCKETS; // 36
-pub const RELATION_UE_MULTI_BASE: usize = RELATION_UE_PAIR_BASE + RELATION_UE_PAIR_PER_PERSP * 2;
-pub const RELATION_UE_TOTAL: usize =
-    RELATION_UE_PAIR_PER_PERSP * 2 + RELATION_UE_MULTI_PER_PERSP * 2; // 720
-
 // ===== A. PS =====
 pub const PS_PER_PERSP: usize = NUM_SQUARES; // 225
 pub const HALF_FEATURE_SIZE: usize = PS_PER_PERSP; // 호환용 별칭
@@ -161,8 +143,6 @@ const _: () = assert!(PHASE_BASE == LAST_MOVE_BASE + LAST_MOVE_NUM_CELLS);
 const _: () = assert!(FIVE_STONE_BASE == PHASE_BASE + PHASE_NUM_BUCKETS);
 const _: () = assert!(CONV_KERNEL_BASE == FIVE_STONE_BASE + FIVE_STONE_PER_PERSP * 2);
 const _: () = assert!(RESERVED_BASE == CONV_KERNEL_BASE + CONV_PER_PERSP * 2);
-const _: () = assert!(RELATION_UE_BASE == RESERVED_BASE);
-const _: () = assert!(RELATION_UE_BASE + RELATION_UE_TOTAL <= TOTAL_FEATURE_SIZE);
 const _: () = assert!(RESERVED_BASE <= TOTAL_FEATURE_SIZE);
 
 // ===================================================================
@@ -274,41 +254,6 @@ pub fn conv_k3_bucket(count: u32) -> usize {
 // pattern_index 함수는 G section 통합 폐기로 더 이상 사용 안 함.
 // 인프라 (pattern_table, Board::line_pattern_ids) 는 보존되지만
 // NNUE feature 매핑 함수는 제거 — 미래 재도입 시 복원.
-
-/// Relation UE pair index: best attack threat, best block threat, and board zone.
-#[inline]
-pub fn relation_ue_pair_index(
-    perspective: usize,
-    attack_bucket: usize,
-    block_bucket: usize,
-    zone: usize,
-) -> usize {
-    debug_assert!(perspective < 2);
-    debug_assert!(attack_bucket < RELATION_UE_THREAT_BUCKETS);
-    debug_assert!(block_bucket < RELATION_UE_THREAT_BUCKETS);
-    debug_assert!(zone < RELATION_UE_ZONES);
-    RELATION_UE_PAIR_BASE
-        + perspective * RELATION_UE_PAIR_PER_PERSP
-        + attack_bucket * (RELATION_UE_THREAT_BUCKETS * RELATION_UE_ZONES)
-        + block_bucket * RELATION_UE_ZONES
-        + zone
-}
-
-/// Relation UE multi-threat index: second-best attack/block bins.
-#[inline]
-pub fn relation_ue_multi_index(
-    perspective: usize,
-    second_attack_bucket: usize,
-    second_block_bucket: usize,
-) -> usize {
-    debug_assert!(perspective < 2);
-    debug_assert!(second_attack_bucket < RELATION_UE_THREAT_BUCKETS);
-    debug_assert!(second_block_bucket < RELATION_UE_THREAT_BUCKETS);
-    RELATION_UE_MULTI_BASE
-        + perspective * RELATION_UE_MULTI_PER_PERSP
-        + second_attack_bucket * RELATION_UE_THREAT_BUCKETS
-        + second_block_bucket
-}
 
 /// LP-Rich 인덱스.
 #[inline]
@@ -528,11 +473,6 @@ mod tests {
         assert_eq!(RESERVED_BASE, 13222);
         assert!(RESERVED_BASE < TOTAL_FEATURE_SIZE);
         assert_eq!(TOTAL_FEATURE_SIZE, 14336);
-        assert_eq!(RELATION_UE_BASE, RESERVED_BASE);
-        assert_eq!(RELATION_UE_PAIR_PER_PERSP, 324);
-        assert_eq!(RELATION_UE_MULTI_PER_PERSP, 36);
-        assert_eq!(RELATION_UE_TOTAL, 720);
-        assert!(RELATION_UE_BASE + RELATION_UE_TOTAL <= TOTAL_FEATURE_SIZE);
     }
 
     #[test]
@@ -570,28 +510,6 @@ mod tests {
                 assert!(idx >= DENSITY_BASE && idx < RESERVED_BASE);
             }
         }
-    }
-
-    #[test]
-    fn relation_ue_indices_in_reserved_tail_and_unique() {
-        let mut seen = std::collections::HashSet::new();
-        for p in 0..2 {
-            for a in 0..RELATION_UE_THREAT_BUCKETS {
-                for b in 0..RELATION_UE_THREAT_BUCKETS {
-                    for z in 0..RELATION_UE_ZONES {
-                        let idx = relation_ue_pair_index(p, a, b, z);
-                        assert!(idx >= RELATION_UE_BASE);
-                        assert!(idx < RELATION_UE_MULTI_BASE);
-                        assert!(seen.insert(idx), "duplicate pair relation index {idx}");
-                    }
-                    let idx = relation_ue_multi_index(p, a, b);
-                    assert!(idx >= RELATION_UE_MULTI_BASE);
-                    assert!(idx < RELATION_UE_BASE + RELATION_UE_TOTAL);
-                    assert!(seen.insert(idx), "duplicate multi relation index {idx}");
-                }
-            }
-        }
-        assert_eq!(seen.len(), RELATION_UE_TOTAL);
     }
 
     #[test]

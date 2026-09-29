@@ -186,7 +186,6 @@ fn load_weights_bytes() -> Result<Vec<u8>, String> {
 #[cfg(feature = "codebook-eval")]
 fn load_quantized_codebook() -> Result<QuantizedCodebookWeights, String> {
     let bytes = match std::env::var("FIGRID_CODEBOOK_WEIGHTS")
-        .or_else(|_| std::env::var("NORU_CODEBOOK_EVAL_MODEL"))
         .ok()
         .map(|s| s.trim().to_string())
     {

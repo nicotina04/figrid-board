@@ -195,7 +195,7 @@ fn load_quantized_codebook() -> Result<QuantizedCodebookWeights, String> {
         }
         _ => include_bytes!("../models/gomoku_codebook_v1_swapclosed.json").to_vec(),
     };
-    let weights = CodebookWeights::from_json_bytes(&bytes)
+    let weights = CodebookWeights::from_bytes_auto(&bytes)
         .map_err(|e| format!("failed to parse codebook weights: {e}"))?;
     Ok(weights.quantize_i16_s32_s64())
 }

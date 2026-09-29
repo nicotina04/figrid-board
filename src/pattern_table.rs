@@ -261,6 +261,98 @@ pub fn swap_mapped_id(id: u16) -> u16 {
     swap_table()[id as usize]
 }
 
+// ---- NG-A1: full-vocabulary (untruncated) pattern id space ----
+//
+// The legacy top-4265+RARE table above stays untouched (deployed path).
+// This is a second, additive id space covering EVERY realizable canonical
+// 11-cell window — no RARE bucket. Ids are the insertion order of
+// `enumerate_patterns` (raw 0..4^11 scan, first-seen canonical), which is
+// deterministic, so the trainer and the engine agree on ids by construction.
+
+/// Number of realizable canonical patterns (NG-D0 census: 199,827).
+pub const FULL_PATTERN_NUM_IDS: usize = 199_827;
+
+struct FullVocab {
+    /// raw packed window -> full id; `u32::MAX` for unrealizable windows.
+    dense: Vec<u32>,
+    /// full id -> color-swapped (mine<->opp) full id. Involution.
+    swap: Vec<u32>,
+}
+
+fn full_vocab() -> &'static FullVocab {
+    static TABLE: OnceLock<FullVocab> = OnceLock::new();
+    TABLE.get_or_init(build_full_vocab)
+}
+
+fn build_full_vocab() -> FullVocab {
+    let map = enumerate_patterns();
+    assert_eq!(
+        map.len(),
+        FULL_PATTERN_NUM_IDS,
+        "full vocabulary size drifted from the frozen census value"
+    );
+    let mut dense = vec![u32::MAX; 1usize << 22];
+    for raw in 0..(1u32 << 22) {
+        let w = unpack_window(raw);
+        if !is_realizable(&w) {
+            continue;
+        }
+        let canonical_packed = pack_window(&canonicalize(&w));
+        dense[raw as usize] = map[&canonical_packed];
+    }
+    let mut swap = vec![u32::MAX; FULL_PATTERN_NUM_IDS];
+    for (&canonical_packed, &id) in &map {
+        let w = unpack_window(canonical_packed);
+        let swapped: LineWindow = std::array::from_fn(|i| match w[i] {
+            1 => 2,
+            2 => 1,
+            v => v,
+        });
+        let swapped_canonical = pack_window(&canonicalize(&swapped));
+        swap[id as usize] = map[&swapped_canonical];
+    }
+    FullVocab { dense, swap }
+}
+
+/// Force the lazy full-vocab tables to build now (engine startup), so the
+/// ~1-2s enumeration cost never lands inside the first move's clock.
+pub fn warm_full_vocab() {
+    let _ = full_vocab();
+}
+
+/// raw packed window -> full-vocabulary id.
+#[inline]
+pub fn full_lookup_id(packed: u32) -> u32 {
+    let id = full_vocab().dense[packed as usize];
+    debug_assert_ne!(id, u32::MAX, "lookup of unrealizable window");
+    id
+}
+
+/// mine/opp swap된 perspective의 full-vocabulary id.
+#[inline]
+pub fn full_swap_id(id: u32) -> u32 {
+    debug_assert!((id as usize) < FULL_PATTERN_NUM_IDS);
+    full_vocab().swap[id as usize]
+}
+
+/// 한 cell의 4방향 full-vocabulary id (black-relative, board 관례와 동일한
+/// 방향 순서 [(0,1),(1,0),(1,1),(1,-1)]).
+pub fn full_ids_for_cell(
+    black: &crate::board::BitBoard,
+    white: &crate::board::BitBoard,
+    cell: usize,
+) -> [u32; 4] {
+    use crate::board::BOARD_SIZE;
+    const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+    let row = (cell / BOARD_SIZE) as i32;
+    let col = (cell % BOARD_SIZE) as i32;
+    std::array::from_fn(|dir_idx| {
+        let (dr, dc) = DIRS[dir_idx];
+        let w = read_window(black, white, row, col, dr, dc);
+        full_lookup_id(pack_window(&w))
+    })
+}
+
 /// Threat tier produced when `mine` (hypothetically) plays at the anchor cell
 /// of a single direction's window. Mirrors `vct.rs::LineThreat` but is kept
 /// separate here to avoid a cross-module type dependency; callers translate

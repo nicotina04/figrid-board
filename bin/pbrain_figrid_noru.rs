@@ -453,12 +453,18 @@ fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
         return Ok(None);
     }
 
-    // External model paths retain their public JSON behavior. They never
+    // External model paths are JSON or NGCB1 binaries (detected by magic),
+    // in either the legacy or the full-vocabulary id space. They never
     // inherit the embedded CB-F1 representation selector.
     let bytes = std::fs::read(path)
         .map_err(|e| format!("failed to read codebook weights from `{path}`: {e}"))?;
-    let weights = CodebookWeights::from_json_bytes(&bytes)
+    let weights = CodebookWeights::from_bytes_auto(&bytes)
         .map_err(|e| format!("failed to parse codebook weights: {e}"))?;
+    if weights.is_full_vocab() {
+        // Build the full-vocabulary lookup tables now so their one-off cost
+        // never lands inside the first move's clock.
+        figrid_board::pattern_table::warm_full_vocab();
+    }
     if codebook_quantized_enabled() {
         Ok(Some(CodebookRuntimeWeights::Quantized {
             weights: weights.quantize_i16_s32_s64(),

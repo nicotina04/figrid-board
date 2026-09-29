@@ -6,9 +6,10 @@
 
 use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
 use crate::factored_codebook::FactoredQuantizedCodebookWeights;
-use crate::pattern_table::{PATTERN_NUM_IDS, swap_mapped_id};
+use crate::pattern_table::{
+    FULL_PATTERN_NUM_IDS, PATTERN_NUM_IDS, full_ids_for_cell, full_swap_id, swap_mapped_id,
+};
 pub use crate::search::EvalStateStepProfile;
-pub(crate) use cb2vec::QuantizedCodebookAccess;
 use cb2vec::{ReversibleTokenJournal, TokenDelta, TokenDeltaReplay, TokenDeltaSink};
 use serde_json::Value;
 
@@ -56,6 +57,125 @@ impl CodebookWeights {
         }
     }
 
+    /// Deterministic weights over either id space: [`PATTERN_NUM_IDS`]
+    /// (legacy truncated vocabulary, identical to [`Self::deterministic`]) or
+    /// [`FULL_PATTERN_NUM_IDS`] (full vocabulary). The generator is the same
+    /// xorshift stream CB2Vec uses, so the legacy case is bit-identical.
+    pub fn deterministic_with_num_ids(dim: usize, fm_rank: usize, num_ids: usize) -> Self {
+        assert!(
+            num_ids == PATTERN_NUM_IDS || num_ids == FULL_PATTERN_NUM_IDS,
+            "unsupported codebook id-space size {num_ids}"
+        );
+        if num_ids == PATTERN_NUM_IDS {
+            return Self::deterministic(dim, fm_rank);
+        }
+        let mut state = 0xC0DE_B00C_F00D_0542u64;
+        let embeddings = deterministic_vec(&mut state, num_ids * dim, 0.02);
+        let head = deterministic_vec(&mut state, REGIONS * dim, 0.02);
+        let factors = deterministic_vec(&mut state, REGIONS * dim * fm_rank, 0.02);
+        Self {
+            dim,
+            fm_rank,
+            embeddings,
+            head,
+            factors,
+            bias: 0.01,
+        }
+    }
+
+    /// Magic of the NGCB1 binary weight format: `NGCB1\0\0\0`, then
+    /// little-endian `u32` dim, fm_rank, num_ids, an `f32` bias, and the
+    /// little-endian `f32` arrays embeddings (`num_ids * dim`), head
+    /// (`9 * dim`) and factors (`9 * dim * fm_rank`), with nothing after them.
+    pub const NGCB1_MAGIC: &'static [u8; 8] = b"NGCB1\0\0\0";
+
+    /// Loads either an NGCB1 binary (detected by its magic) or a JSON model.
+    /// The JSON path is exactly [`Self::from_json_bytes`].
+    pub fn from_bytes_auto(data: &[u8]) -> Result<Self, String> {
+        if data.len() >= 8 && &data[..8] == Self::NGCB1_MAGIC {
+            Self::from_ngcb1_bytes(data)
+        } else {
+            Self::from_json_bytes(data)
+        }
+    }
+
+    /// Parses an NGCB1 binary. Both id spaces are accepted.
+    pub fn from_ngcb1_bytes(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 8 + 12 + 4 || &data[..8] != Self::NGCB1_MAGIC {
+            return Err("bad NGCB1 header".into());
+        }
+        let read_u32 =
+            |off: usize| u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        let dim = read_u32(8);
+        let fm_rank = read_u32(12);
+        let num_ids = read_u32(16);
+        let bias = f32::from_le_bytes(data[20..24].try_into().unwrap());
+        if dim == 0 {
+            return Err("NGCB1 dim must be non-zero".into());
+        }
+        if fm_rank == 0 {
+            return Err("fm_rank must be non-zero for the FIGRID evaluator".to_string());
+        }
+        if num_ids != PATTERN_NUM_IDS && num_ids != FULL_PATTERN_NUM_IDS {
+            return Err(format!("NGCB1 num_ids {num_ids} unsupported"));
+        }
+        let n_emb = num_ids
+            .checked_mul(dim)
+            .ok_or("NGCB1 embedding length overflow")?;
+        let n_head = REGIONS
+            .checked_mul(dim)
+            .ok_or("NGCB1 head length overflow")?;
+        let n_fac = n_head
+            .checked_mul(fm_rank)
+            .ok_or("NGCB1 factor length overflow")?;
+        let expected = n_emb
+            .checked_add(n_head)
+            .and_then(|n| n.checked_add(n_fac))
+            .and_then(|n| n.checked_mul(4))
+            .and_then(|n| n.checked_add(24))
+            .ok_or("NGCB1 length overflow")?;
+        if data.len() != expected {
+            return Err(format!(
+                "bad NGCB1 length: {} != {expected} (dim={dim} fm_rank={fm_rank} num_ids={num_ids})",
+                data.len()
+            ));
+        }
+        let read_f32s = |off: usize, n: usize| -> Vec<f32> {
+            data[off..off + n * 4]
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+                .collect()
+        };
+        let weights = Self {
+            dim,
+            fm_rank,
+            embeddings: read_f32s(24, n_emb),
+            head: read_f32s(24 + n_emb * 4, n_head),
+            factors: read_f32s(24 + (n_emb + n_head) * 4, n_fac),
+            bias,
+        };
+        weights.check_finite()?;
+        Ok(weights)
+    }
+
+    /// Serializes to NGCB1 (see [`Self::NGCB1_MAGIC`]).
+    pub fn to_ngcb1_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            24 + (self.embeddings.len() + self.head.len() + self.factors.len()) * 4,
+        );
+        out.extend_from_slice(Self::NGCB1_MAGIC);
+        out.extend_from_slice(&(self.dim as u32).to_le_bytes());
+        out.extend_from_slice(&(self.fm_rank as u32).to_le_bytes());
+        out.extend_from_slice(&(self.num_ids() as u32).to_le_bytes());
+        out.extend_from_slice(&self.bias.to_le_bytes());
+        for values in [&self.embeddings, &self.head, &self.factors] {
+            for &value in values.iter() {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        out
+    }
+
     pub fn from_json_bytes(data: &[u8]) -> Result<Self, String> {
         let root: Value = serde_json::from_slice(data)
             .map_err(|error| format!("failed to parse codebook json: {error}"))?;
@@ -64,9 +184,90 @@ impl CodebookWeights {
 
     pub fn from_json_value(root: &Value) -> Result<Self, String> {
         validate_figrid_json_schema(root)?;
+        if json_embeddings_are_full_vocab(root) {
+            return Self::from_full_vocab_json_value(root);
+        }
         let weights =
             cb2vec::CodebookWeights::from_json_value(root).map_err(|error| error.to_string())?;
         Self::from_cb2vec(weights)
+    }
+
+    /// Full-vocabulary JSON models exceed CB2Vec's 16-bit token domain, so
+    /// they are parsed here with the same field conventions as CB2Vec.
+    fn from_full_vocab_json_value(root: &Value) -> Result<Self, String> {
+        let metadata = root.get("metadata");
+        let dim = metadata
+            .and_then(|value| json_usize_opt(value, "embedding_dim"))
+            .or_else(|| json_usize_opt(root, "embedding_dim"))
+            .ok_or_else(|| "missing embedding_dim".to_string())?;
+        let fm_rank = metadata
+            .and_then(|value| json_usize_opt(value, "fm_rank"))
+            .or_else(|| json_usize_opt(root, "fm_rank"))
+            .unwrap_or(0);
+        if dim == 0 {
+            return Err("embedding_dim must be non-zero".to_string());
+        }
+        if fm_rank == 0 {
+            return Err("fm_rank must be non-zero for the FIGRID evaluator".to_string());
+        }
+        let weights = root
+            .get("weights")
+            .ok_or_else(|| "missing weights object".to_string())?;
+        let embeddings = json_f32_array(weights, "embeddings")?;
+        let head = json_f32_array(weights, "head")?;
+        let factors = json_f32_array(weights, "factors")?;
+        let bias = weights
+            .get("bias")
+            .and_then(Value::as_f64)
+            .map(|value| value as f32)
+            .ok_or_else(|| "missing weights.bias".to_string())?;
+        let expected_embeddings = FULL_PATTERN_NUM_IDS * dim;
+        let expected_head = REGIONS * dim;
+        let expected_factors = expected_head * fm_rank;
+        if embeddings.len() != expected_embeddings {
+            return Err(format!(
+                "embedding length mismatch: got {}, expected {expected_embeddings}",
+                embeddings.len()
+            ));
+        }
+        if head.len() != expected_head {
+            return Err(format!(
+                "head length mismatch: got {}, expected {expected_head}",
+                head.len()
+            ));
+        }
+        if factors.len() != expected_factors {
+            return Err(format!(
+                "factor length mismatch: got {}, expected {expected_factors}",
+                factors.len()
+            ));
+        }
+        let weights = Self {
+            dim,
+            fm_rank,
+            embeddings,
+            head,
+            factors,
+            bias,
+        };
+        weights.check_finite()?;
+        Ok(weights)
+    }
+
+    fn check_finite(&self) -> Result<(), String> {
+        if !self.bias.is_finite() {
+            return Err("non-finite bias".to_string());
+        }
+        for (name, values) in [
+            ("embeddings", &self.embeddings),
+            ("head", &self.head),
+            ("factors", &self.factors),
+        ] {
+            if values.iter().any(|value| !value.is_finite()) {
+                return Err(format!("non-finite value in {name}"));
+            }
+        }
+        Ok(())
     }
 
     fn from_cb2vec(weights: cb2vec::CodebookWeights) -> Result<Self, String> {
@@ -98,8 +299,37 @@ impl CodebookWeights {
         REGIONS * self.dim
     }
 
+    /// Number of pattern ids the embedding table covers.
+    #[inline]
+    pub fn num_ids(&self) -> usize {
+        self.embeddings.len() / self.dim
+    }
+
+    /// True when the embedding table covers the untruncated
+    /// [`FULL_PATTERN_NUM_IDS`]-id vocabulary instead of the legacy
+    /// [`PATTERN_NUM_IDS`]-id one.
+    #[inline]
+    pub fn is_full_vocab(&self) -> bool {
+        self.num_ids() == FULL_PATTERN_NUM_IDS
+    }
+
     pub fn quantize_i16_s32_s64(&self) -> QuantizedCodebookWeights {
         self.validate();
+        if self.is_full_vocab() {
+            // CB2Vec's quantizer validates a 16-bit token domain; the
+            // rounding rule below is the same one it applies.
+            return QuantizedCodebookWeights {
+                dim: self.dim,
+                fm_rank: self.fm_rank,
+                embedding_scale: QUANT_EMBED_SCALE,
+                head_scale: QUANT_HEAD_SCALE,
+                factor_scale: QUANT_FACTOR_SCALE,
+                embeddings: quantize_vec_i16(&self.embeddings, QUANT_EMBED_SCALE),
+                head: quantize_vec_i16(&self.head, QUANT_HEAD_SCALE),
+                factors: quantize_vec_i16(&self.factors, QUANT_FACTOR_SCALE),
+                bias: self.bias,
+            };
+        }
         let weights = cb2vec::quantize_i16(
             self,
             QUANT_EMBED_SCALE,
@@ -121,10 +351,77 @@ impl CodebookWeights {
     }
 
     fn validate(&self) {
-        debug_assert_eq!(self.embeddings.len(), PATTERN_NUM_IDS * self.dim);
+        debug_assert!(
+            self.embeddings.len() == PATTERN_NUM_IDS * self.dim
+                || self.embeddings.len() == FULL_PATTERN_NUM_IDS * self.dim
+        );
         debug_assert_eq!(self.head.len(), self.feature_len());
         debug_assert_eq!(self.factors.len(), self.feature_len() * self.fm_rank);
     }
+}
+
+/// True when `weights.embeddings` holds exactly `FULL_PATTERN_NUM_IDS * dim`
+/// values, i.e. the model uses the full-vocabulary id space.
+fn json_embeddings_are_full_vocab(root: &Value) -> bool {
+    let dim = root
+        .get("metadata")
+        .and_then(|value| json_usize_opt(value, "embedding_dim"))
+        .or_else(|| json_usize_opt(root, "embedding_dim"));
+    let Some(dim) = dim.filter(|&dim| dim > 0) else {
+        return false;
+    };
+    let len = root
+        .get("weights")
+        .and_then(|weights| weights.get("embeddings"))
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    FULL_PATTERN_NUM_IDS
+        .checked_mul(dim)
+        .is_some_and(|expected| len == Some(expected))
+}
+
+fn json_usize_opt(value: &Value, key: &str) -> Option<usize> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+}
+
+fn json_f32_array(value: &Value, key: &str) -> Result<Vec<f32>, String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing weights.{key}"))?
+        .iter()
+        .map(|item| {
+            item.as_f64()
+                .map(|item| item as f32)
+                .ok_or_else(|| format!("non-float value in weights.{key}"))
+        })
+        .collect()
+}
+
+fn deterministic_vec(state: &mut u64, len: usize, scale: f32) -> Vec<f32> {
+    (0..len)
+        .map(|_| {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            let unit = ((*state >> 40) as u32) as f32 / ((1u32 << 24) as f32);
+            (unit * 2.0 - 1.0) * scale
+        })
+        .collect()
+}
+
+fn quantize_vec_i16(values: &[f32], scale: i32) -> Vec<i16> {
+    values
+        .iter()
+        .map(|&value| {
+            (value * scale as f32)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+        })
+        .collect()
 }
 
 fn validate_figrid_json_schema(root: &Value) -> Result<(), String> {
@@ -226,17 +523,262 @@ impl QuantizedCodebookWeights {
         }
     }
 
+    /// Number of pattern ids the embedding table covers.
+    #[inline]
+    pub fn num_ids(&self) -> usize {
+        self.embeddings.len() / self.dim
+    }
+
+    /// True when the embedding table covers the untruncated
+    /// [`FULL_PATTERN_NUM_IDS`]-id vocabulary. Such weights are evaluated by
+    /// this module only; CB2Vec's 16-bit token accessors cannot address them.
+    #[inline]
+    pub fn is_full_vocab(&self) -> bool {
+        self.num_ids() == FULL_PATTERN_NUM_IDS
+    }
+
     fn validate(&self) {
         debug_assert!(self.embedding_scale > 0);
         debug_assert!(self.head_scale > 0);
         debug_assert!(self.factor_scale > 0);
-        debug_assert_eq!(self.embeddings.len(), PATTERN_NUM_IDS * self.dim);
+        debug_assert!(
+            self.embeddings.len() == PATTERN_NUM_IDS * self.dim
+                || self.embeddings.len() == FULL_PATTERN_NUM_IDS * self.dim
+        );
         debug_assert_eq!(self.head.len(), self.feature_len());
         debug_assert_eq!(self.factors.len(), self.feature_len() * self.fm_rank);
     }
 }
 
+/// FIGRID-side view of quantized codebook weights over 32-bit pattern ids.
+///
+/// CB2Vec's [`cb2vec::QuantizedCodebookAccess`] addresses tokens as `u16`,
+/// which covers the legacy [`PATTERN_NUM_IDS`] vocabulary but not the
+/// [`FULL_PATTERN_NUM_IDS`] one. The incremental evaluator therefore works
+/// on `u32` ids through this trait: the flat weights index their table
+/// directly (either vocabulary), the factored weights (legacy only) forward
+/// to their CB2Vec fast paths, and scoring always goes through CB2Vec's
+/// grouped-uniform kernel so the arithmetic is shared.
+pub(crate) trait QuantizedCodebookAccess {
+    fn dim(&self) -> usize;
+    fn embedding_scale(&self) -> i32;
+    fn feature_len(&self) -> usize;
+    fn pattern_count(&self) -> usize;
+    fn validate_access(&self);
+    fn add_embedding_to(&self, pattern_id: u32, out: &mut [i32]);
+    fn add_embedding_delta_to(&self, old_pattern_id: u32, new_pattern_id: u32, out: &mut [i32]);
+    fn score_uniform(&self, features: &[i32], group_divisor: usize) -> f32;
+
+    #[inline(always)]
+    fn is_full_vocab(&self) -> bool {
+        self.pattern_count() == FULL_PATTERN_NUM_IDS
+    }
+}
+
 impl QuantizedCodebookAccess for QuantizedCodebookWeights {
+    #[inline(always)]
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    #[inline(always)]
+    fn embedding_scale(&self) -> i32 {
+        self.embedding_scale
+    }
+
+    #[inline(always)]
+    fn feature_len(&self) -> usize {
+        self.head.len()
+    }
+
+    #[inline(always)]
+    fn pattern_count(&self) -> usize {
+        self.embeddings.len() / self.dim
+    }
+
+    #[inline]
+    fn validate_access(&self) {
+        cb2vec::QuantizedCodebookAccess::validate_access(self);
+    }
+
+    #[inline(always)]
+    fn add_embedding_to(&self, pattern_id: u32, out: &mut [i32]) {
+        let start = pattern_id as usize * self.dim;
+        let embedding = &self.embeddings[start..start + self.dim];
+        for (value, &component) in out.iter_mut().zip(embedding) {
+            *value += i32::from(component);
+        }
+    }
+
+    #[inline(always)]
+    fn add_embedding_delta_to(&self, old_pattern_id: u32, new_pattern_id: u32, out: &mut [i32]) {
+        let old_start = old_pattern_id as usize * self.dim;
+        let new_start = new_pattern_id as usize * self.dim;
+        let old = &self.embeddings[old_start..old_start + self.dim];
+        let new = &self.embeddings[new_start..new_start + self.dim];
+        for ((value, &old), &new) in out.iter_mut().zip(old).zip(new) {
+            *value += i32::from(new) - i32::from(old);
+        }
+    }
+
+    #[inline]
+    fn score_uniform(&self, features: &[i32], group_divisor: usize) -> f32 {
+        if self.is_full_vocab() {
+            // Scoring reads only the head, factors, scales, and bias. The
+            // head view keeps CB2Vec's shape validation within its 16-bit
+            // token domain without touching the embedding table.
+            cb2vec::score_quantized_uniform(features, &QuantizedHeadView(self), group_divisor)
+        } else {
+            cb2vec::score_quantized_uniform(features, self, group_divisor)
+        }
+        .expect("FIGRID quantized codebook shape is validated")
+    }
+}
+
+impl QuantizedCodebookAccess for FactoredQuantizedCodebookWeights {
+    #[inline(always)]
+    fn dim(&self) -> usize {
+        cb2vec::QuantizedCodebookAccess::dim(self)
+    }
+
+    #[inline(always)]
+    fn embedding_scale(&self) -> i32 {
+        cb2vec::QuantizedCodebookAccess::embedding_scale(self)
+    }
+
+    #[inline(always)]
+    fn feature_len(&self) -> usize {
+        cb2vec::QuantizedCodebookAccess::feature_len(self)
+    }
+
+    #[inline(always)]
+    fn pattern_count(&self) -> usize {
+        cb2vec::QuantizedCodebookAccess::pattern_count(self)
+    }
+
+    #[inline]
+    fn validate_access(&self) {
+        cb2vec::QuantizedCodebookAccess::validate_access(self);
+    }
+
+    #[inline(always)]
+    fn add_embedding_to(&self, pattern_id: u32, out: &mut [i32]) {
+        debug_assert!(pattern_id <= u32::from(u16::MAX));
+        cb2vec::QuantizedCodebookAccess::add_embedding_to(self, pattern_id as u16, out);
+    }
+
+    #[inline(always)]
+    fn add_embedding_delta_to(&self, old_pattern_id: u32, new_pattern_id: u32, out: &mut [i32]) {
+        debug_assert!(old_pattern_id <= u32::from(u16::MAX));
+        debug_assert!(new_pattern_id <= u32::from(u16::MAX));
+        cb2vec::QuantizedCodebookAccess::add_embedding_delta_to(
+            self,
+            old_pattern_id as u16,
+            new_pattern_id as u16,
+            out,
+        );
+    }
+
+    #[inline]
+    fn score_uniform(&self, features: &[i32], group_divisor: usize) -> f32 {
+        cb2vec::score_quantized_uniform(features, self, group_divisor)
+            .expect("FIGRID quantized codebook shape is validated")
+    }
+}
+
+/// Head/factor-only view of full-vocabulary quantized weights for CB2Vec's
+/// scoring kernel. It reports a single token and never serves embeddings.
+struct QuantizedHeadView<'a>(&'a QuantizedCodebookWeights);
+
+impl cb2vec::QuantizedCodebookAccess for QuantizedHeadView<'_> {
+    #[inline(always)]
+    fn dim(&self) -> usize {
+        self.0.dim
+    }
+
+    #[inline(always)]
+    fn fm_rank(&self) -> usize {
+        self.0.fm_rank
+    }
+
+    #[inline(always)]
+    fn embedding_scale(&self) -> i32 {
+        self.0.embedding_scale
+    }
+
+    #[inline(always)]
+    fn head_scale(&self) -> i32 {
+        self.0.head_scale
+    }
+
+    #[inline(always)]
+    fn factor_scale(&self) -> i32 {
+        self.0.factor_scale
+    }
+
+    #[inline(always)]
+    fn bias(&self) -> f32 {
+        self.0.bias
+    }
+
+    #[inline(always)]
+    fn token_count(&self) -> usize {
+        1
+    }
+
+    #[inline(always)]
+    fn head(&self) -> &[i16] {
+        &self.0.head
+    }
+
+    #[inline(always)]
+    fn factors(&self) -> &[i16] {
+        &self.0.factors
+    }
+
+    fn embedding(&self, _token: u16, _component: usize) -> i16 {
+        unreachable!("the scoring head view never serves embeddings")
+    }
+}
+
+/// Head/factor-only view of full-vocabulary float weights for CB2Vec's
+/// scoring kernel (see [`QuantizedHeadView`]).
+struct FloatHeadView<'a>(&'a CodebookWeights);
+
+impl cb2vec::FloatCodebookAccess for FloatHeadView<'_> {
+    #[inline(always)]
+    fn dim(&self) -> usize {
+        self.0.dim
+    }
+
+    #[inline(always)]
+    fn fm_rank(&self) -> usize {
+        self.0.fm_rank
+    }
+
+    #[inline(always)]
+    fn embeddings(&self) -> &[f32] {
+        // One row: CB2Vec derives the token count from this length only.
+        &self.0.embeddings[..self.0.dim]
+    }
+
+    #[inline(always)]
+    fn head(&self) -> &[f32] {
+        &self.0.head
+    }
+
+    #[inline(always)]
+    fn factors(&self) -> &[f32] {
+        &self.0.factors
+    }
+
+    #[inline(always)]
+    fn bias(&self) -> f32 {
+        self.0.bias
+    }
+}
+
+impl cb2vec::QuantizedCodebookAccess for QuantizedCodebookWeights {
     #[inline(always)]
     fn dim(&self) -> usize {
         self.dim
@@ -315,7 +857,7 @@ impl QuantizedCodebookAccess for QuantizedCodebookWeights {
     }
 }
 
-impl QuantizedCodebookAccess for FactoredQuantizedCodebookWeights {
+impl cb2vec::QuantizedCodebookAccess for FactoredQuantizedCodebookWeights {
     #[inline(always)]
     fn dim(&self) -> usize {
         self.dim()
@@ -664,7 +1206,9 @@ struct QuantUndoRecord {
     len: usize,
     materialized: bool,
     cells: [usize; MAX_DIRTY_CELLS],
-    pattern_ids: [[u16; 4]; MAX_DIRTY_CELLS],
+    /// Pattern ids captured at push time (legacy u16 ids are stored widened;
+    /// the arithmetic is unchanged).
+    pattern_ids: [[u32; 4]; MAX_DIRTY_CELLS],
     black: Vec<i32>,
     white: Vec<i32>,
 }
@@ -672,21 +1216,113 @@ struct QuantUndoRecord {
 struct QuantDirectionalDeltaState {
     raw_black: Vec<i32>,
     raw_white: Vec<i32>,
-    journal: ReversibleTokenJournal<u16, 4, MAX_DIRECTION_DELTAS>,
+    journal: PatternJournal,
+}
+
+/// Reversible pattern-id journal in the id space of the loaded weights.
+enum PatternJournal {
+    /// Legacy vocabulary: journals the board's incrementally maintained
+    /// `u16` ids directly.
+    Legacy(ReversibleTokenJournal<u16, 4, MAX_DIRECTION_DELTAS>),
+    /// Full vocabulary: ids are recomputed from the bitboards for the dirty
+    /// cells of each move. `scratch` rows are only read for those cells.
+    Full {
+        journal: ReversibleTokenJournal<u32, 4, MAX_DIRECTION_DELTAS>,
+        scratch: Vec<[u32; 4]>,
+    },
+}
+
+impl PatternJournal {
+    fn new(full_vocab: bool) -> Self {
+        if full_vocab {
+            Self::Full {
+                journal: ReversibleTokenJournal::new(NUM_CELLS, NUM_CELLS),
+                scratch: vec![[0u32; 4]; NUM_CELLS],
+            }
+        } else {
+            Self::Legacy(ReversibleTokenJournal::new(NUM_CELLS, NUM_CELLS))
+        }
+    }
+
+    fn reset(&mut self, board: &Board) {
+        match self {
+            Self::Legacy(journal) => journal.reset(board.line_pattern_ids.as_ref()),
+            Self::Full { journal, scratch } => {
+                for (cell, ids) in scratch.iter_mut().enumerate() {
+                    *ids = full_ids_for_cell(&board.black, &board.white, cell);
+                }
+                journal.reset(scratch);
+            }
+        }
+    }
+
+    fn push_after(&mut self, board: &Board, dirty: &[usize]) -> usize {
+        match self {
+            Self::Legacy(journal) => journal.push_after(board.line_pattern_ids.as_ref(), dirty),
+            Self::Full { journal, scratch } => {
+                for &cell in dirty {
+                    scratch[cell] = full_ids_for_cell(&board.black, &board.white, cell);
+                }
+                journal.push_after(scratch, dirty)
+            }
+        }
+    }
+
+    fn depth(&self) -> usize {
+        match self {
+            Self::Legacy(journal) => journal.depth(),
+            Self::Full { journal, .. } => journal.depth(),
+        }
+    }
+
+    fn materialized_depth(&self) -> usize {
+        match self {
+            Self::Legacy(journal) => journal.materialized_depth(),
+            Self::Full { journal, .. } => journal.materialized_depth(),
+        }
+    }
+
+    fn materialize_pending<S: TokenDeltaSink<u16> + TokenDeltaSink<u32>>(&mut self, sink: &mut S) {
+        match self {
+            Self::Legacy(journal) => journal.materialize_pending(sink),
+            Self::Full { journal, .. } => journal.materialize_pending(sink),
+        }
+    }
+
+    fn pop<S: TokenDeltaSink<u16> + TokenDeltaSink<u32>>(
+        &mut self,
+        sink: &mut S,
+    ) -> Option<cb2vec::TokenDeltaPop> {
+        match self {
+            Self::Legacy(journal) => journal.pop(sink),
+            Self::Full { journal, .. } => journal.pop(sink),
+        }
+    }
 }
 
 impl QuantDirectionalDeltaState {
-    fn new(dim: usize) -> Self {
+    fn new(dim: usize, full_vocab: bool) -> Self {
         Self {
             raw_black: vec![0; NUM_CELLS * dim],
             raw_white: vec![0; NUM_CELLS * dim],
-            journal: ReversibleTokenJournal::new(NUM_CELLS, NUM_CELLS),
+            journal: PatternJournal::new(full_vocab),
         }
     }
 
     #[cfg(test)]
     fn logical_pattern_ids(&self) -> &[[u16; 4]] {
-        self.journal.logical_tokens()
+        match &self.journal {
+            PatternJournal::Legacy(journal) => journal.logical_tokens(),
+            PatternJournal::Full { .. } => panic!("full-vocabulary journal holds u32 ids"),
+        }
+    }
+
+    #[cfg(test)]
+    fn logical_full_pattern_ids(&self) -> &[[u32; 4]] {
+        match &self.journal {
+            PatternJournal::Full { journal, .. } => journal.logical_tokens(),
+            PatternJournal::Legacy(_) => panic!("legacy journal holds u16 ids"),
+        }
     }
 }
 
@@ -701,6 +1337,7 @@ struct QuantizedCodebookTokenSink<'a, W: QuantizedCodebookAccess> {
     profile: &'a mut EvalStateStepProfile,
     profile_enabled: bool,
     restore: bool,
+    full_vocab: bool,
 }
 
 impl<'a, W: QuantizedCodebookAccess> QuantizedCodebookTokenSink<'a, W> {
@@ -728,53 +1365,55 @@ impl<'a, W: QuantizedCodebookAccess> QuantizedCodebookTokenSink<'a, W> {
             profile,
             profile_enabled,
             restore,
+            full_vocab: weights.is_full_vocab(),
         }
     }
 
     #[inline(always)]
-    fn apply_delta(
+    fn apply_delta<T: Copy + Into<u32>>(
         weights: &W,
+        full_vocab: bool,
         site: u16,
-        delta: TokenDelta<u16>,
+        delta: TokenDelta<T>,
         raw_black: &mut [i32],
         raw_white: &mut [i32],
     ) {
         debug_assert_eq!(site, delta.site());
         debug_assert!((delta.lane() as usize) < 4);
-        apply_quantized_token_delta_to_raw(
-            delta.old(),
-            delta.new_token(),
-            weights,
-            Stone::Black,
-            raw_black,
-        );
-        apply_quantized_token_delta_to_raw(
-            delta.old(),
-            delta.new_token(),
-            weights,
-            Stone::White,
-            raw_white,
-        );
+        let old: u32 = delta.old().into();
+        let new: u32 = delta.new_token().into();
+        apply_quantized_token_delta_to_raw(old, new, weights, full_vocab, Stone::Black, raw_black);
+        apply_quantized_token_delta_to_raw(old, new, weights, full_vocab, Stone::White, raw_white);
     }
 }
 
-impl<W: QuantizedCodebookAccess> TokenDeltaSink<u16> for QuantizedCodebookTokenSink<'_, W> {
+impl<W: QuantizedCodebookAccess, T: Copy + Into<u32>> TokenDeltaSink<T>
+    for QuantizedCodebookTokenSink<'_, W>
+{
     #[inline]
-    fn apply_site(&mut self, site: u16, deltas: &[TokenDelta<u16>], replay: TokenDeltaReplay) {
+    fn apply_site(&mut self, site: u16, deltas: &[TokenDelta<T>], replay: TokenDeltaReplay) {
         let cell = site as usize;
         let numeric_start = EvalStateStepProfile::start(self.profile_enabled);
         let weights = self.weights;
+        let full_vocab = self.full_vocab;
         let raw_black = quant_cell_slice_mut(self.raw_black, cell, weights.dim());
         let raw_white = quant_cell_slice_mut(self.raw_white, cell, weights.dim());
         match replay {
             TokenDeltaReplay::Forward => {
                 for &delta in deltas {
-                    Self::apply_delta(weights, site, delta, raw_black, raw_white);
+                    Self::apply_delta(weights, full_vocab, site, delta, raw_black, raw_white);
                 }
             }
             TokenDeltaReplay::Reverse => {
                 for &delta in deltas.iter().rev() {
-                    Self::apply_delta(weights, site, delta.reversed(), raw_black, raw_white);
+                    Self::apply_delta(
+                        weights,
+                        full_vocab,
+                        site,
+                        delta.reversed(),
+                        raw_black,
+                        raw_white,
+                    );
                 }
             }
         }
@@ -809,7 +1448,7 @@ impl QuantUndoRecord {
             len: 0,
             materialized: false,
             cells: [0; MAX_DIRTY_CELLS],
-            pattern_ids: [[0u16; 4]; MAX_DIRTY_CELLS],
+            pattern_ids: [[0u32; 4]; MAX_DIRTY_CELLS],
             black: vec![0; MAX_DIRTY_CELLS * dim],
             white: vec![0; MAX_DIRTY_CELLS * dim],
         }
@@ -856,7 +1495,8 @@ impl IncrementalQuantizedCodebookEval {
             stack_len: 0,
             last_dirty_cells: 0,
             last_direction_deltas: 0,
-            directional_delta: directional_delta.then(|| QuantDirectionalDeltaState::new(dim)),
+            directional_delta: directional_delta
+                .then(|| QuantDirectionalDeltaState::new(dim, weights.is_full_vocab())),
         }
     }
 
@@ -875,47 +1515,48 @@ impl IncrementalQuantizedCodebookEval {
     ) {
         weights.validate_access();
         let dim = weights.dim();
+        let full_vocab = weights.is_full_vocab();
         self.cell_black.fill(0);
         self.cell_white.fill(0);
         self.features_black.fill(0);
         self.features_white.fill(0);
 
         for cell in 0..NUM_CELLS {
-            compute_cell_quantized(
-                board,
+            let pattern_ids = ids_for_cell(board, cell, full_vocab);
+            compute_cell_quantized_from_pattern_ids(
+                &pattern_ids,
                 weights,
-                cell,
                 Stone::Black,
                 quant_cell_slice_mut(&mut self.cell_black, cell, dim),
             );
             add_quant_cell_to_features(&self.cell_black, &mut self.features_black, cell, dim, 1);
 
-            compute_cell_quantized(
-                board,
+            compute_cell_quantized_from_pattern_ids(
+                &pattern_ids,
                 weights,
-                cell,
                 Stone::White,
                 quant_cell_slice_mut(&mut self.cell_white, cell, dim),
             );
             add_quant_cell_to_features(&self.cell_white, &mut self.features_white, cell, dim, 1);
-        }
 
-        if let Some(state) = self.directional_delta.as_mut() {
-            state.journal.reset(board.line_pattern_ids.as_ref());
-            for cell in 0..NUM_CELLS {
+            if let Some(state) = self.directional_delta.as_mut() {
                 compute_cell_quantized_raw_from_pattern_ids(
-                    &board.line_pattern_ids[cell],
+                    &pattern_ids,
                     weights,
                     Stone::Black,
                     quant_cell_slice_mut(&mut state.raw_black, cell, dim),
                 );
                 compute_cell_quantized_raw_from_pattern_ids(
-                    &board.line_pattern_ids[cell],
+                    &pattern_ids,
                     weights,
                     Stone::White,
                     quant_cell_slice_mut(&mut state.raw_white, cell, dim),
                 );
             }
+        }
+
+        if let Some(state) = self.directional_delta.as_mut() {
+            state.journal.reset(board);
         }
 
         self.stack_len = 0;
@@ -963,11 +1604,12 @@ impl IncrementalQuantizedCodebookEval {
         let undo = &mut self.stack[self.stack_len];
         undo.clear();
 
+        let full_vocab = weights.is_full_vocab();
         let start = EvalStateStepProfile::start(profile_enabled);
         for cell in dirty.iter().copied() {
             let undo_idx = undo.len;
             undo.cells[undo_idx] = cell;
-            undo.pattern_ids[undo_idx] = board.line_pattern_ids[cell];
+            undo.pattern_ids[undo_idx] = ids_for_cell(board, cell, full_vocab);
             undo.len += 1;
         }
         profile.add_frame_write(start);
@@ -1000,9 +1642,7 @@ impl IncrementalQuantizedCodebookEval {
             .as_mut()
             .expect("directional delta state enabled");
         debug_assert!(state.journal.depth() < NUM_CELLS);
-        let direction_deltas = state
-            .journal
-            .push_after(board.line_pattern_ids.as_ref(), &dirty);
+        let direction_deltas = state.journal.push_after(board, &dirty);
         profile.add_frame_write(start);
 
         self.last_dirty_cells = dirty.len();
@@ -1403,10 +2043,11 @@ fn compute_cell(
     perspective: Stone,
     out: &mut [f32],
 ) {
+    let full_vocab = weights.is_full_vocab();
     out.fill(0.0);
     let swap = perspective == Stone::White;
-    for &pid in &board.line_pattern_ids[cell] {
-        let pid = if swap { swap_mapped_id(pid) } else { pid };
+    for pid in ids_for_cell(board, cell, full_vocab) {
+        let pid = if swap { swap_id(pid, full_vocab) } else { pid };
         let emb_base = pid as usize * weights.dim;
         for d in 0..weights.dim {
             out[d] += weights.embeddings[emb_base + d];
@@ -1417,23 +2058,32 @@ fn compute_cell(
     }
 }
 
-fn compute_cell_quantized<W: QuantizedCodebookAccess>(
-    board: &Board,
-    weights: &W,
-    cell: usize,
-    perspective: Stone,
-    out: &mut [i32],
-) {
-    compute_cell_quantized_from_pattern_ids(
-        &board.line_pattern_ids[cell],
-        weights,
-        perspective,
-        out,
-    );
+/// The four directional pattern ids of `cell` in the weights' id space.
+/// Legacy ids are the board's incrementally maintained `u16` ids widened
+/// (arithmetic identical); full-vocabulary ids are computed from the
+/// bitboards on demand.
+#[inline]
+fn ids_for_cell(board: &Board, cell: usize, full_vocab: bool) -> [u32; 4] {
+    if full_vocab {
+        full_ids_for_cell(&board.black, &board.white, cell)
+    } else {
+        board.line_pattern_ids[cell].map(u32::from)
+    }
+}
+
+/// Color-swapped (mine <-> opponent) id in the weights' id space.
+#[inline(always)]
+fn swap_id(id: u32, full_vocab: bool) -> u32 {
+    if full_vocab {
+        full_swap_id(id)
+    } else {
+        debug_assert!(id <= u32::from(u16::MAX));
+        u32::from(swap_mapped_id(id as u16))
+    }
 }
 
 fn compute_cell_quantized_from_pattern_ids<W: QuantizedCodebookAccess>(
-    pattern_ids: &[u16; 4],
+    pattern_ids: &[u32; 4],
     weights: &W,
     perspective: Stone,
     out: &mut [i32],
@@ -1445,31 +2095,33 @@ fn compute_cell_quantized_from_pattern_ids<W: QuantizedCodebookAccess>(
 }
 
 fn compute_cell_quantized_raw_from_pattern_ids<W: QuantizedCodebookAccess>(
-    pattern_ids: &[u16; 4],
+    pattern_ids: &[u32; 4],
     weights: &W,
     perspective: Stone,
     out: &mut [i32],
 ) {
+    let full_vocab = weights.is_full_vocab();
     out.fill(0);
     let swap = perspective == Stone::White;
     for &pid in pattern_ids {
-        let pid = if swap { swap_mapped_id(pid) } else { pid };
+        let pid = if swap { swap_id(pid, full_vocab) } else { pid };
         weights.add_embedding_to(pid, out);
     }
 }
 
 #[inline]
 fn apply_quantized_token_delta_to_raw<W: QuantizedCodebookAccess>(
-    old_pattern_id: u16,
-    new_pattern_id: u16,
+    old_pattern_id: u32,
+    new_pattern_id: u32,
     weights: &W,
+    full_vocab: bool,
     perspective: Stone,
     raw: &mut [i32],
 ) {
     let (old_pattern_id, new_pattern_id) = if perspective == Stone::White {
         (
-            swap_mapped_id(old_pattern_id),
-            swap_mapped_id(new_pattern_id),
+            swap_id(old_pattern_id, full_vocab),
+            swap_id(new_pattern_id, full_vocab),
         )
     } else {
         (old_pattern_id, new_pattern_id)
@@ -1521,12 +2173,16 @@ fn add_quant_cell_to_features(
 }
 
 fn value_from_features(features: &[f32], weights: &CodebookWeights) -> f32 {
-    cb2vec::score_f32(features, weights).expect("FIGRID floating codebook shape is validated")
+    if weights.is_full_vocab() {
+        cb2vec::score_f32(features, &FloatHeadView(weights))
+    } else {
+        cb2vec::score_f32(features, weights)
+    }
+    .expect("FIGRID floating codebook shape is validated")
 }
 
 fn quant_value_from_features<W: QuantizedCodebookAccess>(features: &[i32], weights: &W) -> f32 {
-    cb2vec::score_quantized_uniform(features, weights, region_cell_count(0))
-        .expect("FIGRID quantized codebook shape is validated")
+    weights.score_uniform(features, region_cell_count(0))
 }
 
 #[inline]
@@ -1573,6 +2229,154 @@ fn dequantize_vec_i16(values: &[i16], scale: i32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FULL_VOCAB_MOVES: [Move; 20] = [
+        112, 113, 97, 98, 127, 128, 111, 114, 96, 99, 126, 129, 82, 83, 84, 85, 100, 101, 115, 116,
+    ];
+
+    #[test]
+    fn ngcb1_roundtrip_is_bit_exact_and_auto_detected() {
+        let weights = CodebookWeights::deterministic(4, 2);
+        let bytes = weights.to_ngcb1_bytes();
+        assert_eq!(&bytes[..8], CodebookWeights::NGCB1_MAGIC);
+        assert_eq!(
+            bytes.len(),
+            24 + (PATTERN_NUM_IDS * 4 + REGIONS * 4 + REGIONS * 4 * 2) * 4
+        );
+        let back = CodebookWeights::from_bytes_auto(&bytes).unwrap();
+        assert_eq!(back.dim, weights.dim);
+        assert_eq!(back.fm_rank, weights.fm_rank);
+        assert_eq!(back.bias.to_bits(), weights.bias.to_bits());
+        for (a, b) in [
+            (&back.embeddings, &weights.embeddings),
+            (&back.head, &weights.head),
+            (&back.factors, &weights.factors),
+        ] {
+            assert_eq!(a.len(), b.len());
+            assert!(a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits()));
+        }
+        assert!(!back.is_full_vocab());
+        assert!(CodebookWeights::from_ngcb1_bytes(&bytes[..bytes.len() - 4]).is_err());
+        let mut bad_ids = bytes.clone();
+        bad_ids[16..20].copy_from_slice(&7u32.to_le_bytes());
+        assert!(CodebookWeights::from_ngcb1_bytes(&bad_ids).is_err());
+        // Non-magic input takes the JSON path.
+        assert!(CodebookWeights::from_bytes_auto(b"{}").is_err());
+    }
+
+    #[test]
+    fn deterministic_with_legacy_num_ids_matches_deterministic() {
+        let a = CodebookWeights::deterministic(3, 2);
+        let b = CodebookWeights::deterministic_with_num_ids(3, 2, PATTERN_NUM_IDS);
+        assert_eq!(a.embeddings, b.embeddings);
+        assert_eq!(a.head, b.head);
+        assert_eq!(a.factors, b.factors);
+        assert_eq!(a.bias.to_bits(), b.bias.to_bits());
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "full-vocabulary table build is slow in debug; runs under --release"
+    )]
+    fn full_vocab_swap_involution_and_size() {
+        for id in (0..FULL_PATTERN_NUM_IDS as u32).step_by(97) {
+            let s = full_swap_id(id);
+            assert!((s as usize) < FULL_PATTERN_NUM_IDS);
+            assert_eq!(full_swap_id(s), id, "swap not an involution at id {id}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "full-vocabulary table build is slow in debug; runs under --release"
+    )]
+    fn full_vocab_quantized_incremental_matches_refresh_on_both_paths() {
+        let weights = CodebookWeights::deterministic_with_num_ids(8, 4, FULL_PATTERN_NUM_IDS);
+        assert!(weights.is_full_vocab());
+        let quantized = weights.quantize_i16_s32_s64();
+        assert!(quantized.is_full_vocab());
+        let mut board = Board::new();
+        let mut delta = IncrementalQuantizedCodebookEval::new(&quantized);
+        let mut legacy = IncrementalQuantizedCodebookEval::new_with_directional_delta(&quantized, false);
+        assert!(delta.directional_delta_enabled());
+        delta.refresh(&board, &quantized);
+        legacy.refresh(&board, &quantized);
+        let check = |board: &Board,
+                     delta: &mut IncrementalQuantizedCodebookEval,
+                     legacy: &mut IncrementalQuantizedCodebookEval| {
+            let full = evaluate_full_quantized(board, &quantized);
+            let d = delta.value(board, &quantized);
+            let l = legacy.value(board, &quantized);
+            assert_eq!(d.to_bits(), full.to_bits());
+            assert_eq!(l.to_bits(), full.to_bits());
+            let state = delta.directional_delta.as_ref().unwrap();
+            for cell in 0..NUM_CELLS {
+                assert_eq!(
+                    state.logical_full_pattern_ids()[cell],
+                    full_ids_for_cell(&board.black, &board.white, cell)
+                );
+            }
+        };
+        check(&board, &mut delta, &mut legacy);
+        for &mv in &FULL_VOCAB_MOVES {
+            board.make_move(mv);
+            delta.push_move(&board, mv, &quantized);
+            legacy.push_move(&board, mv, &quantized);
+            check(&board, &mut delta, &mut legacy);
+        }
+        for _ in 0..FULL_VOCAB_MOVES.len() {
+            board.undo_move();
+            delta.pop_move(&quantized);
+            legacy.pop_move(&quantized);
+            check(&board, &mut delta, &mut legacy);
+        }
+        // The legacy geometry of the same seed is a different model.
+        let legacy_weights =
+            CodebookWeights::deterministic_with_num_ids(8, 4, PATTERN_NUM_IDS).quantize_i16_s32_s64();
+        assert!(!legacy_weights.is_full_vocab());
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "full-vocabulary table build is slow in debug; runs under --release"
+    )]
+    fn full_vocab_float_incremental_and_loaders() {
+        let weights = CodebookWeights::deterministic_with_num_ids(2, 1, FULL_PATTERN_NUM_IDS);
+        let mut board = Board::new();
+        let mut inc = IncrementalCodebookEval::new(&weights);
+        inc.refresh(&board, &weights);
+        for &mv in &FULL_VOCAB_MOVES[..8] {
+            board.make_move(mv);
+            inc.push_move(&board, mv, &weights);
+            assert_close(inc.value(&board, &weights), evaluate_full(&board, &weights));
+        }
+
+        let from_bin = CodebookWeights::from_bytes_auto(&weights.to_ngcb1_bytes()).unwrap();
+        assert!(from_bin.is_full_vocab());
+        assert_eq!(from_bin.embeddings, weights.embeddings);
+
+        let root = serde_json::json!({
+            "format": "noru-pattern4-codebook-eval-v1",
+            "model": "codebook-region-fm",
+            "embedding_dim": weights.dim,
+            "fm_rank": weights.fm_rank,
+            "regions": REGIONS,
+            "weights": {
+                "embeddings": weights.embeddings,
+                "head": weights.head,
+                "factors": weights.factors,
+                "bias": weights.bias,
+            }
+        });
+        let from_json = CodebookWeights::from_json_value(&root).unwrap();
+        assert!(from_json.is_full_vocab());
+        assert_eq!(from_json.embeddings, weights.embeddings);
+        assert_eq!(from_json.head, weights.head);
+        assert_eq!(from_json.factors, weights.factors);
+    }
     use crate::board::GameResult;
     use crate::factored_codebook::PackedCodebookArtifact;
     use std::path::Path;
@@ -1675,8 +2479,8 @@ mod tests {
         for &(old, new) in &[(0u16, 1u16), (1, 2), (585, 586), (4096, 4265)] {
             for component in 0..factored.dim() {
                 assert_eq!(
-                    QuantizedCodebookAccess::embedding_delta(&factored, old, new, component),
-                    QuantizedCodebookAccess::embedding_delta(&flat, old, new, component),
+                    cb2vec::QuantizedCodebookAccess::embedding_delta(&factored, old, new, component),
+                    cb2vec::QuantizedCodebookAccess::embedding_delta(&flat, old, new, component),
                     "embedding delta {old}->{new}, component {component}"
                 );
             }
@@ -2389,7 +3193,7 @@ mod tests {
         let mut expected = vec![0i32; weights.dim];
         for cell in 0..NUM_CELLS {
             compute_cell_quantized_raw_from_pattern_ids(
-                &board.line_pattern_ids[cell],
+                &board.line_pattern_ids[cell].map(u32::from),
                 weights,
                 Stone::Black,
                 &mut expected,
@@ -2400,7 +3204,7 @@ mod tests {
                 "Black raw cell {cell}"
             );
             compute_cell_quantized_raw_from_pattern_ids(
-                &board.line_pattern_ids[cell],
+                &board.line_pattern_ids[cell].map(u32::from),
                 weights,
                 Stone::White,
                 &mut expected,

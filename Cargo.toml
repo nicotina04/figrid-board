@@ -87,6 +87,16 @@ name = "pbrain-figrid"
 path = "bin/pbrain_figrid_noru.rs"
 
 [[bin]]
+name = "ngcb-convert"
+path = "bin/ngcb_convert.rs"
+required-features = ["codebook-eval"]
+
+[[bin]]
+name = "t1-eval-dump"
+path = "bin/t1_eval_dump.rs"
+required-features = ["codebook-eval"]
+
+[[bin]]
 name = "relation-lite-val"
 path = "bin/relation_lite_val.rs"
 

@@ -92,6 +92,10 @@ path = "bin/ngcb_convert.rs"
 required-features = ["codebook-eval"]
 
 [[bin]]
+name = "p4r0-forced-census"
+path = "bin/p4r0_forced_census.rs"
+
+[[bin]]
 name = "t1-eval-dump"
 path = "bin/t1_eval_dump.rs"
 required-features = ["codebook-eval"]

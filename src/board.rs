@@ -1105,7 +1105,7 @@ impl Board {
     }
 
     #[inline]
-    fn line_run(&self, stone: &BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> (u32, u32) {
+    pub(crate) fn line_run(&self, stone: &BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> (u32, u32) {
         let mut count = 1u32;
         let mut open_ends = 0u32;
 

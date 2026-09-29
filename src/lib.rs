@@ -20,6 +20,7 @@ pub mod factored_codebook;
 pub mod features;
 pub mod heuristic;
 pub mod pattern_dense;
+pub mod p4r0_census;
 pub mod pattern_table;
 pub(crate) mod relation_fusion_gate;
 pub(crate) mod relation_lite;

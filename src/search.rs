@@ -85,6 +85,174 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// P-CB1 policy-order table (`PCB1v1` binary: magic, u32 n, f32 A[n], f32
+/// D[n]). Loaded once from `NORU_POLICY_ORDER`; default OFF. A set-but-bad
+/// path panics loudly so an arena can never silently run without it.
+/// NG-P1: n = 199,827 selects the untruncated full-vocab id space (ids
+/// computed from the bitboards per candidate cell); n = 4,266 keeps the
+/// legacy board-maintained ids unchanged.
+pub struct PolicyOrderTable {
+    attack: Vec<f32>,
+    defense: Vec<f32>,
+    full_vocab: bool,
+    /// Auto-desaturation divisor applied at load (`None` = table untouched).
+    desat_k: Option<f64>,
+}
+
+/// Quiet-score saturation guard. The runtime quiet score is
+/// `clamp((s * 10_000) as i32, ±300_000)` with `s` a sum of 8 entries
+/// (A[my] + D[opp] over 4 directions), so any |s| >= 30 collapses onto the
+/// clamp and loses its ordering. If `8 * max|entry| >= 30` both tables are
+/// divided by `k = 8 * max|entry| / 29` (f64 math, stored back as f32) so
+/// every reachable sum stays strictly inside the band; otherwise the table
+/// is left bit-identical. Returns the applied `k`.
+fn desaturate_policy_tables(attack: &mut [f32], defense: &mut [f32]) -> Option<f64> {
+    let max_abs = attack
+        .iter()
+        .chain(defense.iter())
+        .fold(0.0f64, |m, &v| m.max((v as f64).abs()));
+    let bound = 8.0 * max_abs;
+    if bound < 30.0 {
+        return None;
+    }
+    let k = bound / 29.0;
+    for v in attack.iter_mut().chain(defense.iter_mut()) {
+        *v = ((*v as f64) / k) as f32;
+    }
+    Some(k)
+}
+
+impl PolicyOrderTable {
+    fn load(path: &str) -> Result<Self, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+        if bytes.len() < 12 || &bytes[..8] != b"PCB1v1\0\0" {
+            return Err(format!("{path}: bad PCB1 header"));
+        }
+        let n = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let full_vocab = n == crate::pattern_table::FULL_PATTERN_NUM_IDS;
+        if bytes.len() != 12 + n * 8
+            || (!full_vocab && n != crate::pattern_table::PATTERN_NUM_IDS)
+        {
+            return Err(format!("{path}: bad PCB1 length (n={n})"));
+        }
+        if full_vocab {
+            crate::pattern_table::warm_full_vocab();
+        }
+        let read = |off: usize| -> Vec<f32> {
+            (0..n)
+                .map(|i| {
+                    f32::from_le_bytes(bytes[off + i * 4..off + i * 4 + 4].try_into().unwrap())
+                })
+                .collect()
+        };
+        let mut attack = read(12);
+        let mut defense = read(12 + n * 4);
+        let desat_k = desaturate_policy_tables(&mut attack, &mut defense);
+        Ok(Self {
+            attack,
+            defense,
+            full_vocab,
+            desat_k,
+        })
+    }
+
+    /// Divisor applied by load-time auto-desaturation, if any.
+    pub fn desat_k(&self) -> Option<f64> {
+        self.desat_k
+    }
+
+    /// Learned quiet score scaled into the sub-tier integer band.
+    #[inline]
+    fn quiet_score(&self, board: &Board, mv: Move) -> i32 {
+        let white_to_move = board.side_to_move == Stone::White;
+        let mut s = 0.0f32;
+        if self.full_vocab {
+            let ids = crate::pattern_table::full_ids_for_cell(&board.black, &board.white, mv);
+            for &id in &ids {
+                let swapped = crate::pattern_table::full_swap_id(id);
+                let (my_id, opp_id) = if white_to_move {
+                    (swapped, id)
+                } else {
+                    (id, swapped)
+                };
+                s += self.attack[my_id as usize] + self.defense[opp_id as usize];
+            }
+        } else {
+            let ids = board.line_pattern_ids[mv];
+            for &id in &ids {
+                let (my_id, opp_id) = if white_to_move {
+                    (crate::pattern_table::swap_mapped_id(id), id)
+                } else {
+                    (id, crate::pattern_table::swap_mapped_id(id))
+                };
+                s += self.attack[my_id as usize] + self.defense[opp_id as usize];
+            }
+        }
+        ((s * 10_000.0) as i32).clamp(-300_000, 300_000)
+    }
+}
+
+/// Loads the `NORU_POLICY_ORDER` table once. `Ok(None)` = unset/empty,
+/// `Err` = set but unreadable/invalid.
+fn policy_order_table_init() -> &'static Result<Option<(String, PolicyOrderTable)>, String> {
+    static TABLE: OnceLock<Result<Option<(String, PolicyOrderTable)>, String>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let Ok(path) = std::env::var("NORU_POLICY_ORDER") else {
+            return Ok(None);
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            return Ok(None);
+        }
+        PolicyOrderTable::load(path)
+            .map(|table| Some((path.to_string(), table)))
+            .map_err(|e| format!("NORU_POLICY_ORDER: {e}"))
+    })
+}
+
+fn policy_order_table() -> Option<&'static PolicyOrderTable> {
+    match policy_order_table_init() {
+        Ok(table) => table.as_ref().map(|(_, table)| table),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// P-CB2: policy-rank-conditioned reduction/pruning.
+/// Active only when `NORU_POLICY_REDUCE` is truthy AND the policy-order
+/// table is loaded (quiet band is then policy-sorted, so move_idx IS the
+/// policy rank). A set flag without a table fails loudly.
+fn policy_reduce_init() -> &'static Result<bool, String> {
+    static ENABLED: OnceLock<Result<bool, String>> = OnceLock::new();
+    ENABLED.get_or_init(|| {
+        let on = std::env::var("NORU_POLICY_REDUCE")
+            .map(|raw| {
+                let t = raw.trim();
+                !(t.is_empty()
+                    || t.eq_ignore_ascii_case("0")
+                    || t.eq_ignore_ascii_case("false")
+                    || t.eq_ignore_ascii_case("off")
+                    || t.eq_ignore_ascii_case("no"))
+            })
+            .unwrap_or(false);
+        if on && !matches!(policy_order_table_init(), Ok(Some(_))) {
+            return Err("NORU_POLICY_REDUCE requires NORU_POLICY_ORDER to be loaded".to_string());
+        }
+        Ok(on)
+    })
+}
+
+fn policy_reduce_enabled() -> bool {
+    match policy_reduce_init() {
+        Ok(on) => *on,
+        Err(e) => panic!("{e}"),
+    }
+}
+
+fn forced_restriction_enabled_by_env() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("NORU_FORCED_REPLY_RESTRICTION", false))
+}
+
 #[cfg(feature = "codebook-eval")]
 fn validate_white_root_order_hook_exclusivity() -> Result<(), String> {
     const PATH_HOOKS: [&str; 13] = [
@@ -1453,6 +1621,11 @@ pub struct Searcher {
     white_root_order: Option<WhiteRootOrder>,
     #[cfg(feature = "codebook-eval")]
     white_root_order_cache: Option<WhiteRootOrderCache>,
+    /// P4-R1: restrict the move list at nodes whose reply set the rules fix.
+    use_forced_restriction: bool,
+    /// P4-R0 forced-node census. Counting only; never affects search output.
+    pub census: crate::p4r0_census::ForcedCensus,
+    census_scratch: Vec<crate::board::Move>,
 }
 
 impl Searcher {
@@ -1497,6 +1670,9 @@ impl Searcher {
             white_root_order: None,
             #[cfg(feature = "codebook-eval")]
             white_root_order_cache: None,
+            use_forced_restriction: forced_restriction_enabled_by_env(),
+            census: crate::p4r0_census::ForcedCensus::default(),
+            census_scratch: Vec::with_capacity(16),
         }
     }
 
@@ -1579,6 +1755,15 @@ impl Searcher {
 
     pub fn set_stress_threat_field(&mut self, enabled: bool) {
         self.stress_threat_field = enabled;
+    }
+
+    /// Enable the sound forced-reply restriction (P4-R1): at nodes where
+    /// the opponent threatens an immediate five, search only the reply the
+    /// rules leave (our own five, else the single blocking cell; two or more
+    /// completing cells score as a loss). Freestyle and Standard only.
+    /// Defaults to `NORU_FORCED_REPLY_RESTRICTION` (off when unset).
+    pub fn set_use_forced_restriction(&mut self, enabled: bool) {
+        self.use_forced_restriction = enabled;
     }
 
     pub fn set_node_limit(&mut self, limit: Option<u64>) {
@@ -3404,7 +3589,53 @@ impl Searcher {
         // ???????꾩룆梨띰쭕??????븐뼐???????????븐뼔??????????null-window???????????????fail-high??full re-search.
         // LMR ??????熬곣몿???: ??PV / ??killer / ??forcing ??????reduction r ply ??????ш끽踰椰???????????        // ??????⑤벡瑜??꿔꺂?????? ??????ш끽踰椰????????????耀붾굝???????alpha ??????⑤슢堉??곕????轅붽틓?????獒뺣폍??full depth??????? tier ???????????????gating????????        // ???????ル????????뀀맩鍮??????룸챶猷??????? reduce??? ?????關?쒎첎?嫄??怨룻돫?? horizon effect ???.
         let mut searched_moves = 0usize;
-        if self.use_move_picker && ply > 0 {
+        // P4-R0 census: classify this node before any move is tried.
+        let census_forced = if self.census.enabled {
+            self.census.observe_node(board, &mut self.census_scratch)
+        } else {
+            None
+        };
+
+        // === P4-R1: sound forced-reply restriction ===
+        // Where the opponent already threatens an immediate five, the rules fix
+        // the non-losing reply set: our own five if we have one, else the single
+        // completing cell, else the node is lost. Restricting to it is a theorem
+        // rather than a heuristic, which is what separates this from the naive
+        // LMR that reduced forcing moves and cost -43%p.
+        let mut forced_only: Option<Move> = None;
+        if self.use_forced_restriction {
+            use crate::p4r0_census::SoundReply;
+            match crate::p4r0_census::sound_reply(board, &mut self.census_scratch) {
+                SoundReply::NotForced => {}
+                SoundReply::WinNow(mv) | SoundReply::OnlyBlock(mv) => forced_only = Some(mv),
+                SoundReply::Lost => {
+                    // We reply, they complete five: the loss is exactly two plies out.
+                    return -(WIN_SCORE - (ply as i32 + 2));
+                }
+            }
+        }
+        if let Some(only) = forced_only {
+            let _ = self.search_alpha_beta_child(
+                board,
+                weights,
+                inc,
+                depth,
+                ply,
+                searched_moves,
+                only,
+                true,
+                is_pv,
+                &mut alpha,
+                beta,
+                side,
+                prev1,
+                prev2,
+                &mut quiets_tried,
+                &mut best_score,
+                &mut best_move_at_node,
+            );
+            searched_moves += 1;
+        } else if self.use_move_picker && ply > 0 {
             self.move_picker_stats.enabled_nodes += 1;
             let mut emitted = [false; NUM_CELLS];
             let mut stop = false;
@@ -3523,6 +3754,14 @@ impl Searcher {
         } else {
             Bound::Exact
         };
+        if self.census.enabled {
+            let observed = match bound {
+                Bound::Upper => crate::p4r0_census::NodeBound::All,
+                Bound::Lower => crate::p4r0_census::NodeBound::Cut,
+                Bound::Exact => crate::p4r0_census::NodeBound::Exact,
+            };
+            self.census.record(census_forced, searched_moves, observed);
+        }
         // depth???????ル??? u8????????????????????ル?????saturate. ?????????녳븢??max_depth ??20??????????????????????대첉??
         let profile_start = self.profile_start();
         self.tt.store(
@@ -3561,7 +3800,13 @@ impl Searcher {
             ply < 64 && (self.killers[ply][0] == Some(mv) || self.killers[ply][1] == Some(mv));
 
         if !is_pv && !is_forcing && !is_killer && depth >= LMP_MIN_DEPTH && depth <= LMP_MAX_DEPTH {
-            let lmp_threshold = LMP_BASE + LMP_PER_DEPTH * depth as usize;
+            // P-CB2: policy-sorted quiets earn an earlier count cutoff
+            // (frozen 6 + 2*depth vs the default 8 + 4*depth).
+            let lmp_threshold = if policy_reduce_enabled() {
+                6 + 2 * depth as usize
+            } else {
+                LMP_BASE + LMP_PER_DEPTH * depth as usize
+            };
             if move_idx >= lmp_threshold {
                 return false;
             }
@@ -4434,6 +4679,25 @@ impl Searcher {
             return (TIER_BLOCK_WIN, true);
         }
 
+        // P-CB1: with a policy table loaded, QUIET moves (no attack and no
+        // block classification) are ranked by the learned pattern-conditioned
+        // score instead of history/cont-history. Killers and every tier above
+        // stay untouched; with NORU_POLICY_ORDER unset this branch is dead.
+        if matches!(my_kind, ThreatKind::None) && matches!(opp_kind, ThreatKind::None) {
+            if let Some(table) = policy_order_table() {
+                let mut score = 0i32;
+                if ply < 64 {
+                    if self.killers[ply][0] == Some(mv) {
+                        score += 80_000;
+                    } else if self.killers[ply][1] == Some(mv) {
+                        score += 40_000;
+                    }
+                }
+                score += table.quiet_score(board, mv);
+                return (score, false);
+            }
+        }
+
         let mut score =
             apply_weak_attack_cap(tier_score, attack_tier, block_tier, my_kind, opp_kind, ply);
 
@@ -4721,6 +4985,16 @@ fn lmr_reduction(depth: u32, move_idx: usize, is_forcing: bool, is_killer: bool)
     if move_idx >= 6 {
         r += 1;
     }
+    // P-CB2: with policy-sorted quiets, deep-late = policy-junk. Frozen
+    // rank thresholds 10 (+1) and 18 (+1), same depth-2 cap.
+    if policy_reduce_enabled() {
+        if move_idx >= 10 {
+            r += 1;
+        }
+        if move_idx >= 18 {
+            r += 1;
+        }
+    }
     r.min(depth.saturating_sub(2))
 }
 
@@ -4744,6 +5018,57 @@ fn threat_priority(kind: ThreatKind, defending: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_table_desaturation_rescales_only_saturating_tables() {
+        // Saturating table: max|entry| = 45 -> 8*45 = 360 >= 30.
+        let mut attack: Vec<f32> = (0..64).map(|i| ((i % 19) as f32 - 9.0) * 5.0).collect();
+        let mut defense: Vec<f32> = (0..64).map(|i| ((i % 13) as f32 - 6.0) * 3.5).collect();
+        attack[7] = 45.0;
+        defense[3] = -44.0;
+        let orig_a = attack.clone();
+        let orig_d = defense.clone();
+        let sum8 = |a: &[f32], d: &[f32], ids: [usize; 4]| -> f32 {
+            // 4 directions x (A[my] + D[opp]) = 8 entries, as in quiet_score.
+            ids.iter().map(|&i| a[i] + d[(i * 5 + 1) % 64]).sum::<f32>()
+        };
+        let samples: [[usize; 4]; 5] = [
+            [7, 7, 7, 7],
+            [0, 1, 2, 3],
+            [10, 20, 30, 40],
+            [5, 9, 17, 33],
+            [60, 61, 62, 63],
+        ];
+        let before: Vec<f32> = samples.iter().map(|&ids| sum8(&orig_a, &orig_d, ids)).collect();
+        assert!(before.iter().any(|s| s.abs() >= 30.0), "fixture must saturate");
+
+        let k = desaturate_policy_tables(&mut attack, &mut defense).expect("must rescale");
+        assert!((k - 8.0 * 45.0 / 29.0).abs() < 1e-9);
+        let max_after = attack
+            .iter()
+            .chain(defense.iter())
+            .fold(0.0f32, |m, &v| m.max(v.abs()));
+        assert!(8.0 * max_after < 30.0, "8*max after = {}", 8.0 * max_after);
+        let after: Vec<f32> = samples.iter().map(|&ids| sum8(&attack, &defense, ids)).collect();
+        for i in 0..samples.len() {
+            for j in 0..samples.len() {
+                if before[i] < before[j] {
+                    assert!(after[i] < after[j], "order flipped for samples {i},{j}");
+                }
+            }
+            assert!(after[i].abs() < 30.0, "sample {i} still saturates: {}", after[i]);
+        }
+
+        // Non-saturating table: max|entry| = 3 -> 24 < 30, bit-identical.
+        let mut small_a: Vec<f32> = (0..64).map(|i| ((i % 7) as f32 - 3.0) * 0.99).collect();
+        let mut small_d: Vec<f32> = (0..64).map(|i| ((i % 5) as f32 - 2.0) * 1.5).collect();
+        small_a[0] = 3.0;
+        let (ref_a, ref_d) = (small_a.clone(), small_d.clone());
+        assert!(desaturate_policy_tables(&mut small_a, &mut small_d).is_none());
+        assert!(small_a.iter().zip(&ref_a).all(|(x, y)| x.to_bits() == y.to_bits()));
+        assert!(small_d.iter().zip(&ref_d).all(|(x, y)| x.to_bits() == y.to_bits()));
+    }
+
     use crate::board::{Board, to_idx};
     #[cfg(feature = "codebook-eval")]
     use crate::factored_codebook::PackedCodebookArtifact;

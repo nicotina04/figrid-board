@@ -382,11 +382,16 @@ fn classify_window_anchor_mine_rule(
     debug_assert_eq!(w[5], 1);
     let mut count = 1u32;
     let mut open_front = false;
+    let mut edge_ends = 0u32;
     for off in 1usize..=5 {
         match w[5 + off] {
             1 => count += 1,
             0 => {
                 open_front = true;
+                break;
+            }
+            3 => {
+                edge_ends += 1;
                 break;
             }
             _ => break,
@@ -400,11 +405,15 @@ fn classify_window_anchor_mine_rule(
                 open_back = true;
                 break;
             }
+            3 => {
+                edge_ends += 1;
+                break;
+            }
             _ => break,
         }
     }
     let open_ends = open_front as u32 + open_back as u32;
-    if rule_set.line_wins(side, count, open_ends) {
+    if rule_set.line_wins_with_edges(side, count, open_ends, edge_ends) {
         return WindowThreat::Five;
     }
     match (count, open_ends) {

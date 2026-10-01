@@ -39,12 +39,30 @@ impl RuleSet {
         matches!(self, RuleSet::Standard | RuleSet::Renju)
     }
 
+    /// Win test when only the empty terminals are known. For Caro this treats
+    /// a board edge as blocking, which is stricter than Gomocup; prefer
+    /// [`RuleSet::line_wins_with_edges`] whenever the edge count is available.
     #[inline]
     pub const fn line_wins(self, side: Stone, count: u32, open_ends: u32) -> bool {
+        self.line_wins_with_edges(side, count, open_ends, 0)
+    }
+
+    /// Win test with the GomocupJudge terminal semantics: `open_ends` counts
+    /// empty in-board terminals and `edge_ends` counts terminals past the
+    /// board. Caro (Gomocup `rule 9`) wins only with exactly five that is not
+    /// blocked at both ends by opponent stones; a board edge does not block.
+    #[inline]
+    pub const fn line_wins_with_edges(
+        self,
+        side: Stone,
+        count: u32,
+        open_ends: u32,
+        edge_ends: u32,
+    ) -> bool {
         match self {
             RuleSet::Freestyle => count >= 5,
             RuleSet::Standard => count == 5,
-            RuleSet::Caro => count >= 6 || (count == 5 && open_ends > 0),
+            RuleSet::Caro => count == 5 && open_ends + edge_ends > 0,
             RuleSet::Renju => match side {
                 Stone::Black => count == 5,
                 Stone::White => count >= 5,
@@ -1096,18 +1114,28 @@ impl Board {
 
         let directions: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
         for &(dr, dc) in &directions {
-            let (count, open_ends) = self.line_run(stone, row as i32, col as i32, dr, dc);
-            if rules.line_wins(side, count, open_ends) {
+            let (count, open_ends, edge_ends) =
+                self.line_run_with_edges(stone, row as i32, col as i32, dr, dc);
+            if rules.line_wins_with_edges(side, count, open_ends, edge_ends) {
                 return true;
             }
         }
         false
     }
 
+    /// `(count, empty terminals, off-board terminals)` of the run through `(row, col)`.
     #[inline]
-    pub(crate) fn line_run(&self, stone: &BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> (u32, u32) {
+    pub(crate) fn line_run_with_edges(
+        &self,
+        stone: &BitBoard,
+        row: i32,
+        col: i32,
+        dr: i32,
+        dc: i32,
+    ) -> (u32, u32, u32) {
         let mut count = 1u32;
         let mut open_ends = 0u32;
+        let mut edge_ends = 0u32;
 
         let mut r = row + dr;
         let mut c = col + dc;
@@ -1119,6 +1147,7 @@ impl Board {
         if in_board(r, c) && self.is_empty(to_idx(r as usize, c as usize)) {
             open_ends += 1;
         }
+        edge_ends += !in_board(r, c) as u32;
 
         let mut r = row - dr;
         let mut c = col - dc;
@@ -1130,8 +1159,9 @@ impl Board {
         if in_board(r, c) && self.is_empty(to_idx(r as usize, c as usize)) {
             open_ends += 1;
         }
+        edge_ends += !in_board(r, c) as u32;
 
-        (count, open_ends)
+        (count, open_ends, edge_ends)
     }
 
     #[inline]
@@ -1665,17 +1695,45 @@ mod tests {
         assert!(board.check_win(last));
     }
 
+    // Caro follows GomocupJudge `rule 9`: exactly five, not blocked at both
+    // ends by opponent stones; the board edge never blocks.
     #[test]
-    fn caro_overline_wins_even_when_blocked() {
+    fn caro_overline_does_not_win() {
         let mut board = Board::new();
         board.set_rule_set(RuleSet::Caro);
-        put_stone(&mut board, Stone::White, 7, 3);
-        put_stone(&mut board, Stone::White, 7, 10);
         let mut last = 0;
         for col in 4..=9 {
             last = put_stone(&mut board, Stone::Black, 7, col);
         }
+        assert!(!board.check_win(last));
+    }
+
+    #[test]
+    fn caro_edge_does_not_block_exact_five() {
+        let mut board = Board::new();
+        board.set_rule_set(RuleSet::Caro);
+        put_stone(&mut board, Stone::White, 7, 5);
+        let mut last = 0;
+        for col in 0..=4 {
+            last = put_stone(&mut board, Stone::Black, 7, col);
+        }
         assert!(board.check_win(last));
+    }
+
+    #[test]
+    fn caro_judge_probe_blocked_five_is_not_a_threat() {
+        // GomocupJudge test_zip_rules.py caro_specific: h8f8g8f9i8f7j8l8,
+        // black to move. k8 makes g8..k8 blocked by f8/l8 -> no win, so the
+        // only sensible reply blocks white's f7-f8-f9 three.
+        let mut board = Board::new();
+        board.set_rule_set(RuleSet::Caro);
+        put_stone(&mut board, Stone::White, 7, 5);
+        put_stone(&mut board, Stone::White, 7, 11);
+        let mut last = 0;
+        for col in 6..=10 {
+            last = put_stone(&mut board, Stone::Black, 7, col);
+        }
+        assert!(!board.check_win(last));
     }
 
     #[test]

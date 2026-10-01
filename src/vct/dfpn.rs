@@ -1174,7 +1174,11 @@ fn replay_scan_terminal(board: &Board, attacker: Stone) -> Result<Option<LeafKin
                 {
                     open_ends += 1;
                 }
-                if board.effective_rule_set().line_wins(side, count, open_ends) {
+                let edge_ends = !in_board(r, c) as u32 + !in_board(end_r, end_c) as u32;
+                if board
+                    .effective_rule_set()
+                    .line_wins_with_edges(side, count, open_ends, edge_ends)
+                {
                     return true;
                 }
             }
@@ -1239,7 +1243,8 @@ fn full_board_has_five(board: &Board, side: Stone) -> bool {
             if in_board(r, c) && !occupied.get(r as usize * BOARD_SIZE + c as usize) {
                 open_ends += 1;
             }
-            if rule.line_wins(side, count, open_ends) {
+            let edge_ends = !in_board(prev_r, prev_c) as u32 + !in_board(r, c) as u32;
+            if rule.line_wins_with_edges(side, count, open_ends, edge_ends) {
                 return true;
             }
         }

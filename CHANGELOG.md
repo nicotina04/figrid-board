@@ -1,5 +1,31 @@
 # Changes
 
+## 0.9.2 (2026-10-01)
+
+### Fixed
+
+* Caro now follows GomocupJudge `rule 9`, the code the Gomocup Caro league
+  sends: exactly five wins, an overline does not, and a five is void only when
+  opponent stones block both ends; the board edge does not block. Before, Caro
+  counted overlines as wins and treated the edge as blocking, and `pbrain`
+  mapped `rule 9` to nothing and silently played Freestyle, failing the
+  judge's `caro_specific` probe.
+* `pbrain-figrid` answers `INFO rule` with `ERROR - unsupported rule N` for
+  rules it does not model (Renju, continuous, bare `rule 8`), and refuses to
+  move under them, instead of playing Freestyle. Managers send the rule after
+  `START`, so the `START` check alone never fired.
+
+### Added
+
+* `RuleSet::line_wins_with_edges`, the win test with off-board terminals
+  counted separately; `RuleSet::line_wins` keeps its signature.
+* A randomized test that checks every five detector (`check_win`, the slow and
+  pattern-table threat classifiers, and the immediate-five scan) against a port
+  of the GomocupJudge win check for Freestyle, Standard and Caro.
+
+Freestyle and Standard play is unchanged: fixed-depth move, eval and node
+counts are identical to 0.9.1 on 120 positions.
+
 ## 0.9.1 (2026-09-30)
 
 ### Fixed

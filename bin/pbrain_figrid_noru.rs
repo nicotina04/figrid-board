@@ -648,16 +648,19 @@ impl ProtocolInfo {
     }
 
     fn rule_set(&self) -> Option<RuleSet> {
-        // Supported now: Freestyle, Standard exact-5, and Caro.
-        // Renju needs forbidden-move legality; continuous is not modeled.
+        // Supported now: Freestyle (0), Standard exact-5 (1) and Caro as
+        // Gomocup plays it (9 = caro|exact5: exactly five, not blocked at both
+        // ends by stones). Bare rule 8 (overline-wins Caro) is not modeled,
+        // Renju needs forbidden-move legality, continuous is not modeled.
         if self.rule_continuous || self.rule_renju {
             return None;
         }
-        if self.rule_caro && self.rule_exact5 {
-            return None;
-        }
         if self.rule_caro {
-            Some(RuleSet::Caro)
+            if self.rule_exact5 {
+                Some(RuleSet::Caro)
+            } else {
+                None
+            }
         } else if self.rule_exact5 {
             Some(RuleSet::Standard)
         } else {
@@ -827,7 +830,18 @@ impl Engine {
         Ok(())
     }
 
+    fn no_move_error(&self) -> &'static str {
+        if self.info.rule_supported() {
+            "ERROR - no legal move"
+        } else {
+            "ERROR - unsupported rule"
+        }
+    }
+
     fn choose_move(&mut self) -> Option<(u8, u8)> {
+        if !self.info.rule_supported() {
+            return None;
+        }
         // Sync the win rule into the board on every move. Gomocup sends
         // `START` *before* `INFO rule 1`, and `BOARD` calls `reset_board()`
         // (which clears `exact5` back to false), so setting this only in the
@@ -993,7 +1007,7 @@ fn main() {
                 if let Some((x, y)) = engine.choose_move() {
                     writeln!(stdout, "{x},{y}").ok();
                 } else {
-                    writeln!(stdout, "ERROR - no legal move").ok();
+                    writeln!(stdout, "{}", engine.no_move_error()).ok();
                 }
             }
             "TURN" => {
@@ -1021,7 +1035,7 @@ fn main() {
                 if let Some((ox, oy)) = engine.choose_move() {
                     writeln!(stdout, "{ox},{oy}").ok();
                 } else {
-                    writeln!(stdout, "ERROR - no legal move").ok();
+                    writeln!(stdout, "{}", engine.no_move_error()).ok();
                 }
             }
             "BOARD" => {
@@ -1101,7 +1115,7 @@ fn main() {
                 if let Some((x, y)) = engine.choose_move() {
                     writeln!(stdout, "{x},{y}").ok();
                 } else {
-                    writeln!(stdout, "ERROR - no legal move").ok();
+                    writeln!(stdout, "{}", engine.no_move_error()).ok();
                 }
             }
             "INFO" => {
@@ -1112,6 +1126,11 @@ fn main() {
                     continue;
                 };
                 engine.info.update(key, val);
+                // Managers send `INFO rule` after START, so the START check
+                // cannot catch it; say so here instead of playing Freestyle.
+                if key == "rule" && !engine.info.rule_supported() {
+                    writeln!(stdout, "ERROR - unsupported rule {val}").ok();
+                }
             }
             "END" => std::process::exit(0),
             "ABOUT" => {

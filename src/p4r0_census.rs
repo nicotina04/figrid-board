@@ -35,11 +35,12 @@ pub fn five_cells(board: &Board, side: Stone, out: &mut Vec<Move>) {
         }
         let (row, col) = to_rc(cell);
         for &(dr, dc) in &DIRECTIONS {
-            // `line_run` starts the count at the anchor itself and walks
+            // `line_run_with_edges` starts the count at the anchor itself and walks
             // outward, so an empty anchor yields the count as if `side` had
             // just played there.
-            let (count, open_ends) = board.line_run(stones, row as i32, col as i32, dr, dc);
-            if rules.line_wins(side, count, open_ends) {
+            let (count, open_ends, edge_ends) =
+                board.line_run_with_edges(stones, row as i32, col as i32, dr, dc);
+            if rules.line_wins_with_edges(side, count, open_ends, edge_ends) {
                 out.push(cell);
                 break;
             }

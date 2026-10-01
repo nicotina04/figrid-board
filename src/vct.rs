@@ -102,6 +102,20 @@ enum LineThreat {
     Five,        // (>=5)
 }
 
+/// Number of terminals of the `stones` run through `(row, col)` that fall off the board.
+fn run_edge_ends(stones: &BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> u32 {
+    let mut edges = 0u32;
+    for (sr, sc) in [(dr, dc), (-dr, -dc)] {
+        let (mut r, mut c) = (row + sr, col + sc);
+        while in_board(r, c) && stones.get(r as usize * BOARD_SIZE + c as usize) {
+            r += sr;
+            c += sc;
+        }
+        edges += !in_board(r, c) as u32;
+    }
+    edges
+}
+
 fn classify_line(count: u32, open_ends: u32, rule_set: RuleSet, side: Stone) -> LineThreat {
     if rule_set.line_wins(side, count, open_ends) {
         return LineThreat::Five;
@@ -231,6 +245,13 @@ fn classify_move_rules_with_flags(
         let info = scan_line(&my_tmp, opp_bb, row, col, dr, dc);
         let open_ends = info.open_front as u32 + info.open_back as u32;
         let mut line_threat = classify_line(info.count, open_ends, rule_set, side);
+        // Caro: a run that ends at the board edge is not blocked there.
+        if rule_set == RuleSet::Caro
+            && line_threat != LineThreat::Five
+            && rule_set.line_wins_with_edges(side, info.count, open_ends, run_edge_ends(&my_tmp, row, col, dr, dc))
+        {
+            line_threat = LineThreat::Five;
+        }
         let mut window = None;
         if enable_gap_four
             && !matches!(
@@ -407,11 +428,16 @@ pub(crate) fn classify_move_fast_with_flags(
             // both endpoints for openness.
             let mut count = 1u32;
             let mut open_front = false;
+            let mut edge_ends = 0u32;
             for off in 1usize..=5 {
                 match w[5 + off] {
                     1 => count += 1,
                     0 => {
                         open_front = true;
+                        break;
+                    }
+                    3 => {
+                        edge_ends += 1;
                         break;
                     }
                     _ => break,
@@ -425,11 +451,15 @@ pub(crate) fn classify_move_fast_with_flags(
                         open_back = true;
                         break;
                     }
+                    3 => {
+                        edge_ends += 1;
+                        break;
+                    }
                     _ => break,
                 }
             }
             let open_ends = open_front as u32 + open_back as u32;
-            if rule_set.line_wins(side, count, open_ends) {
+            if rule_set.line_wins_with_edges(side, count, open_ends, edge_ends) {
                 WindowThreat::Five
             } else {
                 match (count, open_ends) {
@@ -2261,11 +2291,12 @@ fn completes_five_at(
     let row = (mv / BOARD_SIZE) as i32;
     let col = (mv % BOARD_SIZE) as i32;
     for &(dr, dc) in &DIR {
-        let (front_count, front_open) = count_line_side(my, opp, row, col, dr, dc);
-        let (back_count, back_open) = count_line_side(my, opp, row, col, -dr, -dc);
+        let (front_count, front_open, front_edge) = count_line_side(my, opp, row, col, dr, dc);
+        let (back_count, back_open, back_edge) = count_line_side(my, opp, row, col, -dr, -dc);
         let count = 1 + front_count + back_count;
         let open_ends = front_open as u32 + back_open as u32;
-        if rule_set.line_wins(side, count, open_ends) {
+        let edge_ends = front_edge as u32 + back_edge as u32;
+        if rule_set.line_wins_with_edges(side, count, open_ends, edge_ends) {
             return true;
         }
     }
@@ -2279,7 +2310,7 @@ fn count_line_side(
     col: i32,
     dr: i32,
     dc: i32,
-) -> (u32, bool) {
+) -> (u32, bool, bool) {
     let mut count = 0u32;
     let mut r = row + dr;
     let mut c = col + dc;
@@ -2291,9 +2322,9 @@ fn count_line_side(
             c += dc;
             continue;
         }
-        return (count, !opp.get(idx));
+        return (count, !opp.get(idx), false);
     }
-    (count, false)
+    (count, false, true)
 }
 
 #[doc(hidden)]
@@ -2683,6 +2714,62 @@ mod tests {
     use super::*;
     use crate::board::to_idx;
     use noru::trainer::SimpleRng;
+
+    /// GomocupJudge `ai_match.check_win` for a hypothetical move: only an
+    /// opponent stone blocks an end; Caro is Gomocup `rule 9`.
+    fn judge_reference_win(my: &BitBoard, opp: &BitBoard, mv: Move, rule: RuleSet) -> bool {
+        let (row, col) = ((mv / BOARD_SIZE) as i32, (mv % BOARD_SIZE) as i32);
+        DIR.iter().any(|&(dr, dc)| {
+            let mut count = 1;
+            let mut blocked = 0;
+            for (sr, sc) in [(dr, dc), (-dr, -dc)] {
+                let (mut r, mut c) = (row + sr, col + sc);
+                while in_board(r, c) && my.get(r as usize * BOARD_SIZE + c as usize) {
+                    count += 1;
+                    r += sr;
+                    c += sc;
+                }
+                if in_board(r, c) && opp.get(r as usize * BOARD_SIZE + c as usize) {
+                    blocked += 1;
+                }
+            }
+            match rule {
+                RuleSet::Freestyle => count >= 5,
+                RuleSet::Standard => count == 5,
+                RuleSet::Caro => count == 5 && blocked < 2,
+                RuleSet::Renju => unreachable!(),
+            }
+        })
+    }
+
+    #[test]
+    fn every_five_detector_matches_the_gomocup_judge() {
+        let mut rng = SimpleRng::new(20261001);
+        for rule in [RuleSet::Freestyle, RuleSet::Standard, RuleSet::Caro] {
+            for _ in 0..400 {
+                let mut board = Board::new();
+                board.set_rule_set(rule);
+                let plies = 20 + (rng.next_u64() % 140) as usize;
+                for _ in 0..plies {
+                    let empty: Vec<Move> = (0..NUM_CELLS).filter(|&m| board.is_empty(m)).collect();
+                    board.make_move(empty[(rng.next_u64() as usize) % empty.len()]);
+                }
+                let side = board.side_to_move;
+                let (my, opp) = bb_pair(&board, side);
+                for mv in (0..NUM_CELLS).filter(|&m| board.is_empty(m)) {
+                    let want = judge_reference_win(my, opp, mv, rule);
+                    assert_eq!(completes_five_at(my, opp, mv, side, rule), want, "{rule:?} completes_five_at {mv}");
+                    let slow = classify_move_rules(my, opp, mv, side, rule) == ThreatKind::Five;
+                    assert_eq!(slow, want, "{rule:?} classify_move_rules {mv}");
+                    let fast = classify_move_fast_with_flags(&board, mv, side, false, false) == ThreatKind::Five;
+                    assert_eq!(fast, want, "{rule:?} classify_move_fast {mv}");
+                    let mut after = board.clone();
+                    after.make_move(mv);
+                    assert_eq!(after.check_win(mv), want, "{rule:?} check_win {mv}");
+                }
+            }
+        }
+    }
 
     /// `classify_move_fast` (Pattern4-backed) and `classify_move` (scan_line
     /// based) must return the identical `ThreatKind` for every empty cell of

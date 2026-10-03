@@ -19,6 +19,7 @@ pub mod heuristic;
 pub mod pattern_dense;
 pub mod p4r0_census;
 pub mod pattern_table;
+pub mod renju;
 pub mod search;
 pub mod threat_field;
 pub mod transposition;

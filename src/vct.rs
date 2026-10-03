@@ -1427,7 +1427,7 @@ fn vct_or(
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
     let enable_gap_four_attack = gap_four_attack_enabled(&jump_three, or_level);
-    let attack_moves = if let Some(index) = threat_index.as_ref() {
+    let mut attack_moves = if let Some(index) = threat_index.as_ref() {
         index.attack_moves(attacker, enable_jump_three_attack, enable_gap_four_attack)
     } else {
         gather_attack_moves(
@@ -1445,6 +1445,10 @@ fn vct_or(
             jump_three.use_vct_scratch_buffers,
         )
     };
+    // Renju: black never plays a forbidden point (also turns a white four with only forbidden blocks into a win).
+    if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+        attack_moves.retain(|&(mv, _)| !board.is_forbidden_for_side_to_move(mv));
+    }
     if attack_moves.is_empty() {
         scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
         let start = profile_start(stats);
@@ -1628,7 +1632,7 @@ fn vct_and(
     // (좁힘만 쓰면 원거리 반격수가 누락되어 AND가 false positive를 냄 — VCT
     //  승리 오판. 수비 측이 **자기 winning threat**을 만들 수 있는 수는 반드시
     //  포함해야 함.)
-    let defenses = match board.last_move {
+    let mut defenses = match board.last_move {
         Some(attack_mv) => find_defenses_with_counters(
             board,
             attack_mv,
@@ -1642,6 +1646,10 @@ fn vct_and(
         ),
         None => board.candidate_moves(),
     };
+    // Renju: black never plays a forbidden point (also turns a white four with only forbidden blocks into a win).
+    if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+        defenses.retain(|&mv| !board.is_forbidden_for_side_to_move(mv));
+    }
     if defenses.is_empty() {
         scratch.put_defense(jump_three.use_vct_scratch_buffers, defenses);
         return false;
@@ -1780,7 +1788,7 @@ fn vct_or_audit(
     let enable_jump_three_attack =
         jump_three.attack_defense && or_level < jump_three.attack_max_or_levels;
     let enable_gap_four_attack = gap_four_attack_enabled(&jump_three, or_level);
-    let attack_moves = if let Some(index) = threat_index.as_ref() {
+    let mut attack_moves = if let Some(index) = threat_index.as_ref() {
         index.attack_moves(attacker, enable_jump_three_attack, enable_gap_four_attack)
     } else {
         gather_attack_moves(
@@ -1798,6 +1806,10 @@ fn vct_or_audit(
             jump_three.use_vct_scratch_buffers,
         )
     };
+    // Renju: black never plays a forbidden point (also turns a white four with only forbidden blocks into a win).
+    if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+        attack_moves.retain(|&(mv, _)| !board.is_forbidden_for_side_to_move(mv));
+    }
     if attack_moves.is_empty() {
         scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
         let start = profile_start(stats);
@@ -2008,7 +2020,7 @@ fn vct_and_audit(
         return false;
     }
 
-    let defenses = match board.last_move {
+    let mut defenses = match board.last_move {
         Some(attack_mv) => find_defenses_with_counters(
             board,
             attack_mv,
@@ -2022,6 +2034,10 @@ fn vct_and_audit(
         ),
         None => board.candidate_moves(),
     };
+    // Renju: black never plays a forbidden point (also turns a white four with only forbidden blocks into a win).
+    if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+        defenses.retain(|&mv| !board.is_forbidden_for_side_to_move(mv));
+    }
     if defenses.is_empty() {
         audit.and_nodes.push(json!({
             "node": "and",

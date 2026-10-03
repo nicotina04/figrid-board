@@ -1133,10 +1133,15 @@ impl Searcher {
 
     #[inline]
     fn board_candidate_moves(&self, board: &Board) -> Vec<Move> {
-        self.board_search_state.as_ref().map_or_else(
+        let mut moves = self.board_search_state.as_ref().map_or_else(
             || board.candidate_moves(),
             |state| state.candidate_moves_synchronized(board),
-        )
+        );
+        // Renju: black never plays a forbidden point. Status is non-local, so filter after enumeration.
+        if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+            moves.retain(|&mv| !board.is_forbidden_for_side_to_move(mv));
+        }
+        moves
     }
     #[inline]
     pub fn use_threat_field(&self) -> bool {

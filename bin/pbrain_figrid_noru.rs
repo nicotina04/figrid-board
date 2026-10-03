@@ -648,12 +648,16 @@ impl ProtocolInfo {
     }
 
     fn rule_set(&self) -> Option<RuleSet> {
-        // Supported now: Freestyle (0), Standard exact-5 (1) and Caro as
-        // Gomocup plays it (9 = caro|exact5: exactly five, not blocked at both
-        // ends by stones). Bare rule 8 (overline-wins Caro) is not modeled,
-        // Renju needs forbidden-move legality, continuous is not modeled.
-        if self.rule_continuous || self.rule_renju {
+        // Supported now: Freestyle (0), Standard exact-5 (1), Renju (4: black
+        // exact five with forbidden double-four / double-three / overline,
+        // white five or more) and Caro as Gomocup plays it (9 = caro|exact5:
+        // exactly five, not blocked at both ends by stones). Bare rule 8
+        // (overline-wins Caro) and continuous games are not modeled.
+        if self.rule_continuous || (self.rule_renju && self.rule_caro) {
             return None;
+        }
+        if self.rule_renju {
+            return Some(RuleSet::Renju);
         }
         if self.rule_caro {
             if self.rule_exact5 {
@@ -899,12 +903,13 @@ impl Engine {
             .searcher
             .search(&mut self.board, &self.weights, max_depth, time_limit);
         emit_search_message(&result, search_start.elapsed());
+        // Never emit an illegal move (occupied, or a Renju forbidden point for black).
+        let board = &self.board;
         let mv = result
             .best_move
-            .or_else(|| self.board.candidate_moves().first().copied())?;
-        if !self.board.is_empty(mv) {
-            return None;
-        }
+            .filter(|&mv| board.is_legal_move(mv))
+            .or_else(|| board.candidate_moves().into_iter().find(|&mv| board.is_legal_move(mv)))
+            .or_else(|| (0..BOARD_SIZE * BOARD_SIZE).find(|&mv| board.is_legal_move(mv)))?;
         self.board.make_move(mv);
         Some(idx_to_xy(mv))
     }

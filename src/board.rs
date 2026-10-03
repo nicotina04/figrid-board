@@ -1166,7 +1166,15 @@ impl Board {
 
     #[inline]
     pub fn is_legal_move(&self, mv: Move) -> bool {
-        mv < NUM_CELLS && self.is_empty(mv)
+        mv < NUM_CELLS && self.is_empty(mv) && !self.is_forbidden_for_side_to_move(mv)
+    }
+
+    /// Renju: black may not play a forbidden point (double-four, double-three or overline without an exact five).
+    #[inline]
+    pub fn is_forbidden_for_side_to_move(&self, mv: Move) -> bool {
+        self.side_to_move == Stone::Black
+            && self.effective_rule_set() == RuleSet::Renju
+            && crate::renju::is_forbidden(&self.black, &self.white, mv)
     }
 
     /// 게임 결과 확인

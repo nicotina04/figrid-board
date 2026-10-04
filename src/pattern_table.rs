@@ -710,8 +710,8 @@ mod tests {
         use crate::board::BitBoard;
         let mut mine = BitBoard::EMPTY;
         let mut opp = BitBoard::EMPTY;
-        mine.set(7 * 15 + 7); // (7,7) mine
-        opp.set(7 * 15 + 8); // (7,8) opp
+        mine.set(7 * crate::board::BOARD_SIZE + 7); // (7,7) mine
+        opp.set(7 * crate::board::BOARD_SIZE + 8); // (7,8) opp
 
         let w = read_window(&mine, &opp, 7, 7, 0, 1);
         // anchor (7,7) at slot 5, (7,8) at slot 6

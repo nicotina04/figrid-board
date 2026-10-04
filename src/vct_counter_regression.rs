@@ -43,12 +43,12 @@ fn replay(history: &[Move]) -> Board {
 
 fn assert_board_restored(actual: &Board, expected: &Board) {
     assert_eq!(
-        (actual.black.lo, actual.black.hi),
-        (expected.black.lo, expected.black.hi)
+        actual.black.words(),
+        expected.black.words()
     );
     assert_eq!(
-        (actual.white.lo, actual.white.hi),
-        (expected.white.lo, expected.white.hi)
+        actual.white.words(),
+        expected.white.words()
     );
     assert_eq!(actual.side_to_move, expected.side_to_move);
     assert_eq!(actual.move_count, expected.move_count);

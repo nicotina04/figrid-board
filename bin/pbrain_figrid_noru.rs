@@ -3,6 +3,9 @@
 //! Ships as the `pbrain-figrid` binary.
 
 use std::io::{self, BufRead, Write};
+
+#[cfg(all(feature = "board20", not(feature = "codebook-eval")))]
+compile_error!("the 20x20 pbrain needs `codebook-eval` (the flat NNUE feature layout is 15x15-only)");
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -827,6 +830,11 @@ impl Engine {
             .map_err(|e| format!("failed to parse weights: {e}"))?;
         #[cfg(feature = "codebook-eval")]
         let codebook_weights = load_codebook_weights()?;
+        // The flat NNUE feature layout is 15x15-only; the 20x20 engine always evaluates with a codebook.
+        #[cfg(all(feature = "codebook-eval", feature = "board20"))]
+        if codebook_weights.is_none() {
+            return Err("the 20x20 build needs a codebook (FIGRID_CODEBOOK_WEIGHTS must not be off)".to_string());
+        }
         #[cfg(feature = "codebook-eval")]
         let rule_codebooks = load_rule_codebooks()?;
         #[allow(unused_mut)]

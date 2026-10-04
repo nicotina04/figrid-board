@@ -947,7 +947,8 @@ fn multiset_diff(new: &[usize], old: &[usize]) -> (Vec<usize>, Vec<usize>) {
     (add, rem)
 }
 
-#[cfg(test)]
+// The flat NNUE feature layout is 15x15-only (board20 is codebook-only).
+#[cfg(all(test, not(feature = "board20")))]
 mod tests {
     use super::*;
     use crate::board::Board;

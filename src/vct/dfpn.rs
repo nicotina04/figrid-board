@@ -163,10 +163,8 @@ enum NodeRole {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExactStateKey {
-    black_lo: u128,
-    black_hi: u128,
-    white_lo: u128,
-    white_hi: u128,
+    black: [u128; crate::board::BITBOARD_WORDS],
+    white: [u128; crate::board::BITBOARD_WORDS],
     side_to_move: Stone,
     root_attacker: Stone,
     role: NodeRole,
@@ -184,10 +182,8 @@ impl ExactStateKey {
         policy_digest: u64,
     ) -> Self {
         Self {
-            black_lo: board.black.lo,
-            black_hi: board.black.hi,
-            white_lo: board.white.lo,
-            white_hi: board.white.hi,
+            black: board.black.words(),
+            white: board.white.words(),
             side_to_move: board.side_to_move,
             root_attacker,
             role,
@@ -309,7 +305,7 @@ impl BoundedDfpnSession {
         {
             return Err(DfpnError::InvalidRoot("bitboard/move_count mismatch"));
         }
-        if board.black.lo & board.white.lo != 0 || board.black.hi & board.white.hi != 0 {
+        if board.black.intersects(&board.white) {
             return Err(DfpnError::InvalidRoot("overlapping bitboards"));
         }
         let terminal = scan_terminal(board, board.side_to_move)?;

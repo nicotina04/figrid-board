@@ -100,11 +100,11 @@ fn restoration(actual: &Board, expected: &Board) -> Value {
     let fields = [
         (
             "black",
-            actual.black.lo == expected.black.lo && actual.black.hi == expected.black.hi,
+            actual.black.words() == expected.black.words(),
         ),
         (
             "white",
-            actual.white.lo == expected.white.lo && actual.white.hi == expected.white.hi,
+            actual.white.words() == expected.white.words(),
         ),
         ("side_to_move", actual.side_to_move == expected.side_to_move),
         ("move_count", actual.move_count == expected.move_count),

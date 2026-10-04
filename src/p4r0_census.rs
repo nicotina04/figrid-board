@@ -283,6 +283,7 @@ impl ForcedCensus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::BOARD_SIZE;
     use crate::board::Board;
 
     #[test]
@@ -298,7 +299,7 @@ mod tests {
     fn open_four_has_two_five_cells() {
         let mut board = Board::new();
         // Black 7,7 / 7,8 / 7,9 / 7,10 with White answering far away.
-        let blacks = [7 * 15 + 7, 7 * 15 + 8, 7 * 15 + 9, 7 * 15 + 10];
+        let blacks = [7 * BOARD_SIZE + 7, 7 * BOARD_SIZE + 8, 7 * BOARD_SIZE + 9, 7 * BOARD_SIZE + 10];
         let whites = [0, 1, 2];
         for i in 0..4 {
             board.make_move(blacks[i]);
@@ -309,8 +310,8 @@ mod tests {
         let mut cells = Vec::new();
         five_cells(&board, Stone::Black, &mut cells);
         assert_eq!(cells.len(), 2, "open four completes at both ends: {cells:?}");
-        assert!(cells.contains(&(7 * 15 + 6)));
-        assert!(cells.contains(&(7 * 15 + 11)));
+        assert!(cells.contains(&(7 * BOARD_SIZE + 6)));
+        assert!(cells.contains(&(7 * BOARD_SIZE + 11)));
 
         five_cells(&board, Stone::White, &mut cells);
         assert!(cells.is_empty(), "White has no five here: {cells:?}");
@@ -371,7 +372,7 @@ mod tests {
                 }
 
                 // Play near the last stone to keep the position tactical.
-                let anchor = board.history.last().copied().unwrap_or(7 * 15 + 7);
+                let anchor = board.history.last().copied().unwrap_or(7 * BOARD_SIZE + 7);
                 let (ar, ac) = to_rc(anchor);
                 let mut played = None;
                 for _try in 0..40 {
@@ -379,10 +380,10 @@ mod tests {
                     let dc = (rng() % 5) as i32 - 2;
                     let r = ar as i32 + dr;
                     let c = ac as i32 + dc;
-                    if !(0..15).contains(&r) || !(0..15).contains(&c) {
+                    if !(0..BOARD_SIZE as i32).contains(&r) || !(0..BOARD_SIZE as i32).contains(&c) {
                         continue;
                     }
-                    let cell = (r as usize) * 15 + c as usize;
+                    let cell = (r as usize) * BOARD_SIZE + c as usize;
                     if board.is_empty(cell) {
                         played = Some(cell);
                         break;
@@ -475,16 +476,16 @@ mod tests {
                 }
 
                 // Keep play local so five-threats actually arise.
-                let anchor = board.history.last().copied().unwrap_or(7 * 15 + 7);
+                let anchor = board.history.last().copied().unwrap_or(7 * BOARD_SIZE + 7);
                 let (ar, ac) = to_rc(anchor);
                 let mut played = None;
                 for _try in 0..40 {
                     let r = ar as i32 + (rng() % 5) as i32 - 2;
                     let c = ac as i32 + (rng() % 5) as i32 - 2;
-                    if !(0..15).contains(&r) || !(0..15).contains(&c) {
+                    if !(0..BOARD_SIZE as i32).contains(&r) || !(0..BOARD_SIZE as i32).contains(&c) {
                         continue;
                     }
-                    let cell = (r as usize) * 15 + c as usize;
+                    let cell = (r as usize) * BOARD_SIZE + c as usize;
                     if board.is_empty(cell) {
                         played = Some(cell);
                         break;

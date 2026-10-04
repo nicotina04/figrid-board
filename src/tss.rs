@@ -411,8 +411,7 @@ pub fn audit_quiet_response_relevance(
                         white
                     },
                 );
-                gained_footprint.lo |= line.footprint.lo;
-                gained_footprint.hi |= line.footprint.hi;
+                gained_footprint = gained_footprint.or(&line.footprint);
                 gained_line_count += 1;
             }
         }
@@ -918,11 +917,11 @@ fn direction_strength(kind: WindowThreat) -> u8 {
 }
 
 fn bitboards_intersect(a: &BitBoard, b: &BitBoard) -> bool {
-    (a.lo & b.lo) != 0 || (a.hi & b.hi) != 0
+    a.intersects(b)
 }
 
 fn intersection_count(a: &BitBoard, b: &BitBoard) -> u32 {
-    (a.lo & b.lo).count_ones() + (a.hi & b.hi).count_ones()
+    a.and(b).count_ones()
 }
 
 fn sort_dependency_candidates(candidates: &mut [DependencyQuietCandidate]) {

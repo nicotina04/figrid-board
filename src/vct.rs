@@ -2721,7 +2721,7 @@ fn tt_result_json(result: TtResult) -> &'static str {
 #[path = "vct_counter_regression.rs"]
 mod counter_regression;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "board20")))] // recorded 15x15 game positions
 #[path = "vct_followup_regression.rs"]
 mod followup_regression;
 

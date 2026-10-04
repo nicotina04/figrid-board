@@ -32,6 +32,9 @@ exclude = [
 
 [features]
 default = []
+# 20x20 board (Gomocup Freestyle / Fastgame). Builds a separate engine; the codebook evaluator is required
+# (the flat NNUE feature layout is 15x15-only).
+board20 = []
 # Embed compressed v52 NNUE weights into the binary at build time. Used for
 # the `pbrain-figrid` Gomocup submission build where Piskvork expects a
 # single self-contained executable. crates.io publishes do NOT enable this.

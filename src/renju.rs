@@ -42,12 +42,12 @@ pub fn foul(black: &BitBoard, white: &BitBoard, mv: Move) -> Foul {
 /// on (black stones, cell) so shared sub-positions are solved once.
 struct Ctx<'a> {
     white: &'a BitBoard,
-    memo: HashMap<(u128, u128, Move), Foul>,
+    memo: HashMap<([u128; crate::board::BITBOARD_WORDS], Move), Foul>,
 }
 
 impl Ctx<'_> {
     fn foul(&mut self, black: &BitBoard, mv: Move) -> Foul {
-        let key = (black.lo, black.hi, mv);
+        let key = (black.words(), mv);
         if let Some(&f) = self.memo.get(&key) {
             return f;
         }

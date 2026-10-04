@@ -5,13 +5,13 @@
 //! serialization returned by [`exact_canonical_state`].
 
 use crate::board::{
-    BOARD_SIZE, BitBoard, Board, Move, NUM_CELLS, RuleSet, Stone, ZOBRIST_SIDE, d4_rule_key,
+    BOARD_SIZE, BitBoard, Board, CellIdx, Move, NUM_CELLS, RuleSet, Stone, ZOBRIST_SIDE, d4_rule_key,
     zobrist_stone_key,
 };
 
 const LAST_COORD: usize = BOARD_SIZE - 1;
 
-const fn transform_cell(transform: usize, cell: usize) -> u8 {
+const fn transform_cell(transform: usize, cell: usize) -> CellIdx {
     let row = cell / BOARD_SIZE;
     let col = cell % BOARD_SIZE;
     let (mapped_row, mapped_col) = match transform {
@@ -25,11 +25,11 @@ const fn transform_cell(transform: usize, cell: usize) -> u8 {
         7 => (LAST_COORD - col, LAST_COORD - row),
         _ => panic!("D4 transform index must be in 0..8"),
     };
-    (mapped_row * BOARD_SIZE + mapped_col) as u8
+    (mapped_row * BOARD_SIZE + mapped_col) as CellIdx
 }
 
-const fn build_d4_map() -> [[u8; NUM_CELLS]; 8] {
-    let mut map = [[0u8; NUM_CELLS]; 8];
+const fn build_d4_map() -> [[CellIdx; NUM_CELLS]; 8] {
+    let mut map = [[0; NUM_CELLS]; 8];
     let mut transform = 0;
     while transform < 8 {
         let mut cell = 0;
@@ -43,7 +43,10 @@ const fn build_d4_map() -> [[u8; NUM_CELLS]; 8] {
 }
 
 /// `D4_MAP[t][cell]` is the row-major cell reached by frozen transform `t`.
-pub const D4_MAP: [[u8; 225]; 8] = build_d4_map();
+pub const D4_MAP: [[CellIdx; NUM_CELLS]; 8] = build_d4_map();
+
+/// Bytes of the exact semantic-state serialization: both colours' words (big-endian), side, rule.
+pub const EXACT_SERIALIZATION_LEN: usize = 2 * 16 * crate::board::BITBOARD_WORDS + 2;
 
 /// Inverse transform for each entry in [`D4_MAP`].
 pub const D4_INVERSE: [u8; 8] = [0, 3, 2, 1, 4, 5, 6, 7];
@@ -75,14 +78,14 @@ pub struct CanonicalContext {
 /// effective rule (`0=Freestyle`, `1=Standard`, `2=Caro`, `3=Renju`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExactCanonicalState {
-    pub bytes: [u8; 66],
+    pub bytes: [u8; EXACT_SERIALIZATION_LEN],
     pub to_canonical: u8,
 }
 
 impl ExactCanonicalState {
     /// Borrow the frozen 66-byte exact-identity payload.
     #[inline]
-    pub const fn serialization(&self) -> &[u8; 66] {
+    pub const fn serialization(&self) -> &[u8; EXACT_SERIALIZATION_LEN] {
         &self.bytes
     }
 }
@@ -168,7 +171,7 @@ impl D4HashState {
 
     /// Build an exact serialization in one requested D4 orientation.
     #[inline]
-    pub fn exact_transformed_serialization(board: &Board, transform: u8) -> Option<[u8; 66]> {
+    pub fn exact_transformed_serialization(board: &Board, transform: u8) -> Option<[u8; EXACT_SERIALIZATION_LEN]> {
         exact_transformed_serialization(board, transform)
     }
 
@@ -224,7 +227,7 @@ const fn rule_tag(rule: RuleSet) -> u8 {
 /// Return the exact 66-byte semantic-state serialization under one transform.
 ///
 /// Returns `None` when `transform` is outside the frozen `0..8` domain.
-pub fn exact_transformed_serialization(board: &Board, transform: u8) -> Option<[u8; 66]> {
+pub fn exact_transformed_serialization(board: &Board, transform: u8) -> Option<[u8; EXACT_SERIALIZATION_LEN]> {
     let transform = transform as usize;
     if transform >= 8 {
         return None;
@@ -232,13 +235,12 @@ pub fn exact_transformed_serialization(board: &Board, transform: u8) -> Option<[
 
     let black = transformed_bitboard(&board.black, transform);
     let white = transformed_bitboard(&board.white, transform);
-    let mut bytes = [0u8; 66];
-    bytes[0..16].copy_from_slice(&black.lo.to_be_bytes());
-    bytes[16..32].copy_from_slice(&black.hi.to_be_bytes());
-    bytes[32..48].copy_from_slice(&white.lo.to_be_bytes());
-    bytes[48..64].copy_from_slice(&white.hi.to_be_bytes());
-    bytes[64] = side_tag(board.side_to_move);
-    bytes[65] = rule_tag(board.effective_rule_set());
+    let mut bytes = [0u8; EXACT_SERIALIZATION_LEN];
+    for (i, word) in black.words().iter().chain(white.words().iter()).enumerate() {
+        bytes[16 * i..16 * i + 16].copy_from_slice(&word.to_be_bytes());
+    }
+    bytes[EXACT_SERIALIZATION_LEN - 2] = side_tag(board.side_to_move);
+    bytes[EXACT_SERIALIZATION_LEN - 1] = rule_tag(board.effective_rule_set());
     Some(bytes)
 }
 
@@ -303,6 +305,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "board20"))] // frozen 15x15 fixture
     fn maps_follow_the_frozen_coordinate_convention() {
         let cell = 2 * BOARD_SIZE + 5;
         let expected = [
@@ -421,6 +424,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "board20"))] // frozen 15x15 fixture
     fn exact_serialization_layout_and_ties_are_frozen() {
         let mut empty = Board::new();
         empty.exact5 = true;

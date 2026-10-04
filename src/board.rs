@@ -4,7 +4,18 @@
 /// 흑(선공)과 백(후공) 각각 bitboard 보유.
 use std::fmt;
 
+/// Board side: 15 by default; the `board20` feature builds the 20x20 engine (Gomocup Freestyle / Fastgame).
+#[cfg(not(feature = "board20"))]
 pub const BOARD_SIZE: usize = 15;
+#[cfg(feature = "board20")]
+pub const BOARD_SIZE: usize = 20;
+/// Smallest unsigned type that holds a cell index (`u8` for 15x15, `u16` for 20x20).
+#[cfg(not(feature = "board20"))]
+pub type CellIdx = u8;
+#[cfg(feature = "board20")]
+pub type CellIdx = u16;
+/// 128-bit words in a [`BitBoard`].
+pub const BITBOARD_WORDS: usize = NUM_CELLS.div_ceil(128);
 pub const NUM_CELLS: usize = BOARD_SIZE * BOARD_SIZE; // 225
 pub const LINE_PATTERN_FRONTIER_MAX: usize = 41;
 
@@ -73,16 +84,24 @@ impl RuleSet {
 
 /// 225비트를 u128 × 2로 표현
 /// lo: 비트 0~127, hi: 비트 128~224
+#[cfg(not(feature = "board20"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BitBoard {
     pub lo: u128,
     pub hi: u128,
 }
 
+/// 400 cells in four 128-bit words (`board20`), bit `i` in word `i / 128`.
+#[cfg(feature = "board20")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct BitBoard {
+    pub w: [u128; BITBOARD_WORDS],
+}
+
 // Clipped radius-two neighborhoods. Enumerating stones and each newly seen
 // neighborhood in ascending order preserves the legacy candidate tie-breaking.
 const CANDIDATE_NEIGHBOURS: [BitBoard; NUM_CELLS] = {
-    let mut masks = [BitBoard { lo: 0, hi: 0 }; NUM_CELLS];
+    let mut masks = [BitBoard::EMPTY; NUM_CELLS];
     let mut cell = 0;
     while cell < NUM_CELLS {
         let mut row = 0;
@@ -92,9 +111,7 @@ const CANDIDATE_NEIGHBOURS: [BitBoard; NUM_CELLS] = {
                 if (row as i32 - (cell / BOARD_SIZE) as i32).abs() <= 2
                     && (col as i32 - (cell % BOARD_SIZE) as i32).abs() <= 2
                 {
-                    let idx = row * BOARD_SIZE + col;
-                    if idx < 128 { masks[cell].lo |= 1u128 << idx; }
-                    else { masks[cell].hi |= 1u128 << (idx - 128); }
+                    masks[cell] = masks[cell].with(row * BOARD_SIZE + col);
                 }
                 col += 1;
             }
@@ -105,8 +122,44 @@ const CANDIDATE_NEIGHBOURS: [BitBoard; NUM_CELLS] = {
     masks
 };
 
+#[cfg(not(feature = "board20"))]
 impl BitBoard {
     pub const EMPTY: Self = Self { lo: 0, hi: 0 };
+
+    /// Words in ascending bit order (`[lo, hi]`).
+    #[inline]
+    pub const fn words(&self) -> [u128; BITBOARD_WORDS] {
+        [self.lo, self.hi]
+    }
+
+    /// Copy with bit `idx` set (usable in const tables).
+    pub const fn with(self, idx: usize) -> Self {
+        if idx < 128 {
+            Self { lo: self.lo | 1u128 << idx, hi: self.hi }
+        } else {
+            Self { lo: self.lo, hi: self.hi | 1u128 << (idx - 128) }
+        }
+    }
+
+    #[inline]
+    pub fn and(&self, other: &BitBoard) -> BitBoard {
+        BitBoard { lo: self.lo & other.lo, hi: self.hi & other.hi }
+    }
+
+    #[inline]
+    pub fn intersects(&self, other: &BitBoard) -> bool {
+        (self.lo & other.lo) != 0 || (self.hi & other.hi) != 0
+    }
+
+    #[inline]
+    pub fn and_not(&self, other: &BitBoard) -> BitBoard {
+        BitBoard { lo: self.lo & !other.lo, hi: self.hi & !other.hi }
+    }
+
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        self.lo == 0 && self.hi == 0
+    }
 
     #[inline]
     pub fn get(&self, idx: usize) -> bool {
@@ -161,11 +214,106 @@ impl BitBoard {
     }
 }
 
+#[cfg(feature = "board20")]
+impl BitBoard {
+    pub const EMPTY: Self = Self { w: [0; BITBOARD_WORDS] };
+
+    /// Words in ascending bit order.
+    #[inline]
+    pub const fn words(&self) -> [u128; BITBOARD_WORDS] {
+        self.w
+    }
+
+    /// Copy with bit `idx` set (usable in const tables).
+    pub const fn with(self, idx: usize) -> Self {
+        let mut w = self.w;
+        w[idx >> 7] |= 1u128 << (idx & 127);
+        Self { w }
+    }
+
+    #[inline]
+    pub fn get(&self, idx: usize) -> bool {
+        (self.w[idx >> 7] >> (idx & 127)) & 1 != 0
+    }
+
+    #[inline]
+    pub fn set(&mut self, idx: usize) {
+        self.w[idx >> 7] |= 1u128 << (idx & 127);
+    }
+
+    #[inline]
+    pub fn clear(&mut self, idx: usize) {
+        self.w[idx >> 7] &= !(1u128 << (idx & 127));
+    }
+
+    #[inline]
+    pub fn or(&self, other: &BitBoard) -> BitBoard {
+        BitBoard { w: std::array::from_fn(|i| self.w[i] | other.w[i]) }
+    }
+
+    #[inline]
+    pub fn and(&self, other: &BitBoard) -> BitBoard {
+        BitBoard { w: std::array::from_fn(|i| self.w[i] & other.w[i]) }
+    }
+
+    #[inline]
+    pub fn intersects(&self, other: &BitBoard) -> bool {
+        self.w.iter().zip(other.w.iter()).any(|(a, b)| a & b != 0)
+    }
+
+    #[inline]
+    pub fn and_not(&self, other: &BitBoard) -> BitBoard {
+        BitBoard { w: std::array::from_fn(|i| self.w[i] & !other.w[i]) }
+    }
+
+    #[inline]
+    pub fn is_zero(&self) -> bool {
+        self.w.iter().all(|&x| x == 0)
+    }
+
+    #[inline]
+    pub fn count_ones(&self) -> u32 {
+        self.w.iter().map(|x| x.count_ones()).sum()
+    }
+
+    /// Iterate over the indices of set bits, lowest first.
+    #[inline]
+    pub fn iter_ones(&self) -> BitBoardIter {
+        BitBoardIter { w: self.w, i: 0 }
+    }
+}
+
+#[cfg(feature = "board20")]
+pub struct BitBoardIter {
+    w: [u128; BITBOARD_WORDS],
+    i: usize,
+}
+
+#[cfg(feature = "board20")]
+impl Iterator for BitBoardIter {
+    type Item = usize;
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        while self.i < BITBOARD_WORDS {
+            let word = &mut self.w[self.i];
+            if *word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                *word &= *word - 1;
+                return Some(self.i * 128 + bit);
+            }
+            self.i += 1;
+        }
+        None
+    }
+}
+
+#[cfg(not(feature = "board20"))]
 pub struct BitBoardIter {
     lo: u128,
     hi: u128,
 }
 
+#[cfg(not(feature = "board20"))]
 impl Iterator for BitBoardIter {
     type Item = usize;
     #[inline]
@@ -285,7 +433,7 @@ pub const fn d4_rule_key(rule: RuleSet) -> u64 {
 /// 단계에서 처리).
 pub type LinePatternState = Box<[[u16; 4]; NUM_CELLS]>;
 
-const NO_CANDIDATE_SOURCE: u8 = u8::MAX;
+const NO_CANDIDATE_SOURCE: CellIdx = CellIdx::MAX;
 
 /// Optional radius-2 candidate frontier.
 ///
@@ -296,7 +444,7 @@ const NO_CANDIDATE_SOURCE: u8 = u8::MAX;
 struct CandidateFrontierState {
     radius2_count: [u8; NUM_CELLS],
     candidates: BitBoard,
-    min_source: [u8; NUM_CELLS],
+    min_source: [CellIdx; NUM_CELLS],
     by_min_source: [BitBoard; NUM_CELLS],
     nonempty_sources: BitBoard,
 }
@@ -315,7 +463,7 @@ impl CandidateFrontierState {
     #[inline]
     fn bucket_insert(&mut self, source: usize, cell: usize) {
         let bucket = &mut self.by_min_source[source];
-        let was_empty = bucket.lo == 0 && bucket.hi == 0;
+        let was_empty = bucket.is_zero();
         bucket.set(cell);
         if was_empty {
             self.nonempty_sources.set(source);
@@ -327,7 +475,7 @@ impl CandidateFrontierState {
         let bucket = &mut self.by_min_source[source];
         debug_assert!(bucket.get(cell));
         bucket.clear(cell);
-        if bucket.lo == 0 && bucket.hi == 0 {
+        if bucket.is_zero() {
             self.nonempty_sources.clear(source);
         }
     }
@@ -337,7 +485,7 @@ impl CandidateFrontierState {
         debug_assert!(!self.candidates.get(cell));
         debug_assert_eq!(self.min_source[cell], NO_CANDIDATE_SOURCE);
         self.candidates.set(cell);
-        self.min_source[cell] = source as u8;
+        self.min_source[cell] = source as CellIdx;
         self.bucket_insert(source, cell);
     }
 
@@ -357,7 +505,7 @@ impl CandidateFrontierState {
         let old_source = self.min_source[cell] as usize;
         debug_assert!(old_source < NUM_CELLS);
         self.bucket_remove(old_source, cell);
-        self.min_source[cell] = new_source as u8;
+        self.min_source[cell] = new_source as CellIdx;
         self.bucket_insert(new_source, cell);
     }
 }
@@ -592,7 +740,7 @@ impl BoardSearchState {
             "BoardSearchState is stale for candidate generation"
         );
         if board.move_count == 0 {
-            return vec![to_idx(7, 7)];
+            return vec![to_idx(BOARD_SIZE / 2, BOARD_SIZE / 2)];
         }
         let Some(frontier) = self.candidate_frontier.as_ref() else {
             return board.candidate_moves();
@@ -855,17 +1003,15 @@ impl Board {
     pub fn candidate_moves(&self) -> Vec<Move> {
         if self.move_count == 0 {
             // 첫 수: 천원
-            return vec![to_idx(7, 7)];
+            return vec![to_idx(BOARD_SIZE / 2, BOARD_SIZE / 2)];
         }
         let occupied = self.black.or(&self.white);
         let mut seen = occupied;
         let mut moves = Vec::with_capacity(64);
         for cell in occupied.iter_ones() {
             let mask = CANDIDATE_NEIGHBOURS[cell];
-            let fresh = BitBoard { lo: mask.lo & !seen.lo, hi: mask.hi & !seen.hi };
-            moves.extend(fresh.iter_ones());
-            seen.lo |= mask.lo;
-            seen.hi |= mask.hi;
+            moves.extend(mask.and_not(&seen).iter_ones());
+            seen = seen.or(&mask);
         }
         moves
     }
@@ -1596,10 +1742,8 @@ mod tests {
             b2.make_move(m);
         }
 
-        assert_eq!(b1.black.lo, b2.black.lo);
-        assert_eq!(b1.black.hi, b2.black.hi);
-        assert_eq!(b1.white.lo, b2.white.lo);
-        assert_eq!(b1.white.hi, b2.white.hi);
+        assert_eq!(b1.black.words(), b2.black.words());
+        assert_eq!(b1.white.words(), b2.white.words());
         assert_eq!(b1.side_to_move, b2.side_to_move);
 
         assert_eq!(
@@ -1748,7 +1892,7 @@ mod tests {
     fn test_candidate_moves_first() {
         let board = Board::new();
         let moves = board.candidate_moves();
-        assert_eq!(moves, vec![to_idx(7, 7)]);
+        assert_eq!(moves, vec![to_idx(BOARD_SIZE / 2, BOARD_SIZE / 2)]);
     }
 
     #[test]
@@ -1767,7 +1911,7 @@ mod tests {
             }
             for _ in 0..NUM_CELLS {
                 board.undo_move();
-                let expected = if board.move_count == 0 { vec![to_idx(7, 7)] }
+                let expected = if board.move_count == 0 { vec![to_idx(BOARD_SIZE / 2, BOARD_SIZE / 2)] }
                     else { board.candidate_moves_legacy() };
                 assert_eq!(board.candidate_moves(), expected);
             }

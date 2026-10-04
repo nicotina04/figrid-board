@@ -23,12 +23,15 @@ const _: () = {
     let raw_abs_bound = 4 * (i16::MAX as i64 + 1);
     let replacement_delta_abs_bound = i16::MAX as i64 - i16::MIN as i64;
     let raw_intermediate_abs_bound = raw_abs_bound + replacement_delta_abs_bound;
-    let region_abs_bound = 25 * raw_abs_bound;
+    let region_abs_bound = MAX_REGION_CELLS as i64 * raw_abs_bound;
     let region_intermediate_abs_bound = region_abs_bound + raw_abs_bound;
     assert!(raw_intermediate_abs_bound <= i32::MAX as i64);
     assert!(region_intermediate_abs_bound <= i32::MAX as i64);
 };
 const REGIONS: usize = 9;
+/// Cells in the largest region (25 on 15x15; 7x7 = 49 on 20x20).
+#[allow(dead_code)] // read only by the overflow proof above
+const MAX_REGION_CELLS: usize = (BOARD_SIZE + 2).div_ceil(3) * (BOARD_SIZE + 2).div_ceil(3);
 pub const QUANT_EMBED_SCALE: i32 = 32;
 pub const QUANT_HEAD_SCALE: i32 = 64;
 pub const QUANT_FACTOR_SCALE: i32 = 64;
@@ -2212,13 +2215,15 @@ fn quant_cell_slice_mut(cells: &mut [i32], cell: usize, dim: usize) -> &mut [i32
 fn region_of_cell(cell: usize) -> usize {
     let row = cell / BOARD_SIZE;
     let col = cell % BOARD_SIZE;
-    let rr = (row / 5).min(2);
-    let cc = (col / 5).min(2);
+    // 3x3 regions, symmetric under D4: 5/5/5 on 15x15 (identical to `row / 5`), 7/6/7 on 20x20.
+    let rr = (row * 3 + 1) / BOARD_SIZE;
+    let cc = (col * 3 + 1) / BOARD_SIZE;
     rr * 3 + cc
 }
 
 fn region_cell_count(_region: usize) -> usize {
-    25
+    // Uniform pooling denominator: 25 on 15x15 (every region), 44 on 20x20.
+    NUM_CELLS / REGIONS
 }
 
 fn dequantize_vec_i16(values: &[i16], scale: i32) -> Vec<f32> {

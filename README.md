@@ -44,9 +44,12 @@ search integration. The dependency is optional and is activated only by the
   `figrid-board` supplies all game-specific token and search semantics.
 - α-β search with transposition table, threat-aware move ordering, killer/history heuristics, late-move pruning, and a quiescence layer for forcing sequences.
 - Optional VCF / VCT tactical search at the search root.
-- Rule support: Freestyle (`rule 0`), Standard exact-five (`rule 1`), and Caro as Gomocup plays it
-  (`rule 9`: exactly five, not blocked at both ends by stones; the board edge does not block).
-  Renju, continuous games and bare `rule 8` are answered with `ERROR - unsupported rule`. Board size 15 only.
+- Rule support: Freestyle (`rule 0`), Standard exact-five (`rule 1`), Renju (`rule 4`: black exact five with
+  forbidden double-four / double-three / overline, white five or more), and Caro as Gomocup plays it (`rule 9`:
+  exactly five, not blocked at both ends by stones; the board edge does not block). Continuous games and bare
+  `rule 8` are answered with `ERROR - unsupported rule`. Board size 15 only.
+- Per-rule models: `FIGRID_CODEBOOK_WEIGHTS_{STANDARD,CARO,RENJU}` load a codebook used only under that rule, each
+  with its own `NORU_CODEBOOK_EVAL_SCALE_{STANDARD,CARO,RENJU}`; other rules keep `FIGRID_CODEBOOK_WEIGHTS`.
 - Optional `avx512` cargo feature: opportunistic ~2× evaluation speedup on AVX-512 hardware, with automatic AVX-2 runtime fallback. Requires Rust ≥ 1.89; off by default so library users on older toolchains and crates.io itself can build.
 - Optional `embed-weights` feature: bake the v52-lineage NNUE ordering weights
   into the binary at build time. Enable `codebook-eval` separately to embed

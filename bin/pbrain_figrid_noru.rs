@@ -87,6 +87,13 @@ const KNOWN_ENGINE_VARS: &[&str] = &[
     "FIGRID_WEIGHTS",
     "FIGRID_CODEBOOK_WEIGHTS",
     "NORU_CODEBOOK_EVAL_SCALE",
+    // Optional per-rule codebooks (each needs its own scale).
+    "FIGRID_CODEBOOK_WEIGHTS_STANDARD",
+    "FIGRID_CODEBOOK_WEIGHTS_CARO",
+    "FIGRID_CODEBOOK_WEIGHTS_RENJU",
+    "NORU_CODEBOOK_EVAL_SCALE_STANDARD",
+    "NORU_CODEBOOK_EVAL_SCALE_CARO",
+    "NORU_CODEBOOK_EVAL_SCALE_RENJU",
     "NORU_CODEBOOK_FACTORED",
     "NORU_CODEBOOK_DIRECTIONAL_DELTA",
     "FIGRID_WHITE_ROOT_ORDER",
@@ -497,9 +504,13 @@ fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
         return Ok(None);
     }
 
-    // External model paths are JSON or NGCB1 binaries (detected by magic),
-    // in either the legacy or the full-vocabulary id space. They never
-    // inherit the embedded CB-F1 representation selector.
+    load_codebook_file(path).map(Some)
+}
+
+/// External model paths are JSON or NGCB1 binaries (detected by magic), in either the legacy or the
+/// full-vocabulary id space. They never inherit the embedded CB-F1 representation selector.
+#[cfg(feature = "codebook-eval")]
+fn load_codebook_file(path: &str) -> Result<CodebookRuntimeWeights, String> {
     let bytes = std::fs::read(path)
         .map_err(|e| format!("failed to read codebook weights from `{path}`: {e}"))?;
     let weights = CodebookWeights::from_bytes_auto(&bytes)
@@ -509,10 +520,43 @@ fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
         // never lands inside the first move's clock.
         figrid_board::pattern_table::warm_full_vocab();
     }
-    Ok(Some(CodebookRuntimeWeights::Quantized {
+    Ok(CodebookRuntimeWeights::Quantized {
         weights: weights.quantize_i16_s32_s64(),
         embedded: false,
-    }))
+    })
+}
+
+/// A codebook used only under one rule, with the eval scale it was calibrated for.
+#[cfg(feature = "codebook-eval")]
+struct RuleCodebook {
+    rule: RuleSet,
+    weights: CodebookRuntimeWeights,
+    scale: f32,
+    label: String,
+}
+
+/// Optional per-rule codebooks: `FIGRID_CODEBOOK_WEIGHTS_<RULE>` with a mandatory
+/// `NORU_CODEBOOK_EVAL_SCALE_<RULE>` (a model without its scale fails closed).
+#[cfg(feature = "codebook-eval")]
+fn load_rule_codebooks() -> Result<Vec<RuleCodebook>, String> {
+    let mut out = Vec::new();
+    for (rule, tag) in [(RuleSet::Standard, "STANDARD"), (RuleSet::Caro, "CARO"), (RuleSet::Renju, "RENJU")] {
+        let path = std::env::var(format!("FIGRID_CODEBOOK_WEIGHTS_{tag}")).unwrap_or_default();
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        let raw = std::env::var(format!("NORU_CODEBOOK_EVAL_SCALE_{tag}"))
+            .map_err(|_| format!("FIGRID_CODEBOOK_WEIGHTS_{tag} needs NORU_CODEBOOK_EVAL_SCALE_{tag}"))?;
+        let scale = raw
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .ok_or_else(|| format!("invalid NORU_CODEBOOK_EVAL_SCALE_{tag}: {raw}"))?;
+        out.push(RuleCodebook { rule, weights: load_codebook_file(path)?, scale, label: format!("{tag}={path}") });
+    }
+    Ok(out)
 }
 
 /// `codebook=...; ...` part of the startup config line.
@@ -764,6 +808,8 @@ struct Engine {
     weights: NnueWeights,
     #[cfg(feature = "codebook-eval")]
     codebook_weights: Option<CodebookRuntimeWeights>,
+    #[cfg(feature = "codebook-eval")]
+    rule_codebooks: Vec<RuleCodebook>,
     /// One-line effective configuration, announced before the first START
     /// reply.
     config_line: String,
@@ -781,6 +827,8 @@ impl Engine {
             .map_err(|e| format!("failed to parse weights: {e}"))?;
         #[cfg(feature = "codebook-eval")]
         let codebook_weights = load_codebook_weights()?;
+        #[cfg(feature = "codebook-eval")]
+        let rule_codebooks = load_rule_codebooks()?;
         #[allow(unused_mut)]
         let mut searcher = Searcher::new();
         #[cfg(feature = "codebook-eval")]
@@ -794,7 +842,16 @@ impl Engine {
         // first search.
         let search_config = figrid_board::search::runtime_config_summary()?;
         #[cfg(feature = "codebook-eval")]
-        let codebook_config = codebook_config_summary(&codebook_weights, &searcher);
+        let codebook_config = {
+            let base = codebook_config_summary(&codebook_weights, &searcher);
+            if rule_codebooks.is_empty() {
+                base
+            } else {
+                let per_rule: Vec<String> =
+                    rule_codebooks.iter().map(|r| format!("{} scale={}", r.label, r.scale)).collect();
+                format!("{base}; rule_codebooks=[{}]", per_rule.join(", "))
+            }
+        };
         #[cfg(not(feature = "codebook-eval"))]
         let codebook_config = "codebook=unsupported".to_string();
         let on_off = |enabled: bool| if enabled { "on" } else { "off" };
@@ -814,6 +871,8 @@ impl Engine {
             weights,
             #[cfg(feature = "codebook-eval")]
             codebook_weights,
+            #[cfg(feature = "codebook-eval")]
+            rule_codebooks,
             config_line,
             searcher,
             info: ProtocolInfo::new(),
@@ -873,7 +932,16 @@ impl Engine {
         };
         let search_start = Instant::now();
         #[cfg(feature = "codebook-eval")]
-        let result = match &self.codebook_weights {
+        let rule = self.board.effective_rule_set();
+        #[cfg(feature = "codebook-eval")]
+        let (codebook, scale) = match self.rule_codebooks.iter().find(|r| r.rule == rule) {
+            Some(r) => (Some(&r.weights), Some(r.scale)),
+            None => (self.codebook_weights.as_ref(), None),
+        };
+        #[cfg(feature = "codebook-eval")]
+        self.searcher.set_codebook_eval_scale(scale);
+        #[cfg(feature = "codebook-eval")]
+        let result = match codebook {
             Some(CodebookRuntimeWeights::Quantized {
                 weights: codebook_weights,
                 ..

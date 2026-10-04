@@ -1,5 +1,31 @@
 # Changes
 
+## 0.10.0 (2026-10-04)
+
+### Added
+
+* Renju (`rule 4`). New module `renju` (`foul`, `is_forbidden`, `Foul`): a black move is forbidden when it does
+  not make an exact five and makes a double-four (same-line double fours included), a double-three (a three only
+  counts if its straight-four completion is itself not forbidden, checked recursively) or an overline. Black never
+  plays a forbidden point anywhere: `Board::is_legal_move`, search candidates, the VCT attacker and defender lists
+  and the pbrain final move all filter it, so a white four whose only blocks are forbidden is a win for white.
+  `pbrain-figrid` accepts `rule 4`.
+* `Board::is_forbidden_for_side_to_move`.
+* Per-rule models in `pbrain-figrid`: `FIGRID_CODEBOOK_WEIGHTS_{STANDARD,CARO,RENJU}` with a mandatory
+  `NORU_CODEBOOK_EVAL_SCALE_{STANDARD,CARO,RENJU}` (a model without its scale refuses to start).
+* `Searcher::set_codebook_eval_scale`, a per-searcher override of the process-wide codebook eval scale.
+
+### Changed
+
+* `Board::is_legal_move` returns `false` for a Renju forbidden point when black is to move. It is unchanged for
+  every other rule and for white.
+
+Validation: the forbidden-move detector agrees with GomocupJudge `check_forbid` on 513,504 empty cells of random
+boards (5,550 forbidden, 0 mismatches); 1,000 Renju games refereed by the judge rule had 0 forbidden black moves;
+GomocupJudge `test_zip_rules.py` passes Freestyle (15×15), Standard, Renju and Caro including self-play. Freestyle,
+Standard and Caro play is unchanged: fixed-depth move, eval and node counts are identical to 0.9.2 on 180
+position/rule pairs, and a process with per-rule models plays each rule exactly like that model alone.
+
 ## 0.9.2 (2026-10-01)
 
 ### Fixed

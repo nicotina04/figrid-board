@@ -28,8 +28,8 @@ pub enum RuleSet {
     Freestyle,
     Standard,
     Caro,
-    /// Terminal-line semantics only. Renju forbidden-move legality is not
-    /// implemented yet, so pbrain keeps rejecting Renju games for now.
+    /// Black wins with exactly five and may not play forbidden points (double-four, double-three, overline;
+    /// see [`crate::renju`]); white wins with five or more.
     Renju,
 }
 

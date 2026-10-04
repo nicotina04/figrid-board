@@ -1,4 +1,3 @@
-#[cfg(feature = "codebook-eval")]
 use crate::board::RuleSet;
 /// ????????ㅻ깹???????????????袁ｋ쨨?? ??????轅붽틓?????(NNUE ???)
 ///
@@ -854,6 +853,9 @@ pub struct Searcher {
     /// Experimental and OFF by default until the CB-D1 release gates pass.
     #[cfg(feature = "codebook-eval")]
     use_codebook_directional_delta: bool,
+    /// Codebook eval scale for this searcher; `None` uses the process-wide [`codebook_eval_scale`].
+    #[cfg(feature = "codebook-eval")]
+    codebook_eval_scale_override: Option<f32>,
     /// Per-search incremental state. It is rebuilt at the root and dropped
     /// before returning so protocol moves cannot leave it stale.
     board_search_state: Option<BoardSearchState>,
@@ -902,6 +904,8 @@ impl Searcher {
             // ~2x cheaper materialization); the setter remains for A/B only.
             #[cfg(feature = "codebook-eval")]
             use_codebook_directional_delta: true,
+            #[cfg(feature = "codebook-eval")]
+            codebook_eval_scale_override: None,
             board_search_state: None,
             move_picker_stats: MovePickerStats::default(),
             shape_stats: SearchShapeStats::default(),
@@ -1074,6 +1078,13 @@ impl Searcher {
     #[cfg(feature = "codebook-eval")]
     pub fn set_use_codebook_directional_delta(&mut self, enabled: bool) {
         self.use_codebook_directional_delta = enabled;
+    }
+
+    /// Set the codebook eval scale used by this searcher (e.g. a per-rule model); `None` restores the
+    /// process-wide [`codebook_eval_scale`].
+    #[cfg(feature = "codebook-eval")]
+    pub fn set_codebook_eval_scale(&mut self, scale: Option<f32>) {
+        self.codebook_eval_scale_override = scale.filter(|s| s.is_finite() && *s > 0.0);
     }
 
     fn begin_board_search_state(&mut self, board: &Board) {
@@ -1721,7 +1732,7 @@ impl Searcher {
             return result;
         }
         self.enable_main_search_candidate_frontier(board);
-        let scale = codebook_eval_scale();
+        let scale = self.codebook_eval_scale_override.unwrap_or_else(codebook_eval_scale);
         let mut inc = CodebookEvalState::new(board, codebook_weights, scale);
         let result = self.search_with_eval_state(board, ordering_weights, &mut inc, max_depth);
         self.end_board_search_state(board);
@@ -1787,7 +1798,7 @@ impl Searcher {
         self.enable_main_search_candidate_frontier(board);
         self.prepare_white_root_order_cache(board, codebook_weights)
             .unwrap_or_else(|error| panic!("invalid white root ordering state: {error}"));
-        let scale = codebook_eval_scale();
+        let scale = self.codebook_eval_scale_override.unwrap_or_else(codebook_eval_scale);
         let mut inc = QuantizedCodebookEvalState::new(
             board,
             codebook_weights,

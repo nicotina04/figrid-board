@@ -57,13 +57,12 @@ fn zobrist_keys() -> &'static [[u64; 2]; NUM_CELLS] {
 fn zobrist_hash(board: &Board) -> u64 {
     let keys = zobrist_keys();
     let mut h = 0u64;
-    for idx in 0..NUM_CELLS {
-        if board.black.get(idx) {
-            h ^= keys[idx][0];
-        }
-        if board.white.get(idx) {
-            h ^= keys[idx][1];
-        }
+    // Same XOR as scanning every cell, but over the stones only (O(stones), not O(cells)).
+    for idx in board.black.iter_ones() {
+        h ^= keys[idx][0];
+    }
+    for idx in board.white.iter_ones() {
+        h ^= keys[idx][1];
     }
     if board.side_to_move == Stone::White {
         h ^= ZOBRIST_SIDE_WHITE;

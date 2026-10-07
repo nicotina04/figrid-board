@@ -2446,9 +2446,12 @@ impl Searcher {
             let my_kind = classify_move_fast(board, mv, board.side_to_move);
 
             // ????븐뼐????傭?끆?????Β?ｊ콞?轅붽틓?????⑸걦?????????諛몃마嶺뚮?????꾩렯?????must-block ????? ????轅붽틓???壤굿??덊뒌??????????怨뺤떪???????????????.
+            // Q1: an immediate five wins outright. Return the score its child would report
+            // (`WIN_SCORE - (ply + 1)`) without making the move or updating the eval state; the
+            // value is identical, only the terminal child node is skipped.
             if matches!(my_kind, ThreatKind::Five) {
-                forcing.push((mv, 1_000_000));
-                continue;
+                self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
+                return WIN_SCORE - (ply as i32 + 1);
             }
 
             if opp_has_five {

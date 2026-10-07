@@ -43,9 +43,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cb2vec"
-version = "0.2.2"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d14e61c41b309c63635f2392a89e252533044740b86b8e1319c8bc130883a4f6"
+checksum = "c69ef5c5776f1c645057d2884101fe77fb0c193ea78d2646b112e4c504f1d737"
 dependencies = [
  "serde_json",
 ]

@@ -7,7 +7,8 @@
 use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
 use crate::factored_codebook::FactoredQuantizedCodebookWeights;
 use crate::pattern_table::{
-    FULL_PATTERN_NUM_IDS, PATTERN_NUM_IDS, full_ids_for_cell, full_swap_id, swap_mapped_id,
+    FULL_PATTERN_NUM_IDS, PATTERN_NUM_IDS, full_id_for_cell_dir, full_ids_for_cell, full_swap_id,
+    swap_mapped_id,
 };
 pub use crate::search::EvalStateStepProfile;
 use cb2vec::{ReversibleTokenJournal, TokenDelta, TokenDeltaReplay, TokenDeltaSink};
@@ -1259,12 +1260,39 @@ impl PatternJournal {
         }
     }
 
-    fn push_after(&mut self, board: &Board, dirty: &[usize]) -> usize {
+    /// `mv` is the stone just placed (the dirty cells are the ones on its four lines).
+    fn push_after(&mut self, board: &Board, mv: Move, dirty: &[usize]) -> usize {
         match self {
             Self::Legacy(journal) => journal.push_after(board.line_pattern_ids.as_ref(), dirty),
             Self::Full { journal, scratch } => {
+                // A stone changes only the windows that contain it: for a dirty cell on one of the
+                // four lines through the move, just that line's direction. Re-reading the other
+                // three windows (as the full recompute did) cost about a quarter of search time.
+                // `scratch` is not rolled back on pop; the journal's logical ids are, so the three
+                // untouched lanes of each dirty cell are taken from there.
+                let logical = journal.logical_tokens();
+                let (mr, mc) = ((mv / BOARD_SIZE) as i32, (mv % BOARD_SIZE) as i32);
                 for &cell in dirty {
-                    scratch[cell] = full_ids_for_cell(&board.black, &board.white, cell);
+                    scratch[cell] = logical[cell];
+                    if cell == mv {
+                        scratch[cell] = full_ids_for_cell(&board.black, &board.white, cell);
+                        continue;
+                    }
+                    let dr = (cell / BOARD_SIZE) as i32 - mr;
+                    let dc = (cell % BOARD_SIZE) as i32 - mc;
+                    // Direction order of `full_ids_for_cell`: horizontal, vertical, diagonal, anti-diagonal.
+                    let dir = if dr == 0 {
+                        0
+                    } else if dc == 0 {
+                        1
+                    } else if dr == dc {
+                        2
+                    } else {
+                        debug_assert_eq!(dr, -dc, "dirty cell off the move's lines");
+                        3
+                    };
+                    scratch[cell][dir] = full_id_for_cell_dir(&board.black, &board.white, cell, dir);
+                    debug_assert_eq!(scratch[cell], full_ids_for_cell(&board.black, &board.white, cell));
                 }
                 journal.push_after(scratch, dirty)
             }
@@ -1645,7 +1673,7 @@ impl IncrementalQuantizedCodebookEval {
             .as_mut()
             .expect("directional delta state enabled");
         debug_assert!(state.journal.depth() < NUM_CELLS);
-        let direction_deltas = state.journal.push_after(board, &dirty);
+        let direction_deltas = state.journal.push_after(board, mv, &dirty);
         profile.add_frame_write(start);
 
         self.last_dirty_cells = dirty.len();

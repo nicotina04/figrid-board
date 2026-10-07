@@ -353,6 +353,22 @@ pub fn full_ids_for_cell(
     })
 }
 
+/// One directional full-vocabulary id of `cell` (`dir_idx` in the [`full_ids_for_cell`] order:
+/// horizontal, vertical, diagonal, anti-diagonal).
+#[inline]
+pub fn full_id_for_cell_dir(
+    black: &crate::board::BitBoard,
+    white: &crate::board::BitBoard,
+    cell: usize,
+    dir_idx: usize,
+) -> u32 {
+    use crate::board::BOARD_SIZE;
+    const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
+    let (dr, dc) = DIRS[dir_idx];
+    let w = read_window(black, white, (cell / BOARD_SIZE) as i32, (cell % BOARD_SIZE) as i32, dr, dc);
+    full_lookup_id(pack_window(&w))
+}
+
 /// Threat tier produced when `mine` (hypothetically) plays at the anchor cell
 /// of a single direction's window. Mirrors `vct.rs::LineThreat` but is kept
 /// separate here to avoid a cross-module type dependency; callers translate

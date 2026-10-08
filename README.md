@@ -34,6 +34,21 @@ model, quantized artifact, scoring, and reversible token-journal primitives.
 search integration. The dependency is optional and is activated only by the
 `codebook-eval` feature; the default board/rules build does not pull it in.
 
+## Download
+
+The [latest release](https://github.com/nicotina04/figrid-board/releases/latest) ships a Windows zip with two
+self-contained engines (embedded models, static C runtime, x86_64-v3 CPU required):
+
+| File | Board | Rules |
+|---|---|---|
+| `pbrain-figrid.exe` | 15×15 | Freestyle, Standard, Renju, Caro (dedicated Caro and Renju models) |
+| `pbrain-figrid_20.exe` | 20×20 | Freestyle, Fastgame |
+
+Both pass GomocupJudge `test_zip_rules.py` in all six formats, and the judge picks the `_20` executable for 20×20 games.
+Load either one in Piskvork or any pbrain-compatible manager. The release binaries embed trained models that are not
+part of the crate package; a build from source with `embed-weights,codebook-eval` embeds the older default models
+instead, and `FIGRID_CODEBOOK_WEIGHTS` loads any other model file.
+
 ## Features
 
 - Pure Rust, no C dependencies. With embedded weights and a statically linked
@@ -47,7 +62,12 @@ search integration. The dependency is optional and is activated only by the
 - Rule support: Freestyle (`rule 0`), Standard exact-five (`rule 1`), Renju (`rule 4`: black exact five with
   forbidden double-four / double-three / overline, white five or more), and Caro as Gomocup plays it (`rule 9`:
   exactly five, not blocked at both ends by stones; the board edge does not block). Continuous games and bare
-  `rule 8` are answered with `ERROR - unsupported rule`. Board size 15 only.
+  `rule 8` are answered with `ERROR - unsupported rule`.
+- Board sizes: 15×15 by default, 20×20 with the `board20` cargo feature (Gomocup Freestyle / Fastgame). The side is
+  a compile-time constant, so the two engines are separate builds of the same source.
+- Exact-length VCT analysis (`vct::search_vct_exact`): only an actual five ends a line, and the first attack can be
+  pinned. Iterating the depth gives the minimal number of attacker moves to a five against every defence the prover
+  considers. This is useful for puzzles and move review. The engine's own prover is unchanged.
 - Per-rule models: `FIGRID_CODEBOOK_WEIGHTS_{STANDARD,CARO,RENJU}` load a codebook used only under that rule, each
   with its own `NORU_CODEBOOK_EVAL_SCALE_{STANDARD,CARO,RENJU}`; other rules keep `FIGRID_CODEBOOK_WEIGHTS`.
 - Optional `avx512` cargo feature: opportunistic ~2× evaluation speedup on AVX-512 hardware, with automatic AVX-2 runtime fallback. Requires Rust ≥ 1.89; off by default so library users on older toolchains and crates.io itself can build.
@@ -77,14 +97,15 @@ search integration. The dependency is optional and is activated only by the
 
 ## Measured state-update path
 
-The following are same-binary, preregistered engineering measurements, not
-playing-strength claims:
+The following are same-binary, preregistered engineering measurements. Only the 1.0 row also has a playing-strength
+check: against Pela at 2000 ms per move, the 1.0 search scored 335.5/600 vs 313/600 for 0.10.0 on the same seeds.
 
 | Card | Change | Frozen result | Correctness |
 |---|---|---|---|
 | A2 | Packed 11-cell Pattern4 windows | wall ratio `0.78885` versus 0.8.1, or 21.11% less fixed-depth time | zero mismatches in the 100,000-operation rebuild audit |
 | A3 | Exact-order candidate frontier on top of A2 | product VCT-ON wall ratio `0.986855`, or 1.31% additional saving; A2 and A3 compound to an indicated 22.15% | identical decisions and node fields over 1,022 roots |
 | D1 | Exact codebook directional deltas | VCT-OFF wall ratio `0.803242` and sealed product VCT-ON ratio `0.907485`, or 19.68% and 9.25% less time | exact 100,000-operation and 100,000-transition audits; identical decisions and nodes over 1,022 roots |
+| 1.0 | Full-vocabulary journal recomputes only the window direction that contains the move; qsearch scores an immediate five without making it | fixed-depth time 1.25–1.55× faster across rules 0/1/4/9 and 20×20 | bestmove, depth and eval identical to 0.10.0 at fixed depth; eval dumps bit-identical |
 
 The generic reversible journal was subsequently extracted into `cb2vec`.
 That boundary is an architecture and reuse change, not a separate speed or
@@ -168,7 +189,7 @@ dump.csv [--stride N]` writes a bit-exact static-eval dump
 
 ```toml
 [dependencies]
-figrid-board = "0.9"
+figrid-board = "1"
 ```
 
 ```rust
@@ -227,11 +248,10 @@ cargo build --release --locked --target x86_64-pc-windows-msvc `
     --features embed-weights,codebook-eval,board20
 ```
 
-**Reproduce the portable Gomocup 2026 build** — `-C target-cpu=native` is
-wrong for a portable binary because it targets the build host. The 2026
+**Portable builds with the GNU toolchain** — `-C target-cpu=native` is wrong
+for a portable binary because it targets the build host. The Gomocup 2026
 tournament machines guaranteed SSE4.1, SSE4.2, POPCNT, AVX, and AVX2, which
-matches `x86_64-v3`. The retained release recipe statically links the C
-runtime and embeds both weight assets:
+matches `x86_64-v3`. With the GNU target instead of MSVC:
 
 ```bash
 RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v3" \
@@ -255,13 +275,11 @@ compatible baseline.
 
 ## Current direction
 
-The [Gomocup 2026](https://gomocup.org/) submission deadline and June 5–7
-tournament have passed. The compatible build recipes remain above for
-reproducibility. Current 0.8.x maintenance favors exact, independently
-reversible changes with full-rebuild audits and same-binary measurements.
-Reusable codebook mechanics are developed in
-[CB2Vec](https://github.com/nicotina04/cb2vec); Gomoku-specific
-evaluation, search, and protocol policy remain in `figrid-board`.
+1.0 covers every Gomocup board: Freestyle and Fastgame on 20×20, plus Freestyle, Standard, Renju and Caro on 15×15.
+Development favours exact, independently checked changes. Speedups must leave fixed-depth search identical, and
+strength claims come from matched-seed matches against external engines. Reusable codebook mechanics are developed in
+[CB2Vec](https://github.com/nicotina04/cb2vec); Gomoku-specific evaluation, search, and protocol policy remain in
+`figrid-board`.
 
 ## Maintainership
 

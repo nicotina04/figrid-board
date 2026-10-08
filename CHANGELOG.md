@@ -1,5 +1,16 @@
 # Changes
 
+## 1.0.1 (2026-10-08)
+
+Packaging and documentation only; the library and the engine are identical to 1.0.0.
+
+* The crate package now lists the files it ships (`include`) instead of excluding research material. It carries the
+  library, `pbrain-figrid`, the `ngcb-convert` and `t1-eval-dump` model tools, the default models, the bench and the
+  public-API tests. Research and audit binaries, examples, reports and experiment records stay in the repository only.
+  `cargo install figrid-board` therefore installs three binaries instead of thirty.
+* README updated for 1.0: download section for the 15×15 and 20×20 engines, `board20`, `search_vct_exact`, and the 1.0
+  measurement row.
+
 ## 1.0.0 (2026-10-08)
 
 ### Added

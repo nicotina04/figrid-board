@@ -1,5 +1,30 @@
 # Changes
 
+## 1.0.0 (2026-10-08)
+
+### Added
+
+* 20×20 board (Gomocup Freestyle / Fastgame) behind the `board20` cargo feature. The board side is a compile-time
+  constant, so the 15×15 and 20×20 engines are separate builds of the same source; the 15×15 build is unchanged.
+  Under `board20`, bitboards hold 400 cells in four 128-bit words, `Move` indices run to 399, and `pbrain-figrid`
+  answers `START 20`. Build the 20×20 engine with `--features codebook-eval,board20` and ship it as
+  `pbrain-figrid_20.exe` next to the 15×15 `pbrain-figrid.exe`. GomocupJudge picks the `_20` executable for 20×20
+  games.
+* `vct::search_vct_exact`: an analysis entry point to the VCT prover. Only an actual five ends a line, so open and
+  double fours are played out, and the first attack can be pinned to one move. Iterating `max_depth = 2k − 1` gives
+  the minimal number of attacker moves `k` to a five against every defence the prover considers. The engine's own
+  prover is unchanged.
+
+### Changed
+
+* Search is about 1.4× faster at equal depth, with identical results. The full-vocabulary codebook state now
+  recomputes, for each cell on a line through the move, only that line's window instead of all four. Re-reading the
+  three unchanged windows had cost about a quarter of search time. qsearch also returns an immediate five's score
+  without making the move. Fixed-depth bestmove, depth and eval are identical to 0.10.0 on 40 positions each under
+  rules 0, 1, 4 and 9 and on 20×20 (1.25–1.55× faster). Against Pela at 2000 ms per move the faster build scored
+  335.5/600 vs 313/600 for 0.10.0 on the same seeds.
+* `cb2vec` 0.2.2 → 0.3.2 (codebook evaluation is bit-identical).
+
 ## 0.10.0 (2026-10-04)
 
 ### Added

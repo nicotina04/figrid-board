@@ -218,6 +218,15 @@ cargo build --release --locked --target x86_64-pc-windows-msvc `
 Release preparation builds this command in two clean target directories and
 requires byte-identical executables before packaging.
 
+**20×20 engine** (Gomocup Freestyle / Fastgame): the same recipe with the
+`board20` feature, shipped as `pbrain-figrid_20.exe` beside the 15×15 binary:
+
+```powershell
+cargo build --release --locked --target x86_64-pc-windows-msvc `
+    --bin pbrain-figrid `
+    --features embed-weights,codebook-eval,board20
+```
+
 **Reproduce the portable Gomocup 2026 build** — `-C target-cpu=native` is
 wrong for a portable binary because it targets the build host. The 2026
 tournament machines guaranteed SSE4.1, SSE4.2, POPCNT, AVX, and AVX2, which

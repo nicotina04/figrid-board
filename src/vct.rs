@@ -591,6 +591,11 @@ struct VctJumpThreeFlags {
     use_reach_mask: bool,
     use_fast_immediate_five: bool,
     use_vct_scratch_buffers: bool,
+    /// Exact-length mode ([`search_vct_exact`]): only a real five ends a line, so open and double fours are
+    /// played out and the proving depth counts every attacker move.
+    five_only_terminal: bool,
+    /// [`search_vct_exact`]: the only attack tried at the root.
+    root_move: Option<Move>,
 }
 
 impl VctConfig {
@@ -607,6 +612,8 @@ impl VctConfig {
             use_reach_mask: self.use_reach_mask,
             use_fast_immediate_five: self.use_fast_immediate_five,
             use_vct_scratch_buffers: self.use_vct_scratch_buffers,
+            five_only_terminal: false,
+            root_move: None,
         }
     }
 }
@@ -1209,6 +1216,19 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
     search_vct_with_stats_internal(board, cfg, None)
 }
 
+/// Analysis entry point for exact line lengths and per-move proofs (not used by the engine's search).
+///
+/// Only a real five ends a line: open and double fours are played out against every defence, so the
+/// smallest odd `cfg.max_depth` that proves is `2·k − 1`, where `k` is the number of attacker moves up to
+/// and including the five against the prover's best defence. `root_move` restricts the first attack to
+/// one move (it must be a forcing move the prover generates, otherwise the search fails).
+pub fn search_vct_exact(board: &mut Board, cfg: &VctConfig, root_move: Option<Move>) -> VctSearchResult {
+    let mut flags = cfg.jump_three_flags();
+    flags.five_only_terminal = true;
+    flags.root_move = root_move;
+    search_vct_with_flags(board, cfg, flags, None)
+}
+
 /// Search entry used by the main engine when it owns a search-local board
 /// sidecar. Public VCT callers keep the legacy `Board`-only API.
 pub(crate) fn search_vct_with_board_search_state(
@@ -1222,6 +1242,15 @@ pub(crate) fn search_vct_with_board_search_state(
 fn search_vct_with_stats_internal(
     board: &mut Board,
     cfg: &VctConfig,
+    board_search_state: Option<&mut BoardSearchState>,
+) -> VctSearchResult {
+    search_vct_with_flags(board, cfg, cfg.jump_three_flags(), board_search_state)
+}
+
+fn search_vct_with_flags(
+    board: &mut Board,
+    cfg: &VctConfig,
+    flags: VctJumpThreeFlags,
     mut board_search_state: Option<&mut BoardSearchState>,
 ) -> VctSearchResult {
     let deadline = cfg.time_budget.map(|d| Instant::now() + d);
@@ -1230,7 +1259,6 @@ fn search_vct_with_stats_internal(
     let mut tt: TransTable = HashMap::with_capacity(65536);
     let mut stats = VctSearchStats::default();
     stats.profile_enabled = cfg.profile;
-    let flags = cfg.jump_three_flags();
     let mut scratch = VctScratch::default();
     let mut threat_index = if flags.use_threat_index && flags.use_fast_classify {
         Some(VctThreatIndex::new(board))
@@ -1448,6 +1476,12 @@ fn vct_or(
     if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
         attack_moves.retain(|&(mv, _)| !board.is_forbidden_for_side_to_move(mv));
     }
+    // Exact-length mode: the root OR node (the only one at or_level 0) may be pinned to one attack.
+    if or_level == 0 {
+        if let Some(root) = jump_three.root_move {
+            attack_moves.retain(|&(mv, _)| mv == root);
+        }
+    }
     if attack_moves.is_empty() {
         scratch.put_attack(jump_three.use_vct_scratch_buffers, attack_moves);
         let start = profile_start(stats);
@@ -1467,7 +1501,11 @@ fn vct_or(
 
     for (mv, kind) in attack_moves.iter().copied() {
         let start = profile_start(stats);
-        let terminal_win = is_vct_terminal_win(kind);
+        let terminal_win = if jump_three.five_only_terminal {
+            kind == ThreatKind::Five
+        } else {
+            is_vct_terminal_win(kind)
+        };
         if let Some(start) = start {
             stats.profile.terminal_check_calls += 1;
             stats.profile.terminal_check_ns += start.elapsed().as_nanos();
@@ -3547,5 +3585,54 @@ mod tests {
         let cfg = VctConfig::default();
         let seq = search_vct(&mut board, &cfg);
         assert!(seq.is_none(), "no VCT when opponent has immediate Five");
+    }
+}
+
+#[cfg(test)]
+mod exact_length_tests {
+    use super::*;
+    use crate::board::to_idx;
+
+    fn board_from(black: &[(usize, usize)], white: &[(usize, usize)]) -> Board {
+        let mut b = Board::new();
+        for (bk, wh) in black.iter().zip(white) {
+            b.make_move(to_idx(bk.0, bk.1));
+            b.make_move(to_idx(wh.0, wh.1));
+        }
+        b
+    }
+
+    fn cfg(max_depth: u32) -> VctConfig {
+        VctConfig { max_depth, time_budget: None, node_budget: Some(1_000_000), ..VctConfig::default() }
+    }
+
+    #[test]
+    fn exact_mode_counts_the_five_after_a_double_four() {
+        // (7,6) makes two closed fours; the five follows on the next attacker move.
+        let mut b = board_from(
+            &[(7, 3), (7, 4), (7, 5), (4, 6), (5, 6), (6, 6)],
+            &[(7, 2), (3, 6), (0, 0), (0, 14), (14, 0), (14, 14)],
+        );
+        // The engine prover stops at the double four (one attacker move).
+        assert_eq!(search_vct_with_stats(&mut b, &cfg(1)).sequence, Some(vec![to_idx(7, 6)]));
+        // Exact mode needs two attacker moves (depth 2k - 1 = 3), not one.
+        assert!(search_vct_exact(&mut b, &cfg(1), None).sequence.is_none());
+        let line = search_vct_exact(&mut b, &cfg(3), None).sequence.expect("double four then five");
+        assert_eq!(line[0], to_idx(7, 6));
+        assert_eq!(line.len(), 3);
+        assert_eq!(b.move_count, 12, "board restored");
+    }
+
+    #[test]
+    fn exact_mode_root_pin_restricts_the_first_attack() {
+        let mut b = board_from(
+            &[(7, 3), (7, 4), (7, 5), (4, 6), (5, 6), (6, 6)],
+            &[(7, 2), (3, 6), (0, 0), (0, 14), (14, 0), (14, 14)],
+        );
+        assert!(search_vct_exact(&mut b, &cfg(3), Some(to_idx(7, 6))).sequence.is_some());
+        // A four elsewhere is answered and leaves no faster win within the same depth.
+        assert!(search_vct_exact(&mut b, &cfg(3), Some(to_idx(7, 7))).sequence.is_none());
+        // A quiet move is not an attack, so the pinned search fails.
+        assert!(search_vct_exact(&mut b, &cfg(9), Some(to_idx(10, 10))).sequence.is_none());
     }
 }

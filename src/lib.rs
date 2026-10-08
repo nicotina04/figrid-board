@@ -47,7 +47,7 @@ pub use tss::{
     generate_dependency_quiet_candidates, generate_quiet_threat_candidates, search_q1_tss_root,
 };
 pub use vct::{
-    VctConfig, VctSearchResult, VctSearchStats, search_vct, search_vct_audit_json,
+    VctConfig, VctSearchResult, VctSearchStats, search_vct, search_vct_audit_json, search_vct_exact,
     search_vct_with_stats,
 };
 #[cfg(feature = "cb-p1-audit")]

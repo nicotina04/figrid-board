@@ -95,24 +95,43 @@ instead, and `FIGRID_CODEBOOK_WEIGHTS` loads any other model file.
   and region delta per affected cell. The shipped pbrain enables this 0.8.3
   path by default; ordinary library `Searcher` instances remain opt-in.
 
+## How the engine developed
+
+figrid was inherited as a small board library in April 2026 and rebuilt as an engine over one season:
+
+1. **Search backbone (0.4–0.6).** A NORU NNUE port with a root VCT/VCF prover, threat-tiered move ordering, a larger
+   transposition table, internal iterative reduction and late-move pruning. Reductions and pruning never touch
+   forcing moves; an early version that did lost most of its games.
+2. **Codebook evaluator (0.7–0.8).** The leaf evaluator moved from the flat NNUE to a categorical codebook over
+   11-cell line patterns. An early codebook matched the flat network at about 1/112 of its parameters; the current one
+   uses the complete 199,827-pattern vocabulary, because truncating rare patterns turned out to hide exactly the
+   tactical ones.
+3. **Distilled labels (0.9–0.10).** Value labels come from stronger engines, with a fail-closed rule that keeps a
+   position only when two search budgets agree. A clean relabelling gave the largest single gain of the season, and
+   rule-specific teachers carried it to Caro, Renju and 20×20.
+4. **Speed (1.0).** The whole state-update path stopped repeating work, with search results held identical; this
+   converted into strength where an evaluation-only speedup earlier had not.
+
+Every step was gated the same way: refactors must reproduce evaluation dumps and fixed-depth searches exactly, and
+strength claims come from matched-seed matches against external engines, replicated on fresh seeds.
+
 ## Measured state-update path
 
-The following are same-binary, preregistered engineering measurements. Only the 1.0 row also has a playing-strength
-check: against Pela at 2000 ms per move, the 1.0 search scored 335.5/600 vs 313/600 for 0.10.0 on the same seeds.
+Same-binary engineering measurements of the incremental-update work. The last row also has a playing-strength check:
+against Pela at 2000 ms per move, the 1.0 search scored 335.5/600 vs 313/600 for 0.10.0 on the same seeds.
 
-| Card | Change | Frozen result | Correctness |
+| Release | Change | Measured result | Correctness |
 |---|---|---|---|
-| A2 | Packed 11-cell Pattern4 windows | wall ratio `0.78885` versus 0.8.1, or 21.11% less fixed-depth time | zero mismatches in the 100,000-operation rebuild audit |
-| A3 | Exact-order candidate frontier on top of A2 | product VCT-ON wall ratio `0.986855`, or 1.31% additional saving; A2 and A3 compound to an indicated 22.15% | identical decisions and node fields over 1,022 roots |
-| D1 | Exact codebook directional deltas | VCT-OFF wall ratio `0.803242` and sealed product VCT-ON ratio `0.907485`, or 19.68% and 9.25% less time | exact 100,000-operation and 100,000-transition audits; identical decisions and nodes over 1,022 roots |
-| 1.0 | Full-vocabulary journal recomputes only the window direction that contains the move; qsearch scores an immediate five without making it | fixed-depth time 1.25–1.55× faster across rules 0/1/4/9 and 20×20 | bestmove, depth and eval identical to 0.10.0 at fixed depth; eval dumps bit-identical |
+| 0.8.2 | Packed 11-cell Pattern4 windows | 21.11% less fixed-depth time than 0.8.1 | zero mismatches in a 100,000-operation rebuild audit |
+| 0.8.2 | Exact-order candidate frontier on top of the packed windows | 1.31% further saving; 22.15% combined | identical decisions and node counts over 1,022 roots |
+| 0.8.3 | Exact codebook directional deltas | 19.68% less time without root VCT, 9.25% with it | exact 100,000-operation and 100,000-transition audits; identical decisions and nodes over 1,022 roots |
+| 1.0 | Full-vocabulary journal recomputes only the window direction that contains the move; qsearch scores an immediate five without making it | fixed-depth search 1.25–1.55× faster across rules 0/1/4/9 and 20×20 | bestmove, depth and eval identical to 0.10.0 at fixed depth; eval dumps bit-identical |
 
 The generic reversible journal was subsequently extracted into `cb2vec`.
 That boundary is an architecture and reuse change, not a separate speed or
-strength claim. Detailed evidence is recorded in the
-[0.8.3 changelog](CHANGELOG.md) and the
-[A2+A3](https://github.com/nicotina04/figrid-board/blob/main/experiments/2026-07-25/dp_a23_release_stack_results.md),
-[D1](https://github.com/nicotina04/figrid-board/blob/main/experiments/2026-07-25/cb_d1_directional_delta_results.md),
+strength claim. Details are in the [changelog](CHANGELOG.md) and the
+[packed-window and frontier](https://github.com/nicotina04/figrid-board/blob/main/experiments/2026-07-25/dp_a23_release_stack_results.md),
+[directional-delta](https://github.com/nicotina04/figrid-board/blob/main/experiments/2026-07-25/cb_d1_directional_delta_results.md),
 and [journal extraction](https://github.com/nicotina04/figrid-board/blob/main/experiments/2026-07-25/cb_token_delta_results.md)
 reports.
 
@@ -202,9 +221,10 @@ println!("{:?}", board.side_to_move); // Black (the side about to move)
 ```
 
 NNUE weights and the search struct are exposed for users who want to drive the engine programmatically rather than through the Piskvork protocol.
-The A2 and A3 accelerators are off in a newly constructed `Searcher`; library
-callers opt in through `set_use_packed_line_windows` and
-`set_use_candidate_frontier`. The D1 directional-delta path has been on by
+The packed-window and candidate-frontier accelerators are off in a newly
+constructed `Searcher`; library callers opt in through
+`set_use_packed_line_windows` and `set_use_candidate_frontier`. The
+directional-delta path has been on by
 default since 0.8.6 (`set_use_codebook_directional_delta(false)` restores full
 refreshes). Enabling `codebook-eval` also activates
 the optional `cb2vec` dependency. Consumers that only need the generic

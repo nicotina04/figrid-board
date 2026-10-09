@@ -323,7 +323,7 @@ strength claims come from matched-seed matches against external engines. Reusabl
 
 ## Maintainership
 
-As of 2026-04-20, primary maintainership has been transferred from the original author [wuwbobo2021](https://github.com/wuwbobo2021) to [nicotina04](https://github.com/nicotina04). Future development targets a stronger NNUE-based engine; some of the board / rule / tree library features in the 0.3.x series versions might be refactored and introduced again in the future (if needed).
+As of 2026-04-20, primary maintainership has been transferred from the original author [wuwbobo](https://github.com/wuwbobo) to [nicotina04](https://github.com/nicotina04). Future development targets a stronger NNUE-based engine; some of the board / rule / tree library features in the 0.3.x series versions might be refactored and introduced again in the future (if needed).
 
 ## Legacy users
 
@@ -333,7 +333,7 @@ Users who need the pre-Rust `figrid-board` as a Linux alternative to Renlib can 
 
 - [Rapfi](https://github.com/dhbloo/rapfi) for advancing public NNUE work in Gomoku and for serving as a reference point during evaluation development.
 - [noru](https://crates.io/crates/noru) for the underlying Rust NNUE training and inference stack.
-- [wuwbobo2021](https://github.com/wuwbobo2021) for the original engine and for entrusting `figrid-board` to its current maintainer.
+- [wuwbobo](https://github.com/wuwbobo) for the original engine and for entrusting `figrid-board` to its current maintainer.
 - [CB2Vec](https://crates.io/crates/cb2vec) for the reusable categorical
   training, quantization, artifact, scoring, and reversible token-update
   primitives used by the codebook evaluator.

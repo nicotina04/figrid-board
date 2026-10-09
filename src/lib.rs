@@ -37,7 +37,8 @@ pub use eval::{IncrementalEval, evaluate};
 pub use features::GOMOKU_NNUE_CONFIG;
 pub use heuristic::{DIR, LineInfo, scan_line};
 pub use search::{
-    MovePickerStats, SearchProfileSnapshot, SearchResult, SearchShapeStats, Searcher,
+    MovePickerStats, ProgressCallback, SearchProfileSnapshot, SearchProgress, SearchResult, SearchShapeStats,
+    Searcher,
 };
 pub use threat_field::IncrementalThreatField;
 pub use tss::{

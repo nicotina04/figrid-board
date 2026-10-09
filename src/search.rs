@@ -27,6 +27,7 @@ use crate::vct::{
 use crate::white_root_order::WhiteRootOrder;
 use noru::network::NnueWeights;
 use crate::policy_move::PolicyMove;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -196,6 +197,24 @@ fn policy_order_table() -> Option<&'static PolicyOrderTable> {
         Err(e) => panic!("{e}"),
     }
 }
+
+/// One completed iteration of the iterative-deepening search, reported through
+/// [`Searcher::set_progress_callback`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchProgress {
+    /// The depth just completed.
+    pub depth: u32,
+    /// Its score (side to move, engine units; `±(WIN_SCORE - plies)` for forced results).
+    pub score: i32,
+    pub best_move: Option<Move>,
+    /// Nodes searched so far in this search.
+    pub nodes: u64,
+    /// Time since the search started.
+    pub elapsed: Duration,
+}
+
+/// Callback for [`SearchProgress`]; it runs on the searching thread, so keep it short.
+pub type ProgressCallback = Arc<dyn Fn(&SearchProgress) + Send + Sync>;
 
 /// Per-move policy (see [`Searcher::set_policy_move`]): nodes with at least this many remaining plies are scored.
 const POLICY_MOVE_MIN_DEPTH: u32 = 2;
@@ -902,6 +921,10 @@ pub struct Searcher {
     /// Quiet moves visited so far at the current node of each ply.
     quiet_seen: [usize; 64],
     demote_preempt_three: bool,
+    /// External stop request and per-iteration progress reporting (both off by default).
+    stop_flag: Option<Arc<AtomicBool>>,
+    progress: Option<ProgressCallback>,
+    search_started: Instant,
     threat_field: Option<IncrementalThreatField>,
     #[cfg(feature = "codebook-eval")]
     white_root_order: Option<WhiteRootOrder>,
@@ -957,6 +980,9 @@ impl Searcher {
             policy_hidden: Vec::new(),
             quiet_seen: [0; 64],
             demote_preempt_three: false,
+            stop_flag: None,
+            progress: None,
+            search_started: Instant::now(),
             #[cfg(feature = "codebook-eval")]
             white_root_order: None,
             #[cfg(feature = "codebook-eval")]
@@ -1100,6 +1126,36 @@ impl Searcher {
 
     pub fn demote_preempt_three(&self) -> bool {
         self.demote_preempt_three
+    }
+
+    /// Stop the search from another thread: when the flag is set, the running search stops within about 128 nodes
+    /// and returns the best move of the last completed depth (none if depth 1 did not complete). The root VCT
+    /// prover is not interrupted; it is bounded by its own time budget. The searcher never clears the flag, so reset
+    /// it before the next search.
+    pub fn set_stop_flag(&mut self, flag: Option<Arc<AtomicBool>>) {
+        self.stop_flag = flag;
+    }
+
+    /// Report every completed iterative-deepening depth (see [`SearchProgress`]).
+    pub fn set_progress_callback(&mut self, callback: Option<ProgressCallback>) {
+        self.progress = callback;
+    }
+
+    #[inline]
+    fn stop_requested(&self) -> bool {
+        self.stop_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed))
+    }
+
+    fn report_progress(&self, result: &SearchResult) {
+        if let Some(cb) = &self.progress {
+            cb(&SearchProgress {
+                depth: result.depth,
+                score: result.score,
+                best_move: result.best_move,
+                nodes: result.nodes,
+                elapsed: self.search_started.elapsed(),
+            });
+        }
     }
 
     /// Enable exact-order incremental candidate generation for the main
@@ -1282,6 +1338,7 @@ impl Searcher {
     }
 
     fn reset_for_search(&mut self, time_limit: Option<Duration>) {
+        self.search_started = Instant::now();
         self.nodes = 0;
         self.tt_cutoffs = 0;
         self.aborted = false;
@@ -1582,6 +1639,7 @@ impl Searcher {
                 depth,
                 nodes: self.nodes,
             };
+            self.report_progress(&best_result);
 
             if score.abs() > WIN_SCORE - 100 {
                 break;
@@ -1608,6 +1666,7 @@ impl Searcher {
             self.white_root_order.is_none(),
             "white root ordering requires the quantized codebook search path"
         );
+        self.search_started = Instant::now();
         self.nodes = 0;
         self.tt_cutoffs = 0;
         self.aborted = false;
@@ -1770,6 +1829,7 @@ impl Searcher {
                 depth,
                 nodes: self.nodes,
             };
+            self.report_progress(&best_result);
 
             if score.abs() > WIN_SCORE - 100 {
                 break;
@@ -2009,6 +2069,10 @@ impl Searcher {
                     self.aborted = true;
                     return 0;
                 }
+            }
+            if self.stop_requested() {
+                self.aborted = true;
+                return 0;
             }
         }
 
@@ -2477,6 +2541,11 @@ impl Searcher {
                     self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
                     return 0;
                 }
+            }
+            if self.stop_requested() {
+                self.aborted = true;
+                self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
+                return 0;
             }
         }
 
@@ -3501,6 +3570,54 @@ mod tests {
         let mut searcher = Searcher::new();
         searcher.set_white_root_order_enabled(true).unwrap();
         let _ = searcher.search_codebook_eval(&mut board, &ordering, &codebook, 1, None);
+    }
+
+    fn quiet_board() -> Board {
+        let mut board = Board::new();
+        for (r, c) in [(7, 7), (8, 8), (6, 8), (8, 6)] {
+            board.make_move(to_idx(r, c));
+        }
+        board
+    }
+
+    #[test]
+    fn progress_reports_every_completed_depth_in_order() {
+        let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let mut searcher = Searcher::new();
+        searcher.set_use_root_vct_for_audit(false);
+        searcher.set_progress_callback(Some(Arc::new(move |p: &SearchProgress| sink.lock().unwrap().push(*p))));
+        let mut board = quiet_board();
+        let result = searcher.search(&mut board, &weights, 4, None);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        let last = seen.last().unwrap();
+        assert_eq!((last.best_move, last.score), (result.best_move, result.score));
+    }
+
+    #[test]
+    fn stop_flag_ends_an_unbounded_search() {
+        let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut searcher = Searcher::new();
+        searcher.set_use_root_vct_for_audit(false);
+        searcher.set_stop_flag(Some(Arc::clone(&flag)));
+        let stopper = Arc::clone(&flag);
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            stopper.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let mut board = quiet_board();
+        let result = searcher.search(&mut board, &weights, 60, None);
+        t.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "stopped after {:?}", started.elapsed());
+        assert!(result.best_move.is_some() && result.depth >= 1 && result.depth < 60);
+        // Without a flag (or with it cleared) the same search runs to its depth limit.
+        flag.store(false, Ordering::Relaxed);
+        let mut board = quiet_board();
+        assert_eq!(searcher.search(&mut board, &weights, 3, None).depth, 3);
     }
 
     #[test]

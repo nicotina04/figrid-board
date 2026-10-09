@@ -1,5 +1,17 @@
 # Changes
 
+## 1.3.0 (unreleased)
+
+### Added
+
+* `Searcher::set_stop_flag(Option<Arc<AtomicBool>>)`: stop a running search from another thread. The search checks
+  the flag every 128 nodes and returns the best move of the last completed depth. The root VCT prover keeps its own
+  time budget. The searcher never clears the flag.
+* `Searcher::set_progress_callback(Option<ProgressCallback>)` with `SearchProgress { depth, score, best_move, nodes,
+  elapsed }`: called on the searching thread after every completed iterative-deepening depth.
+* Both are off by default; with them unset the search is identical to 1.2.0 (fixed-depth bestmove, depth, eval and
+  nodes on 30 Freestyle and 20 Renju positions).
+
 ## 1.2.0 (2026-10-09)
 
 ### Added

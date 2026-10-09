@@ -1910,6 +1910,57 @@ impl IncrementalQuantizedCodebookEval {
         profile
     }
 
+    /// Materialise pending updates so that [`Self::policy_move_inputs_with_access`] reads current cells.
+    pub(crate) fn materialize_for_policy<W: QuantizedCodebookAccess>(&mut self, weights: &W) {
+        let _ = self.materialize_pending(weights, false);
+    }
+
+    /// The per-move policy inputs of empty `cell` (side-to-move perspective), `6·dim + 21` floats; see
+    /// [`crate::policy_move::PolicyMove`]. Requires [`Self::materialize_for_policy`] since the last move.
+    pub(crate) fn policy_move_inputs_with_access<W: QuantizedCodebookAccess>(
+        &self,
+        board: &Board,
+        weights: &W,
+        cell: usize,
+        my_kind: u8,
+        opp_kind: u8,
+        out: &mut [f32],
+    ) {
+        let dim = weights.dim();
+        debug_assert_eq!(out.len(), 6 * dim + 21);
+        let dequant = 1.0 / weights.embedding_scale() as f32;
+        let full_vocab = weights.is_full_vocab();
+        let white = board.side_to_move == Stone::White;
+        let cells = if white { &self.cell_white } else { &self.cell_black };
+        out.fill(0.0);
+        for d in 0..dim {
+            out[d] = cells[cell * dim + d] as f32 * dequant;
+        }
+        out[dim] = 1.0; // empty plane (only empty cells are scored)
+        let dir_base = dim + 3;
+        let pair_base = dir_base + 4 * dim;
+        let mut row = vec![0i32; dim];
+        let mut sum = vec![0f32; dim];
+        let mut sq = vec![0f32; dim];
+        for (k, id) in ids_for_cell(board, cell, full_vocab).into_iter().enumerate() {
+            let id = if white { swap_id(id, full_vocab) } else { id };
+            row.fill(0);
+            weights.add_embedding_to(id, &mut row);
+            for d in 0..dim {
+                let e = row[d] as f32 * dequant;
+                out[dir_base + k * dim + d] = e.max(0.0);
+                sum[d] += e;
+                sq[d] += e * e;
+            }
+        }
+        for d in 0..dim {
+            out[pair_base + d] = 0.5 * (sum[d] * sum[d] - sq[d]);
+        }
+        let thr = pair_base + dim;
+        out[thr + my_kind as usize] = 1.0;
+        out[thr + 9 + opp_kind as usize] = 1.0;
+    }
+
     pub fn value(&mut self, board: &Board, weights: &QuantizedCodebookWeights) -> f32 {
         self.value_profiled_with_access(board, weights, false).0
     }

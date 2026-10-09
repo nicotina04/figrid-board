@@ -1,6 +1,6 @@
 [package]
 name = "figrid-board"
-version = "1.0.1"
+version = "1.1.0"
 authors = [
     "Hogyung Choi <devherdson@gmail.com>",
 ]
@@ -28,6 +28,7 @@ include = [
     "/models/gomoku_codebook_v1_swapclosed.json",
     "/models/gomoku_codebook_v1_swapclosed_compact_flat.cbf",
     "/models/gomoku_codebook_v1_swapclosed_factored.cbf",
+    "/models/policy_move_v1.pgm1",
     "/data/topk.bin",
     "/benches/engine.rs",
     "/tests/board_public_api_compat.rs",

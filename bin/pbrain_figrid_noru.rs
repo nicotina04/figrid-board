@@ -105,6 +105,8 @@ const KNOWN_ENGINE_VARS: &[&str] = &[
     "NORU_CANDIDATE_FRONTIER",
     "NORU_POLICY_ORDER",
     "NORU_POLICY_REDUCE",
+    "NORU_POLICY_MOVE",
+    "NORU_DEMOTE_PREEMPT_THREE",
     "NORU_FORCED_REPLY_RESTRICTION",
     "NORU_PBRAIN_FIXED_DEPTH",
     "NORU_PBRAIN_MAX_DEPTH",
@@ -242,6 +244,36 @@ fn packed_line_windows_enabled() -> bool {
 
 /// Exact-order candidate-frontier maintenance is the 0.8.2 product default.
 /// Setting `NORU_CANDIDATE_FRONTIER=off` restores the A2-only path.
+/// Pre-empting an opponent three is not forcing (1.1). `NORU_DEMOTE_PREEMPT_THREE=off` restores the 1.0 forcing set.
+fn demote_preempt_three_enabled() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("NORU_DEMOTE_PREEMPT_THREE")
+            .map(|raw| env_bool_default(&raw, true))
+            .unwrap_or(true)
+    })
+}
+
+/// Per-move quiet policy (1.1): unset or empty uses the embedded model, `off`/`0`/`false`/`no` disables it, anything
+/// else is a `PGM1` file. Returns the model and its label for the config line.
+fn load_policy_move() -> Result<(Option<std::sync::Arc<figrid_board::policy_move::PolicyMove>>, String), String> {
+    use figrid_board::policy_move::PolicyMove;
+    let raw = std::env::var("NORU_POLICY_MOVE").unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        #[cfg(feature = "codebook-eval")]
+        return Ok((Some(std::sync::Arc::new(PolicyMove::embedded())), "embedded".to_string()));
+        #[cfg(not(feature = "codebook-eval"))]
+        return Ok((None, "unsupported".to_string()));
+    }
+    if !env_bool_default(raw, true) {
+        return Ok((None, "off".to_string()));
+    }
+    let bytes = std::fs::read(raw).map_err(|e| format!("NORU_POLICY_MOVE `{raw}`: {e}"))?;
+    let model = PolicyMove::from_bytes(&bytes).map_err(|e| format!("NORU_POLICY_MOVE `{raw}`: {e}"))?;
+    Ok((Some(std::sync::Arc::new(model)), raw.to_string()))
+}
+
 fn candidate_frontier_enabled() -> bool {
     static VALUE: OnceLock<bool> = OnceLock::new();
     *VALUE.get_or_init(|| {
@@ -845,6 +877,9 @@ impl Engine {
         searcher.set_use_codebook_directional_delta(codebook_directional_delta_enabled());
         searcher.set_use_candidate_frontier(candidate_frontier_enabled());
         searcher.set_use_packed_line_windows(packed_line_windows_enabled());
+        let (policy_move, policy_move_label) = load_policy_move()?;
+        searcher.set_policy_move(policy_move);
+        searcher.set_demote_preempt_three(demote_preempt_three_enabled());
         // Resolving the search switches here reports a bad NORU_POLICY_ORDER
         // (or NORU_POLICY_REDUCE without a table) at startup instead of at the
         // first search.
@@ -865,11 +900,12 @@ impl Engine {
         let on_off = |enabled: bool| if enabled { "on" } else { "off" };
         let config_line = format!(
             "version={}; weights={}; {codebook_config}; packed_line_windows={}; \
-             candidate_frontier={}; {search_config}; pbrain_fixed_depth={}; pbrain_max_depth={}",
+             candidate_frontier={}; policy_move={policy_move_label}; demote_preempt_three={}; {search_config};              pbrain_fixed_depth={}; pbrain_max_depth={}",
             env!("CARGO_PKG_VERSION"),
             weights_label(),
             on_off(packed_line_windows_enabled()),
             on_off(candidate_frontier_enabled()),
+            on_off(demote_preempt_three_enabled()),
             on_off(pbrain_fixed_depth()),
             pbrain_max_depth(),
         );

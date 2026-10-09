@@ -90,6 +90,11 @@ instead, and `FIGRID_CODEBOOK_WEIGHTS` loads any other model file.
   changing evaluation or move order. Search acceleration lives in an optional
   `Searcher` sidecar, leaving the public `Board` layout unchanged from 0.8.1;
   the shipped pbrain enables both paths by default.
+- Selective search (1.1). Pre-empting the square of an opponent three is no longer treated as forcing, and a small
+  per-move policy (a 213 → 16 → 1 MLP over the codebook evaluator's own state, embedded, 13.8 KB) orders quiet moves
+  and prunes late ones at nodes with two or more remaining plies. About 1.3 plies deeper at 2 s per move; positive
+  against every engine and rule set it was measured on (see the [changelog](CHANGELOG.md)). On by default in
+  `pbrain-figrid`; the policy applies to full-vocabulary dim-32 codebooks such as the release models.
 - Exact directional deltas for the quantized codebook evaluator. Make/undo
   applies only changed `(cell, direction)` embeddings, then one activation
   and region delta per affected cell. The shipped pbrain enables this 0.8.3
@@ -111,6 +116,11 @@ figrid was inherited as a small board library in April 2026 and rebuilt as an en
    rule-specific teachers carried it to Caro, Renju and 20×20.
 4. **Speed (1.0).** The whole state-update path stopped repeating work, with search results held identical; this
    converted into strength where an evaluation-only speedup earlier had not.
+5. **Selectivity (1.1).** Learned move policies had repeatedly failed to help. Counting where the search spends its
+   nodes showed why: two thirds of the tree lies below forcing moves, which the policies never touched, and one kind
+   of "forcing" move — pre-empting an opponent's three — was less useful than a quiet move. Narrowing the forcing set
+   and letting a cheap policy prune quiet moves made the search about 1.3 plies deeper and stronger against every
+   opponent measured.
 
 Every step was gated the same way: refactors must reproduce evaluation dumps and fixed-depth searches exactly, and
 strength claims come from matched-seed matches against external engines, replicated on fresh seeds.
@@ -178,6 +188,14 @@ The state-update optimizations have independent rollback switches:
   for the quantized codebook evaluator instead of the 0.8.3 directional
   delta journal.
 
+Selective-search switches (on by default since 1.1):
+
+- `NORU_POLICY_MOVE` — unset or empty uses the embedded per-move policy, `off` disables it, any other value is a
+  `PGM1` policy file. The policy applies only with a full-vocabulary codebook of matching dimension.
+- `NORU_DEMOTE_PREEMPT_THREE=off` treats pre-empting an opponent three as forcing again.
+
+With both off the search is identical to 1.0.
+
 Opt-in search switches (all off by default):
 
 - `NORU_POLICY_ORDER=path/to/table.bin` ranks quiet moves with a learned
@@ -226,7 +244,9 @@ constructed `Searcher`; library callers opt in through
 `set_use_packed_line_windows` and `set_use_candidate_frontier`. The
 directional-delta path has been on by
 default since 0.8.6 (`set_use_codebook_directional_delta(false)` restores full
-refreshes). Enabling `codebook-eval` also activates
+refreshes). The 1.1 selective search is opt-in for library callers through
+`set_policy_move(Some(Arc::new(PolicyMove::embedded())))` and `set_demote_preempt_three(true)`. Enabling
+`codebook-eval` also activates
 the optional `cb2vec` dependency. Consumers that only need the generic
 codebook and reversible-journal primitives can use the standalone package
 directly.

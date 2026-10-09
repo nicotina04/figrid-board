@@ -26,7 +26,8 @@ use crate::vct::{
 #[cfg(feature = "codebook-eval")]
 use crate::white_root_order::WhiteRootOrder;
 use noru::network::NnueWeights;
-use std::sync::OnceLock;
+use crate::policy_move::PolicyMove;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 const INF: i32 = 1_000_000;
@@ -194,6 +195,18 @@ fn policy_order_table() -> Option<&'static PolicyOrderTable> {
         Ok(table) => table.as_ref().map(|(_, table)| table),
         Err(e) => panic!("{e}"),
     }
+}
+
+/// Per-move policy (see [`Searcher::set_policy_move`]): nodes with at least this many remaining plies are scored.
+const POLICY_MOVE_MIN_DEPTH: u32 = 2;
+/// Per-move policy: at a scored non-PV node, quiet non-killer moves ranked at or beyond this position among the
+/// node's quiet moves are pruned.
+const POLICY_MOVE_PRUNE_RANK: usize = 8;
+
+/// A move whose only threat value is occupying the square where the opponent would make an open or broken three. With
+/// [`Searcher::set_demote_preempt_three`] such moves are not forcing and sit in the quiet tier.
+fn is_preempt_three(my: ThreatKind, opp: ThreatKind) -> bool {
+    !is_forcing_kind(my) && matches!(opp, ThreatKind::OpenThree | ThreatKind::JumpThree)
 }
 
 /// P-CB2: policy-rank-conditioned reduction/pruning.
@@ -640,6 +653,13 @@ trait SearchEvalState {
     -> EvalStateStepProfile;
     fn pop_move(&mut self, profile_enabled: bool) -> EvalStateStepProfile;
     fn eval(&mut self, board: &Board, profile_enabled: bool) -> (i32, EvalStateStepProfile);
+    /// Per-move policy: materialise the leaf evaluator for policy inputs. False when the evaluator cannot supply
+    /// inputs for a model over `codebook_dim`-dimensional full-vocabulary embeddings.
+    fn policy_move_prepare(&mut self, _codebook_dim: usize) -> bool {
+        false
+    }
+    /// Per-move policy inputs of an empty cell (see [`PolicyMove`]).
+    fn policy_move_inputs(&self, _board: &Board, _cell: usize, _out: &mut [f32]) {}
 }
 
 struct FlatEvalState<'a> {
@@ -765,6 +785,18 @@ impl<W: QuantizedCodebookAccess> SearchEvalState for QuantizedCodebookEvalState<
             .pop_move_profiled_with_access(self.weights, profile_enabled)
     }
 
+    fn policy_move_prepare(&mut self, codebook_dim: usize) -> bool {
+        if self.weights.dim() != codebook_dim || !self.weights.is_full_vocab() {
+            return false;
+        }
+        self.inc.materialize_for_policy(self.weights);
+        true
+    }
+
+    fn policy_move_inputs(&self, board: &Board, cell: usize, out: &mut [f32]) {
+        self.inc.policy_move_inputs_with_access(board, self.weights, cell, 0, 0, out);
+    }
+
     fn eval(&mut self, board: &Board, profile_enabled: bool) -> (i32, EvalStateStepProfile) {
         let (value, detail) =
             self.inc
@@ -861,6 +893,15 @@ pub struct Searcher {
     board_search_state: Option<BoardSearchState>,
     move_picker_stats: MovePickerStats,
     shape_stats: SearchShapeStats,
+    /// Per-move policy model, and per ply: the current node's quiet-move logits and whether it was scored.
+    policy_move: Option<Arc<PolicyMove>>,
+    policy_logits: Vec<[f32; NUM_CELLS]>,
+    policy_valid: [bool; 64],
+    policy_input: Vec<f32>,
+    policy_hidden: Vec<f32>,
+    /// Quiet moves visited so far at the current node of each ply.
+    quiet_seen: [usize; 64],
+    demote_preempt_three: bool,
     threat_field: Option<IncrementalThreatField>,
     #[cfg(feature = "codebook-eval")]
     white_root_order: Option<WhiteRootOrder>,
@@ -909,6 +950,13 @@ impl Searcher {
             board_search_state: None,
             move_picker_stats: MovePickerStats::default(),
             shape_stats: SearchShapeStats::default(),
+            policy_move: None,
+            policy_logits: vec![[0.0; NUM_CELLS]; 64],
+            policy_valid: [false; 64],
+            policy_input: Vec::new(),
+            policy_hidden: Vec::new(),
+            quiet_seen: [0; 64],
+            demote_preempt_three: false,
             #[cfg(feature = "codebook-eval")]
             white_root_order: None,
             #[cfg(feature = "codebook-eval")]
@@ -1028,6 +1076,30 @@ impl Searcher {
         if enabled {
             self.set_use_move_picker(true);
         }
+    }
+
+    /// Per-move policy for quiet moves (off by default; `pbrain-figrid` enables the embedded model). At nodes with at
+    /// least two remaining plies, every quiet legal move is scored from the codebook evaluator's state; quiet moves are
+    /// ordered by the score, and at non-PV nodes quiet non-killer moves are pruned from rank 8 among quiet moves and
+    /// reduced by the policy-rank LMR/LMP schedule. Threat moves keep their tiers. The model applies only with a
+    /// full-vocabulary quantized codebook whose dimension matches it; otherwise the search is unchanged.
+    pub fn set_policy_move(&mut self, model: Option<Arc<PolicyMove>>) {
+        self.policy_move = model;
+    }
+
+    pub fn policy_move(&self) -> Option<&PolicyMove> {
+        self.policy_move.as_deref()
+    }
+
+    /// Treat moves whose only threat value is pre-empting an opponent open or broken three as quiet: they lose the
+    /// forcing exemption from late-move pruning and reductions and are ordered with the quiet moves. Off by default;
+    /// `pbrain-figrid` enables it.
+    pub fn set_demote_preempt_three(&mut self, enabled: bool) {
+        self.demote_preempt_three = enabled;
+    }
+
+    pub fn demote_preempt_three(&self) -> bool {
+        self.demote_preempt_three
     }
 
     /// Enable exact-order incremental candidate generation for the main
@@ -1827,6 +1899,7 @@ impl Searcher {
         let mut best_move: Option<Move> = None;
         let mut leader_score = -INF;
 
+        self.prepare_policy_move(board, inc, 0, depth);
         let profile_start = self.profile_start();
         let mut moves = self.order_moves(board, 0);
         #[cfg(feature = "codebook-eval")]
@@ -1867,7 +1940,8 @@ impl Searcher {
             let score = if move_idx == 0 {
                 -self.alpha_beta(board, weights, inc, depth - 1, 1, -beta, -alpha)
             } else {
-                let reduction = lmr_reduction(depth, move_idx, is_forcing, is_killer);
+                let reduction =
+                    lmr_reduction(depth, move_idx, is_forcing, is_killer, self.policy_sorted_node(0).then_some(move_idx));
                 let reduced_depth = (depth - 1).saturating_sub(reduction);
                 let mut null =
                     -self.alpha_beta(board, weights, inc, reduced_depth, 1, -alpha - 1, -alpha);
@@ -2129,6 +2203,7 @@ impl Searcher {
             }
         } else {
             self.move_picker_stats.legacy_nodes += 1;
+            self.prepare_policy_move(board, inc, ply, depth);
             let profile_start = self.profile_start();
             let mut moves = self.order_moves(board, ply);
             self.profile_add(SearchProfileBucket::MovegenOrder, profile_start);
@@ -2235,15 +2310,31 @@ impl Searcher {
         let is_killer =
             ply < 64 && (self.killers[ply][0] == Some(mv) || self.killers[ply][1] == Some(mv));
 
+        // At a policy-scored node, pruning, LMP and the policy LMR thresholds use the move's rank among the node's
+        // quiet moves (threat moves, ordered first, would otherwise inflate it); elsewhere the overall move index.
+        let quiet_idx = if ply < 64 && !is_forcing {
+            let q = self.quiet_seen[ply];
+            self.quiet_seen[ply] += 1;
+            q
+        } else {
+            0
+        };
+        let policy_scored = ply < 64 && self.policy_valid[ply];
+        let policy_rank = if policy_scored { quiet_idx } else { move_idx };
+
+        if !is_pv && !is_forcing && !is_killer && policy_scored && policy_rank >= POLICY_MOVE_PRUNE_RANK {
+            return false;
+        }
+
         if !is_pv && !is_forcing && !is_killer && depth >= LMP_MIN_DEPTH && depth <= LMP_MAX_DEPTH {
             // P-CB2: policy-sorted quiets earn an earlier count cutoff
             // (frozen 6 + 2*depth vs the default 8 + 4*depth).
-            let lmp_threshold = if policy_reduce_enabled() {
+            let lmp_threshold = if self.policy_sorted_node(ply) {
                 6 + 2 * depth as usize
             } else {
                 LMP_BASE + LMP_PER_DEPTH * depth as usize
             };
-            if move_idx >= lmp_threshold {
+            if policy_rank >= lmp_threshold {
                 return false;
             }
         }
@@ -2274,7 +2365,13 @@ impl Searcher {
         let score = if move_idx == 0 {
             -self.alpha_beta(board, weights, inc, depth - 1, ply + 1, -beta, -(*alpha))
         } else {
-            let reduction = lmr_reduction(depth, move_idx, is_forcing, is_killer);
+            let reduction = lmr_reduction(
+                depth,
+                move_idx,
+                is_forcing,
+                is_killer,
+                self.policy_sorted_node(ply).then_some(policy_rank),
+            );
             let reduced_depth = (depth - 1).saturating_sub(reduction);
             let mut null_score = -self.alpha_beta(
                 board,
@@ -2776,6 +2873,44 @@ impl Searcher {
         emitted[mv] = true;
         Some((score, mv, is_forcing))
     }
+    /// Score this node's quiet moves with the per-move policy, or mark the ply as unscored.
+    fn prepare_policy_move<E: SearchEvalState>(&mut self, board: &Board, inc: &mut E, ply: usize, depth: u32) {
+        if ply >= 64 {
+            return;
+        }
+        self.policy_valid[ply] = false;
+        self.quiet_seen[ply] = 0;
+        if depth < POLICY_MOVE_MIN_DEPTH {
+            return;
+        }
+        let Some(model) = self.policy_move.take() else { return };
+        if inc.policy_move_prepare(model.codebook_dim()) {
+            let stm = board.side_to_move;
+            self.policy_input.resize(model.input_len(), 0.0);
+            for c in self.board_candidate_moves(board) {
+                if !board.is_legal_move(c) {
+                    continue;
+                }
+                // Threat moves keep their tier order; only quiet moves are scored.
+                if classify_move_fast(board, c, stm) != ThreatKind::None
+                    || classify_move_fast(board, c, stm.opponent()) != ThreatKind::None
+                {
+                    continue;
+                }
+                inc.policy_move_inputs(board, c, &mut self.policy_input);
+                self.policy_logits[ply][c] = model.score(&self.policy_input, &mut self.policy_hidden);
+            }
+            self.policy_valid[ply] = true;
+        }
+        self.policy_move = Some(model);
+    }
+
+    /// Whether the current node at `ply` has policy-sorted quiet moves (P-CB2 table with `NORU_POLICY_REDUCE`, or the
+    /// per-move policy), which switches LMP and LMR to the policy-rank schedule.
+    fn policy_sorted_node(&self, ply: usize) -> bool {
+        (policy_reduce_enabled() && policy_order_table().is_some()) || (ply < 64 && self.policy_valid[ply])
+    }
+
     fn order_moves(&self, board: &Board, ply: usize) -> Vec<(Move, bool)> {
         let candidates = self.board_candidate_moves(board);
         let side = board.side_to_move as usize;
@@ -2843,9 +2978,13 @@ impl Searcher {
         // (?? my OpenFour=8M > opp OpenFour=7M > my DoubleFour=6M ...)
         let attack_tier = MOVE_ATTACK_TABLE[my_kind as usize];
         let block_tier = MOVE_BLOCK_TABLE[opp_kind as usize];
-        let tier_score = attack_tier.max(block_tier);
+        let mut tier_score = attack_tier.max(block_tier);
 
-        let is_forcing = is_forcing_kind(my_kind) || is_forcing_kind(opp_kind);
+        let mut is_forcing = is_forcing_kind(my_kind) || is_forcing_kind(opp_kind);
+        if is_forcing && self.demote_preempt_three && is_preempt_three(my_kind, opp_kind) {
+            is_forcing = false;
+            tier_score = 0;
+        }
 
         // Five ?????亦껋꼦維????????濚밸Ŧ援???early-return: ???????猷몄굡??????? score ???????밸븶筌믩끃????????????????(TIER_WIN/BLOCK_WIN
         // ????????????????뼿??tier?? ???汝뷴젆?琉??誘↔덱?????????? killer/history ??????????? ?????????대첉??.
@@ -2861,6 +3000,16 @@ impl Searcher {
         // score instead of history/cont-history. Killers and every tier above
         // stay untouched; with NORU_POLICY_ORDER unset this branch is dead.
         if matches!(my_kind, ThreatKind::None) && matches!(opp_kind, ThreatKind::None) {
+            if ply < 64 && self.policy_valid[ply] {
+                let mut score = 0i32;
+                if self.killers[ply][0] == Some(mv) {
+                    score += 80_000;
+                } else if self.killers[ply][1] == Some(mv) {
+                    score += 40_000;
+                }
+                score += (self.policy_logits[ply][mv] * 1000.0).clamp(-30_000.0, 30_000.0) as i32;
+                return (score, false);
+            }
             if let Some(table) = policy_order_table() {
                 let mut score = 0i32;
                 if ply < 64 {
@@ -3000,7 +3149,7 @@ fn is_forcing_kind(kind: ThreatKind) -> bool {
 /// ???????ル??????/ killer / ??LMR_MIN_MOVE_IDX ?????/ ??? depth??0 (????????ш끽踰椰??????????.
 /// ??????forcing tier 0 ????? depth/idx??????????산뭐???1~2 ply.
 /// reduction?? depth-2????? ??????癲ル슢?????cap (qsearch ????븐뼐??????????롮쾸?椰?????????獄쏅챶留??逆곷틳源븃떋?).
-fn lmr_reduction(depth: u32, move_idx: usize, is_forcing: bool, is_killer: bool) -> u32 {
+fn lmr_reduction(depth: u32, move_idx: usize, is_forcing: bool, is_killer: bool, policy_rank: Option<usize>) -> u32 {
     if depth < LMR_MIN_DEPTH || move_idx < LMR_MIN_MOVE_IDX || is_forcing || is_killer {
         return 0;
     }
@@ -3013,11 +3162,11 @@ fn lmr_reduction(depth: u32, move_idx: usize, is_forcing: bool, is_killer: bool)
     }
     // P-CB2: with policy-sorted quiets, deep-late = policy-junk. Frozen
     // rank thresholds 10 (+1) and 18 (+1), same depth-2 cap.
-    if policy_reduce_enabled() {
-        if move_idx >= 10 {
+    if let Some(rank) = policy_rank {
+        if rank >= 10 {
             r += 1;
         }
-        if move_idx >= 18 {
+        if rank >= 18 {
             r += 1;
         }
     }
@@ -3044,6 +3193,28 @@ fn threat_priority(kind: ThreatKind, defending: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demotion_makes_preempt_three_squares_quiet() {
+        let mut board = Board::new();
+        for mv in [to_idx(0, 0), to_idx(7, 7), to_idx(0, 14), to_idx(7, 8)] {
+            board.make_move(mv);
+        }
+        assert_eq!(board.side_to_move, Stone::Black);
+        // White would make an open three on (7, 9); for Black that square is only a pre-emptive block.
+        let square = to_idx(7, 9);
+        assert!(is_preempt_three(
+            classify_move_fast(&board, square, Stone::Black),
+            classify_move_fast(&board, square, Stone::White)
+        ));
+        let forcing_of = |searcher: &Searcher| {
+            searcher.order_moves(&board, 0).into_iter().find(|&(mv, _)| mv == square).map(|(_, f)| f)
+        };
+        let mut searcher = Searcher::new();
+        assert_eq!(forcing_of(&searcher), Some(true));
+        searcher.set_demote_preempt_three(true);
+        assert_eq!(forcing_of(&searcher), Some(false));
+    }
 
     #[test]
     fn policy_table_desaturation_rescales_only_saturating_tables() {

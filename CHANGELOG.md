@@ -1,5 +1,34 @@
 # Changes
 
+## 1.1.0 (2026-10-09)
+
+### Changed
+
+* **More selective search: about 1.3 plies deeper at 2 s per move.** Two changes, on by default in `pbrain-figrid`:
+  * A move whose only threat value is occupying the square where the opponent would make an open or broken three is
+    no longer forcing. Such moves were exempt from late-move pruning and reductions yet produced a beta cutoff less
+    often than ordinary quiet moves (1.5% vs 3.8% at depth-1 nodes); they now sit in the quiet tier. Fives, fours,
+    four blocks and own threes are unchanged.
+  * A per-move quiet policy: a shared-weight MLP (213 → 16 → 1, about 3,400 parameters) scores every quiet legal
+    move at nodes with at least two remaining plies from the codebook evaluator's own state (cell activation,
+    direction embeddings and their pairwise interaction, threat kinds). Quiet moves are ordered by it; at non-PV
+    nodes, quiet non-killer moves from rank 8 among quiet moves are pruned, and the policy-rank LMR/LMP schedule
+    applies. Threat moves keep their tiers. The model is embedded (`models/policy_move_v1.pgm1`, 13.8 KB) and applies
+    to full-vocabulary dim-32 codebooks, including the per-rule and 20×20 models of the release build.
+
+  Mean depth on 40 positions at 2 s: 8.32 → 9.60. Against Pela at 2000 ms per move on matched seeds: +27.5 over 800
+  games per arm (four blocks, all positive). Against Squirrel, KataGomo, JAX, Embryo and Rapfi: +30 over 1,000 games,
+  every opponent positive. Renju +13, Caro +0.5 and 20×20 +6 over 200 games each against Pela. The release build
+  matches the measured research build exactly: identical bestmove, depth, eval and node count at fixed depth on 40
+  positions under rule 0 and 30 each under rules 4 and 9 and on 20×20.
+
+### Added
+
+* `policy_move::PolicyMove` (`PGM1` format) with `Searcher::set_policy_move`, and
+  `Searcher::set_demote_preempt_three`. Both are off in a newly constructed `Searcher`.
+* `pbrain-figrid` switches: `NORU_POLICY_MOVE` (unset: embedded model; `off`; or a `PGM1` file) and
+  `NORU_DEMOTE_PREEMPT_THREE=off`. With both off the search is identical to 1.0.
+
 ## 1.0.1 (2026-10-08)
 
 Packaging and documentation only; the library and the engine are identical to 1.0.0.

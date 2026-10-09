@@ -1263,6 +1263,7 @@ fn rule_tag(rule: RuleSet) -> u8 {
         RuleSet::Standard => 1,
         RuleSet::Caro => 2,
         RuleSet::Renju => 3,
+        RuleSet::Omok => 4,
     }
 }
 
@@ -1324,12 +1325,14 @@ fn board_report(board: &Board) -> Value {
             RuleSet::Standard => "Standard",
             RuleSet::Caro => "Caro",
             RuleSet::Renju => "Renju",
+            RuleSet::Omok => "Omok",
         },
         "effective_rule": match board.effective_rule_set() {
             RuleSet::Freestyle => "Freestyle",
             RuleSet::Standard => "Standard",
             RuleSet::Caro => "Caro",
             RuleSet::Renju => "Renju",
+            RuleSet::Omok => "Omok",
         },
         "exact5": board.exact5,
         "move_count": board.move_count,

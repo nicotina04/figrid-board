@@ -221,6 +221,7 @@ const fn rule_tag(rule: RuleSet) -> u8 {
         RuleSet::Standard => 1,
         RuleSet::Caro => 2,
         RuleSet::Renju => 3,
+        RuleSet::Omok => 4,
     }
 }
 
@@ -347,6 +348,7 @@ mod tests {
             RuleSet::Standard,
             RuleSet::Caro,
             RuleSet::Renju,
+            RuleSet::Omok,
         ] {
             let mut board = Board::new();
             board.set_rule_set(rule);
@@ -361,7 +363,7 @@ mod tests {
             );
             assert!(keys.insert(d4_rule_key(rule)));
         }
-        assert_eq!(keys.len(), 4);
+        assert_eq!(keys.len(), 5);
     }
 
     #[test]

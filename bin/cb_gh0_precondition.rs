@@ -1128,6 +1128,7 @@ fn rule_name(rule: RuleSet) -> &'static str {
         RuleSet::Standard => "Standard",
         RuleSet::Caro => "Caro",
         RuleSet::Renju => "Renju",
+        RuleSet::Omok => "Omok",
     }
 }
 

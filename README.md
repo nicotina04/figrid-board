@@ -63,6 +63,9 @@ instead, and `FIGRID_CODEBOOK_WEIGHTS` loads any other model file.
   forbidden double-four / double-three / overline, white five or more), and Caro as Gomocup plays it (`rule 9`:
   exactly five, not blocked at both ends by stones; the board edge does not block). Continuous games and bare
   `rule 8` are answered with `ERROR - unsupported rule`.
+- Korean omok rule (`RuleSet::Omok`, `INFO rule 17` — a figrid extension, not a Gomocup rule): both sides win only
+  with exactly five, and neither side may play a double-three; double-fours and overlines are legal (an overline does
+  not win). It uses the standard models.
 - Board sizes: 15×15 by default, 20×20 with the `board20` cargo feature (Gomocup Freestyle / Fastgame). The side is
   a compile-time constant, so the two engines are separate builds of the same source.
 - Exact-length VCT analysis (`vct::search_vct_exact`): only an actual five ends a line, and the first attack can be

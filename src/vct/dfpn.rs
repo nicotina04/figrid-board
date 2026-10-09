@@ -1473,6 +1473,7 @@ const fn rule_tag(rule: RuleSet) -> u64 {
         RuleSet::Standard => 2,
         RuleSet::Caro => 3,
         RuleSet::Renju => 4,
+        RuleSet::Omok => 5,
     }
 }
 

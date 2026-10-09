@@ -711,6 +711,8 @@ struct ProtocolInfo {
     rule_continuous: bool,
     rule_renju: bool,
     rule_caro: bool,
+    /// figrid extension, not a Gomocup rule: bit 16 selects the Korean omok rule (`INFO rule 17`).
+    rule_omok: bool,
 }
 
 impl ProtocolInfo {
@@ -723,6 +725,7 @@ impl ProtocolInfo {
             rule_continuous: false,
             rule_renju: false,
             rule_caro: false,
+            rule_omok: false,
         }
     }
 
@@ -730,10 +733,15 @@ impl ProtocolInfo {
         // Supported now: Freestyle (0), Standard exact-5 (1), Renju (4: black
         // exact five with forbidden double-four / double-three / overline,
         // white five or more) and Caro as Gomocup plays it (9 = caro|exact5:
-        // exactly five, not blocked at both ends by stones). Bare rule 8
-        // (overline-wins Caro) and continuous games are not modeled.
+        // exactly five, not blocked at both ends by stones), plus the figrid
+        // extension rule 17 (Korean omok rule). Bare rule 8 (overline-wins
+        // Caro) and continuous games are not modeled.
         if self.rule_continuous || (self.rule_renju && self.rule_caro) {
             return None;
+        }
+        // figrid extension: Korean omok rule (exactly five for both sides, double-three forbidden for both).
+        if self.rule_omok {
+            return if self.rule_exact5 && !self.rule_renju && !self.rule_caro { Some(RuleSet::Omok) } else { None };
         }
         if self.rule_renju {
             return Some(RuleSet::Renju);
@@ -831,6 +839,7 @@ impl ProtocolInfo {
                     self.rule_continuous = (b & 2) != 0;
                     self.rule_renju = (b & 4) != 0;
                     self.rule_caro = (b & 8) != 0;
+                    self.rule_omok = (b & 16) != 0;
                 }
             }
             _ => {}

@@ -1221,7 +1221,7 @@ impl Searcher {
             |state| state.candidate_moves_synchronized(board),
         );
         // Renju: black never plays a forbidden point. Status is non-local, so filter after enumeration.
-        if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+        if board.side_to_move_has_forbidden_points() {
             moves.retain(|&mv| !board.is_forbidden_for_side_to_move(mv));
         }
         moves

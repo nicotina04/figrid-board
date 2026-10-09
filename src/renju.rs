@@ -1,11 +1,16 @@
-//! Renju forbidden moves for black.
+//! Forbidden moves: Renju (black only) and the Korean omok rule (both sides, double-three only).
 //!
+//! **Renju.**
 //! A black move is forbidden when it does not make an exact five and makes a double-four, a double-three or an
 //! overline. A four is a line shape that one more black stone turns into an exact five; a straight-four line
 //! (`.XXXX.`) counts once, while same-line double fours (`X.XXX.X`, `XX.XX.XX`, `XXX.X.XXX`) count twice. A three is a
 //! line shape that one more black stone turns into a straight four, and it only counts if that completing move is
 //! itself not forbidden (checked recursively). Precedence follows the Gomocup judge: five, double-four,
 //! double-three, overline. The board edge blocks like a white stone.
+//!
+//! **Omok** ([`RuleSet::Omok`](crate::board::RuleSet::Omok)): either side may not play a double-three; double-fours
+//! and overlines are allowed (an overline simply does not win). A three is defined as in Renju for the side to move
+//! (exact-five straight four), and its completion only counts if that completion is not itself a double-three.
 
 use crate::board::{BOARD_SIZE, BitBoard, Move};
 use std::collections::HashMap;
@@ -27,15 +32,32 @@ pub enum Foul {
     Overline,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Variant {
+    Renju,
+    Omok,
+}
+
 /// Whether black may not play `mv` (an empty cell) under Renju.
 pub fn is_forbidden(black: &BitBoard, white: &BitBoard, mv: Move) -> bool {
     matches!(foul(black, white, mv), Foul::DoubleFour | Foul::DoubleThree | Foul::Overline)
 }
 
-/// Classification of black playing the empty cell `mv`.
+/// Classification of black playing the empty cell `mv` under Renju.
 pub fn foul(black: &BitBoard, white: &BitBoard, mv: Move) -> Foul {
     // `HashMap::new` does not allocate; the memo only fills (and allocates) once a double-three needs recursion.
-    Ctx { white, memo: HashMap::new() }.classify(black, mv)
+    Ctx { white, memo: HashMap::new(), variant: Variant::Renju }.classify(black, mv)
+}
+
+/// Whether the side owning `own` may not play `mv` (an empty cell) under the omok rule: a double-three.
+pub fn is_forbidden_omok(own: &BitBoard, opp: &BitBoard, mv: Move) -> bool {
+    omok_foul(own, opp, mv) == Foul::DoubleThree
+}
+
+/// Classification of the side owning `own` playing the empty cell `mv` under the omok rule: `Five`, `DoubleThree`
+/// or `None` (double-fours and overlines are legal there).
+pub fn omok_foul(own: &BitBoard, opp: &BitBoard, mv: Move) -> Foul {
+    Ctx { white: opp, memo: HashMap::new(), variant: Variant::Omok }.classify(own, mv)
 }
 
 /// One top-level query: white is fixed, recursive sub-queries (is this three's completion forbidden?) are memoised
@@ -43,6 +65,7 @@ pub fn foul(black: &BitBoard, white: &BitBoard, mv: Move) -> Foul {
 struct Ctx<'a> {
     white: &'a BitBoard,
     memo: HashMap<([u128; crate::board::BITBOARD_WORDS], Move), Foul>,
+    variant: Variant,
 }
 
 impl Ctx<'_> {
@@ -65,7 +88,7 @@ impl Ctx<'_> {
         if lines.iter().any(|l| run_len(l, R) == 5) {
             return Foul::Five;
         }
-        if lines.iter().map(fours_through_center).sum::<u32>() >= 2 {
+        if self.variant == Variant::Renju && lines.iter().map(fours_through_center).sum::<u32>() >= 2 {
             return Foul::DoubleFour;
         }
         // Candidate completions per line, without recursion; a double-three needs two lines with candidates.
@@ -81,7 +104,11 @@ impl Ctx<'_> {
                 let (dr, dc) = DIRS[d];
                 let real = c.offs[..c.n].iter().any(|&q| {
                     let qmv = ((row + dr * (q - R)) as usize) * BOARD_SIZE + (col + dc * (q - R)) as usize;
-                    self.foul(&b, qmv) == Foul::None
+                    let f = self.foul(&b, qmv);
+                    match self.variant {
+                        Variant::Renju => f == Foul::None,
+                        Variant::Omok => f != Foul::DoubleThree,
+                    }
                 });
                 if real {
                     threes += 1;
@@ -94,7 +121,7 @@ impl Ctx<'_> {
                 }
             }
         }
-        if lines.iter().any(|l| run_len(l, R) >= 6) {
+        if self.variant == Variant::Renju && lines.iter().any(|l| run_len(l, R) >= 6) {
             return Foul::Overline;
         }
         Foul::None
@@ -248,6 +275,27 @@ mod tests {
         // X.XXX.X with the move in the middle block
         let (b, w) = board(&[(7, 3, true), (7, 5, true), (7, 6, true), (7, 9, true)]);
         assert_eq!(foul(&b, &w, to_idx(7, 7)), Foul::DoubleFour);
+    }
+
+    #[test]
+    fn omok_forbids_only_double_three() {
+        // . X X . horizontally and vertically through (7,7): a double-three for the side owning X.
+        let (own, opp) = board(&[(7, 5, true), (7, 6, true), (5, 7, true), (6, 7, true)]);
+        assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::DoubleThree);
+        // Double-four and overline are legal under the omok rule.
+        let (own, opp) = board(&[(7, 4, true), (7, 5, true), (7, 6, true), (4, 7, true), (5, 7, true), (6, 7, true)]);
+        assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::None);
+        let (own, opp) = board(&[(7, 2, true), (7, 3, true), (7, 4, true), (7, 5, true), (7, 6, true)]);
+        assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::None);
+        // Four-three is legal; an exact five wins regardless.
+        let (own, opp) = board(&[(7, 4, true), (7, 5, true), (7, 6, true), (5, 7, true), (6, 7, true)]);
+        assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::None);
+        let (own, opp) =
+            board(&[(7, 3, true), (7, 4, true), (7, 5, true), (7, 6, true), (5, 7, true), (6, 7, true), (6, 6, true), (5, 5, true)]);
+        assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::Five);
+        // A three blocked by the opponent at one end is not a three.
+        let (own, opp) = board(&[(7, 5, true), (7, 6, true), (7, 4, false), (5, 7, true), (6, 7, true)]);
+        assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::None);
     }
 
     #[test]

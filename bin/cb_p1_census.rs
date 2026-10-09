@@ -1557,6 +1557,7 @@ fn rule_code(rule: RuleSet) -> u8 {
         RuleSet::Standard => 1,
         RuleSet::Caro => 2,
         RuleSet::Renju => 3,
+        RuleSet::Omok => 4,
     }
 }
 

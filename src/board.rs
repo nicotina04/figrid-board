@@ -42,12 +42,16 @@ pub enum RuleSet {
     /// Black wins with exactly five and may not play forbidden points (double-four, double-three, overline;
     /// see [`crate::renju`]); white wins with five or more.
     Renju,
+    /// Korean omok rule: both sides win only with exactly five and neither may play a double-three
+    /// ([`crate::renju::is_forbidden_omok`]); double-fours and overlines are legal. Not a Gomocup rule; the pbrain
+    /// protocol uses `INFO rule 17` (16 | exact five) for it.
+    Omok,
 }
 
 impl RuleSet {
     #[inline]
     pub const fn uses_exact_five(self) -> bool {
-        matches!(self, RuleSet::Standard | RuleSet::Renju)
+        matches!(self, RuleSet::Standard | RuleSet::Renju | RuleSet::Omok)
     }
 
     /// Win test when only the empty terminals are known. For Caro this treats
@@ -72,7 +76,7 @@ impl RuleSet {
     ) -> bool {
         match self {
             RuleSet::Freestyle => count >= 5,
-            RuleSet::Standard => count == 5,
+            RuleSet::Standard | RuleSet::Omok => count == 5,
             RuleSet::Caro => count == 5 && open_ends + edge_ends > 0,
             RuleSet::Renju => match side {
                 Stone::Black => count == 5,
@@ -420,6 +424,7 @@ pub const fn d4_rule_key(rule: RuleSet) -> u64 {
         RuleSet::Standard => 0xD4C0_0000_0000_0001,
         RuleSet::Caro => 0xD4C0_0000_0000_0002,
         RuleSet::Renju => 0xD4C0_0000_0000_0003,
+        RuleSet::Omok => 0xD4C0_0000_0000_0004,
     };
     zobrist::splitmix64(seed)
 }
@@ -1316,11 +1321,27 @@ impl Board {
     }
 
     /// Renju: black may not play a forbidden point (double-four, double-three or overline without an exact five).
+    /// Omok: neither side may play a double-three.
     #[inline]
     pub fn is_forbidden_for_side_to_move(&self, mv: Move) -> bool {
-        self.side_to_move == Stone::Black
-            && self.effective_rule_set() == RuleSet::Renju
-            && crate::renju::is_forbidden(&self.black, &self.white, mv)
+        match self.effective_rule_set() {
+            RuleSet::Renju => self.side_to_move == Stone::Black && crate::renju::is_forbidden(&self.black, &self.white, mv),
+            RuleSet::Omok => match self.side_to_move {
+                Stone::Black => crate::renju::is_forbidden_omok(&self.black, &self.white, mv),
+                Stone::White => crate::renju::is_forbidden_omok(&self.white, &self.black, mv),
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether the side to move can have forbidden points at all (Renju black, either side under Omok).
+    #[inline]
+    pub fn side_to_move_has_forbidden_points(&self) -> bool {
+        match self.effective_rule_set() {
+            RuleSet::Renju => self.side_to_move == Stone::Black,
+            RuleSet::Omok => true,
+            _ => false,
+        }
     }
 
     /// 게임 결과 확인
@@ -1798,6 +1819,63 @@ mod tests {
             last = put_stone(&mut board, Stone::Black, 7, col);
         }
         assert!(board.check_win(last));
+    }
+
+    #[test]
+    fn omok_overline_does_not_win_for_either_side() {
+        for side in [Stone::Black, Stone::White] {
+            let mut board = Board::new();
+            board.set_rule_set(RuleSet::Omok);
+            let mut last = 0;
+            for col in 3..=8 {
+                last = put_stone(&mut board, side, 7, col);
+            }
+            assert!(!board.check_win(last), "{side:?} overline");
+            let mut board = Board::new();
+            board.set_rule_set(RuleSet::Omok);
+            for col in 3..=7 {
+                last = put_stone(&mut board, side, 7, col);
+            }
+            assert!(board.check_win(last), "{side:?} exact five");
+        }
+    }
+
+    #[test]
+    fn omok_forbids_double_three_for_both_sides_only() {
+        // Black: .XX. horizontally and vertically through (7,7). White mirrors it at (3,3).
+        let mut board = Board::new();
+        board.set_rule_set(RuleSet::Omok);
+        for (r, c) in [(7, 5), (7, 6), (5, 7), (6, 7)] {
+            put_stone(&mut board, Stone::Black, r, c);
+        }
+        for (r, c) in [(3, 1), (3, 2), (1, 3), (2, 3)] {
+            put_stone(&mut board, Stone::White, r, c);
+        }
+        board.side_to_move = Stone::Black;
+        assert!(!board.is_legal_move(to_idx(7, 7)));
+        assert!(board.is_legal_move(to_idx(3, 3)));
+        board.side_to_move = Stone::White;
+        assert!(!board.is_legal_move(to_idx(3, 3)));
+        assert!(board.is_legal_move(to_idx(7, 7)));
+        // Under Renju the white double-three is legal and black's is forbidden.
+        board.set_rule_set(RuleSet::Renju);
+        assert!(board.is_legal_move(to_idx(3, 3)));
+        board.side_to_move = Stone::Black;
+        assert!(!board.is_legal_move(to_idx(7, 7)));
+        // Freestyle has no forbidden points.
+        board.set_rule_set(RuleSet::Freestyle);
+        assert!(board.is_legal_move(to_idx(7, 7)));
+    }
+
+    #[test]
+    fn omok_allows_double_four() {
+        let mut board = Board::new();
+        board.set_rule_set(RuleSet::Omok);
+        for (r, c) in [(7, 4), (7, 5), (7, 6), (4, 7), (5, 7), (6, 7)] {
+            put_stone(&mut board, Stone::White, r, c);
+        }
+        board.side_to_move = Stone::White;
+        assert!(board.is_legal_move(to_idx(7, 7)));
     }
 
     #[test]

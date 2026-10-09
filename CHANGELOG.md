@@ -1,5 +1,20 @@
 # Changes
 
+## 1.2.0 (2026-10-09)
+
+### Added
+
+* **Korean omok rule** (`RuleSet::Omok`; pbrain `INFO rule 17`, a figrid extension next to the Gomocup codes): both
+  sides win only with exactly five, and neither side may play a double-three. Double-fours and overlines are legal; an
+  overline does not win. The double-three test is the Renju detector run for the side to move without its double-four
+  and overline checks: a three is a line that one more stone turns into an exact-five straight four, and it only
+  counts if that completing move is not itself a double-three. Search candidates, both sides of the VCT prover and the
+  final move are filtered for either colour. `renju::omok_foul` / `renju::is_forbidden_omok` and
+  `Board::side_to_move_has_forbidden_points` are public.
+* Checks: unit tests for both colours (double-three forbidden, double-four and overline legal, overline not a win);
+  30 self-play games under rule 17 against an independent Python referee played no forbidden move. Search under rules
+  0, 1, 4, 9 and on 20×20 is identical to 1.1.0 (fixed-depth bestmove, depth, eval and nodes, 30 positions each).
+
 ## 1.1.0 (2026-10-09)
 
 ### Changed

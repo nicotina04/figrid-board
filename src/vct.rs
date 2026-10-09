@@ -475,7 +475,7 @@ pub(crate) fn classify_move_fast_with_flags(
         } else {
             match rule_set {
                 RuleSet::Caro => pattern_threat_after_my_play_caro(pid_my),
-                RuleSet::Standard => pattern_threat_after_my_play_exact5(pid_my),
+                RuleSet::Standard | RuleSet::Omok => pattern_threat_after_my_play_exact5(pid_my),
                 RuleSet::Renju if matches!(side, Stone::Black) => {
                     pattern_threat_after_my_play_exact5(pid_my)
                 }
@@ -1473,7 +1473,7 @@ fn vct_or(
         )
     };
     // Renju: black never plays a forbidden point (also turns a white four with only forbidden blocks into a win).
-    if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+    if board.side_to_move_has_forbidden_points() {
         attack_moves.retain(|&(mv, _)| !board.is_forbidden_for_side_to_move(mv));
     }
     // Exact-length mode: the root OR node (the only one at or_level 0) may be pinned to one attack.
@@ -1684,7 +1684,7 @@ fn vct_and(
         None => board.candidate_moves(),
     };
     // Renju: black never plays a forbidden point (also turns a white four with only forbidden blocks into a win).
-    if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+    if board.side_to_move_has_forbidden_points() {
         defenses.retain(|&mv| !board.is_forbidden_for_side_to_move(mv));
     }
     if defenses.is_empty() {
@@ -1844,7 +1844,7 @@ fn vct_or_audit(
         )
     };
     // Renju: black never plays a forbidden point (also turns a white four with only forbidden blocks into a win).
-    if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+    if board.side_to_move_has_forbidden_points() {
         attack_moves.retain(|&(mv, _)| !board.is_forbidden_for_side_to_move(mv));
     }
     if attack_moves.is_empty() {
@@ -2072,7 +2072,7 @@ fn vct_and_audit(
         None => board.candidate_moves(),
     };
     // Renju: black never plays a forbidden point (also turns a white four with only forbidden blocks into a win).
-    if board.side_to_move == Stone::Black && board.effective_rule_set() == RuleSet::Renju {
+    if board.side_to_move_has_forbidden_points() {
         defenses.retain(|&mv| !board.is_forbidden_for_side_to_move(mv));
     }
     if defenses.is_empty() {
@@ -2788,7 +2788,7 @@ mod tests {
             }
             match rule {
                 RuleSet::Freestyle => count >= 5,
-                RuleSet::Standard => count == 5,
+                RuleSet::Standard | RuleSet::Omok => count == 5,
                 RuleSet::Caro => count == 5 && blocked < 2,
                 RuleSet::Renju => unreachable!(),
             }

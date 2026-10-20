@@ -1,8 +1,32 @@
 # Changes
 
-## 1.3.0 (unreleased)
+## 1.3.0 (2026-10-20)
+
+### GitHub Windows binaries
+
+* Promote the KataGomo-relabeled Freestyle 15x15 and Caro models. In preregistered
+  2,400-game, 1-second-per-move comparisons against the prior model, point scores
+  were 61.69% for Freestyle (paired 95% CI 59.77-63.54%) and 53.96% for Caro
+  (52.13-55.77%). These are selected-opening same-engine comparisons, not a general
+  ranking against KataGomo or other engines.
+* Keep the 1.2.0 models and scales for Standard, Korean Omok, Renju and 20x20.
+* Store all five embedding tables as exact INT8 values with per-channel INT16 offsets;
+  retain the INT16 head/factors and established accumulator/scoring arithmetic.
+  Every INT16 embedding value reconstructs exactly. Model storage and resident
+  weight memory decrease; measured speed was effectively unchanged.
+* Private model assets remain in the matching `models-1.3.0` release. Public source
+  and crate default assets do not contain these weights. See [release builds](docs/release-models.md).
 
 ### Added
+
+* `ExactI8Codebook` and `ngcb-convert --exact-i8 INPUT OUTPUT`. Invalid shapes,
+  scales, bias, byte counts, reconstruction overflow and channels spanning more
+  than 255 are rejected; there is no lossy clipping.
+* `release-models` feature for self-contained GitHub builds using an explicit
+  `FIGRID_RELEASE_MODEL_DIR`. External JSON/NGCB1 model loading remains supported;
+  the pbrain also accepts the exact `.ngcb8` format.
+
+### Search API
 
 * `Searcher::set_stop_flag(Option<Arc<AtomicBool>>)`: stop a running search from another thread. The search checks
   the flag every 128 nodes and returns the best move of the last completed depth. The root VCT prover keeps its own

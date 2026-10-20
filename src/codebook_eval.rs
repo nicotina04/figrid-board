@@ -3243,3 +3243,5 @@ mod tests {
         }
     }
 }
+
+include!("exact_i8.rs");

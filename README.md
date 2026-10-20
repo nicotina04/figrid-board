@@ -344,3 +344,5 @@ Users who need the pre-Rust `figrid-board` as a Linux alternative to Renlib can 
 ## License
 
 Dual-licensed under either of [MIT](https://opensource.org/licenses/MIT) or [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) at your option, matching the SPDX identifier `MIT OR Apache-2.0` declared in `Cargo.toml`.
+
+For 1.3.0 GitHub model routing, exact INT8 format and rebuild instructions, see [release model builds](docs/release-models.md).

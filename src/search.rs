@@ -3788,3 +3788,18 @@ mod tests {
         assert!(!retained.candidate_frontier_enabled());
     }
 }
+
+/// Exact INT8 embedding accessor; same search, accumulator and head kernels.
+#[cfg(feature = "codebook-eval")]
+impl Searcher {
+    pub fn search_codebook_eval_exact_i8(
+        &mut self,
+        board: &mut Board,
+        ordering: &NnueWeights,
+        codebook: &crate::codebook_eval::ExactI8Codebook,
+        depth: u32,
+        time: Option<Duration>,
+    ) -> SearchResult {
+        self.search_codebook_eval_quantized_with(board, ordering, codebook, depth, time)
+    }
+}

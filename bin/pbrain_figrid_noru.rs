@@ -5,12 +5,14 @@
 use std::io::{self, BufRead, Write};
 
 #[cfg(all(feature = "board20", not(feature = "codebook-eval")))]
-compile_error!("the 20x20 pbrain needs `codebook-eval` (the flat NNUE feature layout is 15x15-only)");
+compile_error!(
+    "the 20x20 pbrain needs `codebook-eval` (the flat NNUE feature layout is 15x15-only)"
+);
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "codebook-eval")]
-use figrid_board::codebook_eval::{CodebookWeights, QuantizedCodebookWeights};
+use figrid_board::codebook_eval::{CodebookWeights, ExactI8Codebook, QuantizedCodebookWeights};
 #[cfg(feature = "codebook-eval")]
 use figrid_board::factored_codebook::{FactoredQuantizedCodebookWeights, PackedCodebookArtifact};
 use figrid_board::{BOARD_SIZE, Board, GOMOKU_NNUE_CONFIG, RuleSet, Searcher, book, to_idx};
@@ -31,7 +33,13 @@ use noru::network::NnueWeights;
 fn load_weights_bytes() -> Result<Vec<u8>, String> {
     use flate2::read::GzDecoder;
     use std::io::Read;
+    #[cfg(not(feature = "release-models"))]
     const COMPRESSED: &[u8] = include_bytes!("../models/gomoku_v52_5stone_conv_93k.bin.gz");
+    #[cfg(feature = "release-models")]
+    const COMPRESSED: &[u8] = include_bytes!(concat!(
+        env!("FIGRID_RELEASE_MODEL_DIR"),
+        "/ordering_flat_v52.bin.gz"
+    ));
     let mut decoder = GzDecoder::new(COMPRESSED);
     let mut out = Vec::with_capacity(15_000_000);
     decoder
@@ -91,9 +99,13 @@ const KNOWN_ENGINE_VARS: &[&str] = &[
     "FIGRID_CODEBOOK_WEIGHTS",
     "NORU_CODEBOOK_EVAL_SCALE",
     // Optional per-rule codebooks (each needs its own scale).
+    "FIGRID_CODEBOOK_WEIGHTS_FREESTYLE",
+    "FIGRID_CODEBOOK_WEIGHTS_OMOK",
     "FIGRID_CODEBOOK_WEIGHTS_STANDARD",
     "FIGRID_CODEBOOK_WEIGHTS_CARO",
     "FIGRID_CODEBOOK_WEIGHTS_RENJU",
+    "NORU_CODEBOOK_EVAL_SCALE_FREESTYLE",
+    "NORU_CODEBOOK_EVAL_SCALE_OMOK",
     "NORU_CODEBOOK_EVAL_SCALE_STANDARD",
     "NORU_CODEBOOK_EVAL_SCALE_CARO",
     "NORU_CODEBOOK_EVAL_SCALE_RENJU",
@@ -166,7 +178,11 @@ mod engine_var_tests {
         .map(String::from);
         assert_eq!(
             unknown_engine_var_names(names.into_iter()),
-            vec!["FIGRID_CODEBOOK_EVAL", "NORU_CANDIDATE_RANKER", "NORU_ROOT_VCT"]
+            vec![
+                "FIGRID_CODEBOOK_EVAL",
+                "NORU_CANDIDATE_RANKER",
+                "NORU_ROOT_VCT"
+            ]
         );
     }
 
@@ -202,6 +218,10 @@ const EMBEDDED_CODEBOOK_CBF: &[u8] =
 /// float kernel remains available to library callers only.
 #[cfg(feature = "codebook-eval")]
 enum CodebookRuntimeWeights {
+    ExactI8 {
+        weights: ExactI8Codebook,
+        embedded: bool,
+    },
     Quantized {
         weights: QuantizedCodebookWeights,
         embedded: bool,
@@ -256,13 +276,22 @@ fn demote_preempt_three_enabled() -> bool {
 
 /// Per-move quiet policy (1.1): unset or empty uses the embedded model, `off`/`0`/`false`/`no` disables it, anything
 /// else is a `PGM1` file. Returns the model and its label for the config line.
-fn load_policy_move() -> Result<(Option<std::sync::Arc<figrid_board::policy_move::PolicyMove>>, String), String> {
+fn load_policy_move() -> Result<
+    (
+        Option<std::sync::Arc<figrid_board::policy_move::PolicyMove>>,
+        String,
+    ),
+    String,
+> {
     use figrid_board::policy_move::PolicyMove;
     let raw = std::env::var("NORU_POLICY_MOVE").unwrap_or_default();
     let raw = raw.trim();
     if raw.is_empty() {
         #[cfg(feature = "codebook-eval")]
-        return Ok((Some(std::sync::Arc::new(PolicyMove::embedded())), "embedded".to_string()));
+        return Ok((
+            Some(std::sync::Arc::new(PolicyMove::embedded())),
+            "embedded".to_string(),
+        ));
         #[cfg(not(feature = "codebook-eval"))]
         return Ok((None, "unsupported".to_string()));
     }
@@ -270,7 +299,8 @@ fn load_policy_move() -> Result<(Option<std::sync::Arc<figrid_board::policy_move
         return Ok((None, "off".to_string()));
     }
     let bytes = std::fs::read(raw).map_err(|e| format!("NORU_POLICY_MOVE `{raw}`: {e}"))?;
-    let model = PolicyMove::from_bytes(&bytes).map_err(|e| format!("NORU_POLICY_MOVE `{raw}`: {e}"))?;
+    let model =
+        PolicyMove::from_bytes(&bytes).map_err(|e| format!("NORU_POLICY_MOVE `{raw}`: {e}"))?;
     Ok((Some(std::sync::Arc::new(model)), raw.to_string()))
 }
 
@@ -458,7 +488,8 @@ mod white_root_order_tests {
                     embedded: false,
                 })
             }
-            CodebookRuntimeWeights::FactoredQuantized { .. } => unreachable!(),
+            CodebookRuntimeWeights::FactoredQuantized { .. }
+            | CodebookRuntimeWeights::ExactI8 { .. } => unreachable!(),
         };
         let mut custom_searcher = Searcher::new();
         configure_white_root_order_mode(&mut custom_searcher, &custom, WhiteRootOrderMode::Auto)
@@ -525,6 +556,20 @@ fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
         ),
         None => None,
     };
+    #[cfg(feature = "release-models")]
+    if configured_path.is_none() {
+        #[cfg(not(feature = "board20"))]
+        let bytes = include_bytes!(concat!(
+            env!("FIGRID_RELEASE_MODEL_DIR"),
+            "/ng3_standard_omok.ngcb8.gz"
+        ));
+        #[cfg(feature = "board20")]
+        let bytes = include_bytes!(concat!(
+            env!("FIGRID_RELEASE_MODEL_DIR"),
+            "/ng3_board20.ngcb8.gz"
+        ));
+        return embedded_exact_i8(bytes).map(Some);
+    }
     let Some(configured_path) = configured_path else {
         return load_embedded_codebook_weights(EMBEDDED_CODEBOOK_CBF, codebook_factored_enabled())
             .map(Some);
@@ -548,6 +593,14 @@ fn load_codebook_weights() -> Result<Option<CodebookRuntimeWeights>, String> {
 fn load_codebook_file(path: &str) -> Result<CodebookRuntimeWeights, String> {
     let bytes = std::fs::read(path)
         .map_err(|e| format!("failed to read codebook weights from `{path}`: {e}"))?;
+    if bytes.starts_with(ExactI8Codebook::MAGIC) {
+        let weights = ExactI8Codebook::from_bytes(&bytes)?;
+        figrid_board::pattern_table::warm_full_vocab();
+        return Ok(CodebookRuntimeWeights::ExactI8 {
+            weights,
+            embedded: false,
+        });
+    }
     let weights = CodebookWeights::from_bytes_auto(&bytes)
         .map_err(|e| format!("failed to parse codebook weights: {e}"))?;
     if weights.is_full_vocab() {
@@ -575,31 +628,126 @@ struct RuleCodebook {
 #[cfg(feature = "codebook-eval")]
 fn load_rule_codebooks() -> Result<Vec<RuleCodebook>, String> {
     let mut out = Vec::new();
-    for (rule, tag) in [(RuleSet::Standard, "STANDARD"), (RuleSet::Caro, "CARO"), (RuleSet::Renju, "RENJU")] {
-        let path = std::env::var(format!("FIGRID_CODEBOOK_WEIGHTS_{tag}")).unwrap_or_default();
+    for (rule, tag) in [
+        (RuleSet::Freestyle, "FREESTYLE"),
+        (RuleSet::Standard, "STANDARD"),
+        (RuleSet::Omok, "OMOK"),
+        (RuleSet::Caro, "CARO"),
+        (RuleSet::Renju, "RENJU"),
+    ] {
+        let configured = std::env::var_os(format!("FIGRID_CODEBOOK_WEIGHTS_{tag}"));
+        if configured.is_none() {
+            #[cfg(all(feature = "release-models", not(feature = "board20")))]
+            if std::env::var_os("FIGRID_CODEBOOK_WEIGHTS").is_none() {
+                let embedded: Option<(&[u8], f32)> = match rule {
+                    RuleSet::Freestyle => Some((
+                        include_bytes!(concat!(
+                            env!("FIGRID_RELEASE_MODEL_DIR"),
+                            "/kg11_freestyle15.ngcb8.gz"
+                        )),
+                        13.171443,
+                    )),
+                    RuleSet::Caro => Some((
+                        include_bytes!(concat!(
+                            env!("FIGRID_RELEASE_MODEL_DIR"),
+                            "/kg14_caro.ngcb8.gz"
+                        )),
+                        14.939977,
+                    )),
+                    RuleSet::Renju => Some((
+                        include_bytes!(concat!(
+                            env!("FIGRID_RELEASE_MODEL_DIR"),
+                            "/ng3_renju.ngcb8.gz"
+                        )),
+                        15.499594,
+                    )),
+                    _ => None,
+                };
+                if let Some((gz, scale)) = embedded {
+                    out.push(RuleCodebook {
+                        rule,
+                        weights: embedded_exact_i8(gz)?,
+                        scale,
+                        label: format!("{tag}=embedded-release"),
+                    });
+                }
+            }
+            continue;
+        }
+        let path = configured
+            .unwrap()
+            .into_string()
+            .map_err(|_| format!("FIGRID_CODEBOOK_WEIGHTS_{tag} is not Unicode"))?;
         let path = path.trim();
         if path.is_empty() {
             continue;
         }
         let raw = std::env::var(format!("NORU_CODEBOOK_EVAL_SCALE_{tag}"))
-            .map_err(|_| format!("FIGRID_CODEBOOK_WEIGHTS_{tag} needs NORU_CODEBOOK_EVAL_SCALE_{tag}"))?;
+            .map_err(|_| format!("FIGRID_CODEBOOK_WEIGHTS_{tag} needs its scale"))?;
         let scale = raw
             .trim()
             .parse::<f32>()
             .ok()
-            .filter(|s| s.is_finite() && *s > 0.0)
-            .ok_or_else(|| format!("invalid NORU_CODEBOOK_EVAL_SCALE_{tag}: {raw}"))?;
-        out.push(RuleCodebook { rule, weights: load_codebook_file(path)?, scale, label: format!("{tag}={path}") });
+            .filter(|s| s.is_finite() && *s > 0.)
+            .ok_or_else(|| format!("invalid NORU_CODEBOOK_EVAL_SCALE_{tag}"))?;
+        out.push(RuleCodebook {
+            rule,
+            weights: load_codebook_file(path)?,
+            scale,
+            label: format!("{tag}={path}"),
+        });
     }
     Ok(out)
 }
 
+#[cfg(feature = "release-models")]
+fn embedded_exact_i8(gz: &[u8]) -> Result<CodebookRuntimeWeights, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    let weights = ExactI8Codebook::from_bytes(&bytes)?;
+    figrid_board::pattern_table::warm_full_vocab();
+    Ok(CodebookRuntimeWeights::ExactI8 {
+        weights,
+        embedded: true,
+    })
+}
+
+#[cfg(feature = "codebook-eval")]
+fn embedded_default_scale() -> Option<f32> {
+    #[cfg(feature = "release-models")]
+    if std::env::var_os("FIGRID_CODEBOOK_WEIGHTS").is_none()
+        && std::env::var("NORU_CODEBOOK_EVAL_SCALE")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|s| s.is_finite() && *s > 0.)
+            .is_none()
+    {
+        return Some(13.171443);
+    }
+    None
+}
+
 /// `codebook=...; ...` part of the startup config line.
 #[cfg(feature = "codebook-eval")]
-fn codebook_config_summary(codebook: &Option<CodebookRuntimeWeights>, searcher: &Searcher) -> String {
+fn codebook_config_summary(
+    codebook: &Option<CodebookRuntimeWeights>,
+    searcher: &Searcher,
+) -> String {
     let on_off = |enabled: bool| if enabled { "on" } else { "off" };
     let (source, kernel, ids) = match codebook {
         None => return "codebook=off".to_string(),
+        Some(CodebookRuntimeWeights::ExactI8 { weights, embedded }) => (
+            if *embedded {
+                "embedded-release".into()
+            } else {
+                "external-exact-i8".into()
+            },
+            "exact-int8",
+            weights.table.len() / weights.scorer.dim,
+        ),
         Some(CodebookRuntimeWeights::Quantized { weights, embedded }) => (
             if *embedded {
                 "embedded".to_string()
@@ -620,7 +768,7 @@ fn codebook_config_summary(codebook: &Option<CodebookRuntimeWeights>, searcher: 
     format!(
         "codebook={source}; codebook_kernel={kernel}; codebook_ids={ids}; scale={}; \
          directional_delta={}; white_root_order={}",
-        figrid_board::search::codebook_eval_scale(),
+        embedded_default_scale().unwrap_or_else(figrid_board::search::codebook_eval_scale),
         on_off(codebook_directional_delta_enabled()),
         on_off(searcher.white_root_order_enabled()),
     )
@@ -741,7 +889,11 @@ impl ProtocolInfo {
         }
         // figrid extension: Korean omok rule (exactly five for both sides, double-three forbidden for both).
         if self.rule_omok {
-            return if self.rule_exact5 && !self.rule_renju && !self.rule_caro { Some(RuleSet::Omok) } else { None };
+            return if self.rule_exact5 && !self.rule_renju && !self.rule_caro {
+                Some(RuleSet::Omok)
+            } else {
+                None
+            };
         }
         if self.rule_renju {
             return Some(RuleSet::Renju);
@@ -874,7 +1026,10 @@ impl Engine {
         // The flat NNUE feature layout is 15x15-only; the 20x20 engine always evaluates with a codebook.
         #[cfg(all(feature = "codebook-eval", feature = "board20"))]
         if codebook_weights.is_none() {
-            return Err("the 20x20 build needs a codebook (FIGRID_CODEBOOK_WEIGHTS must not be off)".to_string());
+            return Err(
+                "the 20x20 build needs a codebook (FIGRID_CODEBOOK_WEIGHTS must not be off)"
+                    .to_string(),
+            );
         }
         #[cfg(feature = "codebook-eval")]
         let rule_codebooks = load_rule_codebooks()?;
@@ -899,8 +1054,10 @@ impl Engine {
             if rule_codebooks.is_empty() {
                 base
             } else {
-                let per_rule: Vec<String> =
-                    rule_codebooks.iter().map(|r| format!("{} scale={}", r.label, r.scale)).collect();
+                let per_rule: Vec<String> = rule_codebooks
+                    .iter()
+                    .map(|r| format!("{} scale={}", r.label, r.scale))
+                    .collect();
                 format!("{base}; rule_codebooks=[{}]", per_rule.join(", "))
             }
         };
@@ -989,12 +1146,21 @@ impl Engine {
         #[cfg(feature = "codebook-eval")]
         let (codebook, scale) = match self.rule_codebooks.iter().find(|r| r.rule == rule) {
             Some(r) => (Some(&r.weights), Some(r.scale)),
-            None => (self.codebook_weights.as_ref(), None),
+            None => (self.codebook_weights.as_ref(), embedded_default_scale()),
         };
         #[cfg(feature = "codebook-eval")]
         self.searcher.set_codebook_eval_scale(scale);
         #[cfg(feature = "codebook-eval")]
         let result = match codebook {
+            Some(CodebookRuntimeWeights::ExactI8 { weights, .. }) => {
+                self.searcher.search_codebook_eval_exact_i8(
+                    &mut self.board,
+                    &self.weights,
+                    weights,
+                    max_depth,
+                    time_limit,
+                )
+            }
             Some(CodebookRuntimeWeights::Quantized {
                 weights: codebook_weights,
                 ..
@@ -1029,7 +1195,12 @@ impl Engine {
         let mv = result
             .best_move
             .filter(|&mv| board.is_legal_move(mv))
-            .or_else(|| board.candidate_moves().into_iter().find(|&mv| board.is_legal_move(mv)))
+            .or_else(|| {
+                board
+                    .candidate_moves()
+                    .into_iter()
+                    .find(|&mv| board.is_legal_move(mv))
+            })
             .or_else(|| (0..BOARD_SIZE * BOARD_SIZE).find(|&mv| board.is_legal_move(mv)))?;
         self.board.make_move(mv);
         Some(idx_to_xy(mv))

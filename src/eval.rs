@@ -1,7 +1,8 @@
 //! NNUE 평가 — 4096 피처 (PS + LP-Rich + Compound + Density) 추출.
 
-use crate::board::{BOARD_SIZE, Board, NUM_CELLS, Stone};
-use crate::features::{
+use super::engine;
+use engine::board::{BOARD_SIZE, Board, NUM_CELLS, Stone};
+use engine::features::{
     BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE, DENSITY_CAT_LEGAL,
     DENSITY_CAT_MY_COUNT, DENSITY_CAT_MY_LOCAL, DENSITY_CAT_OPP_COUNT, DENSITY_CAT_OPP_LOCAL,
     MAX_ACTIVE_FEATURES, broken_index, compound_index, conv_k3_bucket, conv_kernel_index,
@@ -9,7 +10,7 @@ use crate::features::{
     five_stone_swap_perspective, last_move_index, length_bucket, local_density_bucket,
     lp_rich_index, open_bucket, phase_bucket, phase_index, ps_index, zone_for,
 };
-use crate::heuristic::{DIR, scan_line};
+use engine::heuristic::{DIR, scan_line};
 use noru::network::{Accumulator, FeatureDelta, NnueWeights, forward};
 
 /// Incremental update시 한 수로 인해 feature가 바뀔 가능성이 있는 cell 집합 반환.
@@ -170,8 +171,8 @@ pub(crate) fn features_from_cell(
 /// D 섹션 — 전역 카운트 + last_move 주변 3×3 local density.
 fn push_density_features(
     board: &Board,
-    my_bb: &crate::board::BitBoard,
-    opp_bb: &crate::board::BitBoard,
+    my_bb: &engine::board::BitBoard,
+    opp_bb: &engine::board::BitBoard,
     stm: &mut Vec<usize>,
     nstm: &mut Vec<usize>,
 ) {
@@ -216,8 +217,8 @@ fn push_density_features(
 
 /// J: Conv kernel emit. K1 (3×3 own), K2 (3×3 opp), K3 (5×5 diamond own).
 fn push_conv_kernel_features(
-    my_bb: &crate::board::BitBoard,
-    opp_bb: &crate::board::BitBoard,
+    my_bb: &engine::board::BitBoard,
+    opp_bb: &engine::board::BitBoard,
     stm: &mut Vec<usize>,
     nstm: &mut Vec<usize>,
 ) {
@@ -241,7 +242,7 @@ fn push_conv_kernel_features(
         for c in 0..BOARD_SIZE as i32 {
             let cell = (r * BOARD_SIZE as i32 + c) as usize;
 
-            let count_at = |bb: &crate::board::BitBoard, offsets: &[(i32, i32)]| -> u32 {
+            let count_at = |bb: &engine::board::BitBoard, offsets: &[(i32, i32)]| -> u32 {
                 let mut n = 0u32;
                 for &(dr, dc) in offsets {
                     let nr = r + dr;
@@ -292,8 +293,8 @@ fn push_conv_kernel_features(
 /// `perspective_mine` / `perspective_opp`: stm 관점에서 "내 돌"이 0, "상대 돌"이 1.
 #[allow(clippy::too_many_arguments)]
 fn detect_broken_and_push(
-    stones: &crate::board::BitBoard,
-    opp: &crate::board::BitBoard,
+    stones: &engine::board::BitBoard,
+    opp: &engine::board::BitBoard,
     row: i32,
     col: i32,
     dr: i32,
@@ -434,8 +435,8 @@ fn classify_broken_shape(line: &[u8; 11]) -> Option<(usize, bool)> {
 /// as 3 (boundary), mine=1, opp=2, empty=0.
 #[inline]
 fn collect_3x3(
-    my_bb: &crate::board::BitBoard,
-    opp_bb: &crate::board::BitBoard,
+    my_bb: &engine::board::BitBoard,
+    opp_bb: &engine::board::BitBoard,
     row: i32,
     col: i32,
 ) -> [u8; 9] {
@@ -478,7 +479,7 @@ fn swap_mine_opp(c: [u8; 9]) -> [u8; 9] {
 }
 
 #[inline]
-fn is_line_start(bb: &crate::board::BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> bool {
+fn is_line_start(bb: &engine::board::BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> bool {
     let pr = row - dr;
     let pc = col - dc;
     if pr < 0 || pr >= BOARD_SIZE as i32 || pc < 0 || pc >= BOARD_SIZE as i32 {
@@ -648,7 +649,7 @@ fn apply_pattern4_dense(acc: &mut Accumulator, weights: &NnueWeights, board: &Bo
     if weights.dense_to_acc.is_empty() {
         return;
     }
-    let dense = crate::pattern_dense::pool_dense_input(&board.line_pattern_ids[..]);
+    let dense = engine::pattern_dense::pool_dense_input(&board.line_pattern_ids[..]);
     acc.apply_dense_input(weights, &dense);
 }
 
@@ -849,7 +850,7 @@ impl IncrementalEval {
         // pristine for subsequent push/pop frames, then layer the
         // Pattern4 dense projection on top before the forward pass.
         let mut acc = self.accumulator.clone();
-        let dense = crate::pattern_dense::pool_dense_input(&board.line_pattern_ids[..]);
+        let dense = engine::pattern_dense::pool_dense_input(&board.line_pattern_ids[..]);
         acc.apply_dense_input(weights, &dense);
         forward(&acc, weights)
     }
@@ -948,11 +949,12 @@ fn multiset_diff(new: &[usize], old: &[usize]) -> (Vec<usize>, Vec<usize>) {
 }
 
 // The flat NNUE feature layout is 15x15-only (board20 is codebook-only).
-#[cfg(all(test, not(feature = "board20")))]
+#[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::board::Board;
-    use crate::features::{
+    use engine::board::Board;
+    use engine::features::{
         BROKEN_SHAPE_DOUBLE_THREE, BROKEN_SHAPE_JUMP_FOUR, BROKEN_SHAPE_THREE, GOMOKU_NNUE_CONFIG,
         HALF_FEATURE_SIZE, LP_BASE, MAX_ACTIVE_FEATURES, PS_BASE, TOTAL_FEATURE_SIZE, broken_index,
         compound_index,
@@ -960,6 +962,9 @@ mod tests {
 
     #[test]
     fn empty_board_has_only_global_features() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let board = Board::new();
         let (stm, nstm) = compute_active_features(&board);
         // 빈 보드: per-cell 섹션(A/B/C/E/F/G/I)과 conv(J)는 돌이 없어 0개.
@@ -971,6 +976,9 @@ mod tests {
 
     #[test]
     fn evaluate_zero_weights() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let board = Board::new();
         let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
         assert_eq!(evaluate(&board, &weights), 0);
@@ -978,6 +986,9 @@ mod tests {
 
     #[test]
     fn features_include_lp_after_two_in_row() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let mut board = Board::new();
         board.make_move(7 * 15 + 7); // B
         board.make_move(0); // W
@@ -989,6 +1000,9 @@ mod tests {
 
     #[test]
     fn all_features_within_range() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let mut board = Board::new();
         for sq in [112, 0, 113, 1, 114, 15, 100, 50] {
             board.make_move(sq);
@@ -1004,6 +1018,9 @@ mod tests {
 
     #[test]
     fn active_features_under_cap() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         // 보드를 가득 채워도 활성 피처가 상한 안에 있어야 함.
         let mut board = Board::new();
         for sq in 0..NUM_CELLS {
@@ -1018,6 +1035,9 @@ mod tests {
 
     #[test]
     fn push_pop_consistency() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let mut weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
         let acc_size = GOMOKU_NNUE_CONFIG.accumulator_size;
         for sq in 0..20 {
@@ -1047,6 +1067,9 @@ mod tests {
     /// incremental eval 값 = 새로 refresh한 eval 값이어야 함.
     #[test]
     fn incremental_matches_full_refresh() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         // deterministic weight 생성 (zeros로는 모든 eval이 0이라 무의미)
         let mut weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
         let acc_size = GOMOKU_NNUE_CONFIG.accumulator_size;
@@ -1113,6 +1136,9 @@ mod tests {
     /// 로직이 올바른지 검증. 근처 수만 놓는 기본 테스트로는 이 버그를 못 잡음.
     #[test]
     fn incremental_matches_full_refresh_far_apart() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let mut weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
         let acc_size = GOMOKU_NNUE_CONFIG.accumulator_size;
         for f in 0..TOTAL_FEATURE_SIZE {
@@ -1178,7 +1204,7 @@ mod tests {
     #[test]
     #[ignore = "requires a real NNUE weights file (env NORU_TEST_WEIGHTS or default models/gomoku_v14_broken_rapfi_wide.bin)"]
     fn incremental_matches_full_refresh_real_weights() {
-        use crate::board::GameResult;
+        use engine::board::GameResult;
         use noru::trainer::SimpleRng;
 
         let path = std::env::var("NORU_TEST_WEIGHTS").unwrap_or_else(|_| {
@@ -1226,6 +1252,9 @@ mod tests {
     /// 수정 후 line_start가 아닌 중심 돌에서도 hotspot이 잡히는지 검증한다.
     #[test]
     fn compound_catches_double_three_at_non_line_start_stone() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let mut board = Board::new();
         // Black: 가로 3연 (7,5)(7,6)(7,7), 세로 3연 (6,7)(7,7)(8,7)
         // (7,7) 은 가로 기준 왼쪽 인접이 흑(7,6), 세로 기준 위 인접이 흑(6,7)
@@ -1259,6 +1288,9 @@ mod tests {
     /// scan_line/LP-Rich의 연속-only 감지로는 놓치는 패턴.
     #[test]
     fn broken_three_detected_open() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let mut board = Board::new();
         // 가로: 빈(7,4) / 흑(7,5) / 흑(7,6) / 빈(7,7) / 흑(7,8) / 빈(7,9)
         // 양쪽 열림 (open_left at (7,4), open_right at (7,9)), gap 1개 at (7,7).
@@ -1283,6 +1315,9 @@ mod tests {
     /// Jump four 패턴 (`_●●●_●_` 형태, gap 1개 포함 mine 4).
     #[test]
     fn jump_four_detected() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let mut board = Board::new();
         // 가로: 빈(7,4) 흑(7,5) 흑(7,6) 흑(7,7) 빈(7,8) 흑(7,9) 빈(7,10)
         board.make_move(7 * 15 + 5); // B (7,5) 앵커
@@ -1308,6 +1343,9 @@ mod tests {
     /// 한 라인 안에 두 번의 gap이 포함된 3개 돌 구조.
     #[test]
     fn double_broken_three_detected() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let mut board = Board::new();
         // 가로: 빈(7,4) 흑(7,5) 빈(7,6) 흑(7,7) 빈(7,8) 흑(7,9) 빈(7,10)
         board.make_move(7 * 15 + 5); // B (7,5) 앵커
@@ -1332,6 +1370,9 @@ mod tests {
     /// single-direction threat가 들어갔지만, 수정 후엔 compound가 다중 위협만 잡는다.
     #[test]
     fn compound_excludes_single_threat() {
+        if engine::BOARD_SIZE != 15 {
+            return;
+        }
         let mut board = Board::new();
         // 가로 3연만 (세로/대각 threat 없음) → 각 흑 돌은 O3 단일 위협.
         board.make_move(7 * 15 + 6); // B (7,6)

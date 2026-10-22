@@ -4,14 +4,15 @@
 //! correctness gate. It is deliberately feature-gated and is not wired into
 //! search by default.
 
-use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
-use crate::factored_codebook::FactoredQuantizedCodebookWeights;
-use crate::pattern_table::{
+use super::engine;
+use cb2vec::{ReversibleTokenJournal, TokenDelta, TokenDeltaReplay, TokenDeltaSink};
+use engine::board::{BOARD_SIZE, Board, Move, NUM_CELLS, Stone};
+use engine::factored_codebook::FactoredQuantizedCodebookWeights;
+use engine::pattern_table::{
     FULL_PATTERN_NUM_IDS, PATTERN_NUM_IDS, full_id_for_cell_dir, full_ids_for_cell, full_swap_id,
     swap_mapped_id,
 };
-pub use crate::search::EvalStateStepProfile;
-use cb2vec::{ReversibleTokenJournal, TokenDelta, TokenDeltaReplay, TokenDeltaSink};
+pub use engine::search::EvalStateStepProfile;
 use serde_json::Value;
 
 const MAX_DIRTY_CELLS: usize = 41;
@@ -1291,8 +1292,12 @@ impl PatternJournal {
                         debug_assert_eq!(dr, -dc, "dirty cell off the move's lines");
                         3
                     };
-                    scratch[cell][dir] = full_id_for_cell_dir(&board.black, &board.white, cell, dir);
-                    debug_assert_eq!(scratch[cell], full_ids_for_cell(&board.black, &board.white, cell));
+                    scratch[cell][dir] =
+                        full_id_for_cell_dir(&board.black, &board.white, cell, dir);
+                    debug_assert_eq!(
+                        scratch[cell],
+                        full_ids_for_cell(&board.black, &board.white, cell)
+                    );
                 }
                 journal.push_after(scratch, dirty)
             }
@@ -1916,7 +1921,7 @@ impl IncrementalQuantizedCodebookEval {
     }
 
     /// The per-move policy inputs of empty `cell` (side-to-move perspective), `6·dim + 21` floats; see
-    /// [`crate::policy_move::PolicyMove`]. Requires [`Self::materialize_for_policy`] since the last move.
+    /// [`engine::policy_move::PolicyMove`]. Requires [`Self::materialize_for_policy`] since the last move.
     pub(crate) fn policy_move_inputs_with_access<W: QuantizedCodebookAccess>(
         &self,
         board: &Board,
@@ -1931,7 +1936,11 @@ impl IncrementalQuantizedCodebookEval {
         let dequant = 1.0 / weights.embedding_scale() as f32;
         let full_vocab = weights.is_full_vocab();
         let white = board.side_to_move == Stone::White;
-        let cells = if white { &self.cell_white } else { &self.cell_black };
+        let cells = if white {
+            &self.cell_white
+        } else {
+            &self.cell_black
+        };
         out.fill(0.0);
         for d in 0..dim {
             out[d] = cells[cell * dim + d] as f32 * dequant;
@@ -1942,7 +1951,10 @@ impl IncrementalQuantizedCodebookEval {
         let mut row = vec![0i32; dim];
         let mut sum = vec![0f32; dim];
         let mut sq = vec![0f32; dim];
-        for (k, id) in ids_for_cell(board, cell, full_vocab).into_iter().enumerate() {
+        for (k, id) in ids_for_cell(board, cell, full_vocab)
+            .into_iter()
+            .enumerate()
+        {
             let id = if white { swap_id(id, full_vocab) } else { id };
             row.fill(0);
             weights.add_embedding_to(id, &mut row);
@@ -2312,6 +2324,7 @@ fn dequantize_vec_i16(values: &[i16], scale: i32) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
 
     const FULL_VOCAB_MOVES: [Move; 20] = [
@@ -2337,7 +2350,11 @@ mod tests {
             (&back.factors, &weights.factors),
         ] {
             assert_eq!(a.len(), b.len());
-            assert!(a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits()));
+            assert!(
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| x.to_bits() == y.to_bits())
+            );
         }
         assert!(!back.is_full_vocab());
         assert!(CodebookWeights::from_ngcb1_bytes(&bytes[..bytes.len() - 4]).is_err());
@@ -2383,7 +2400,8 @@ mod tests {
         assert!(quantized.is_full_vocab());
         let mut board = Board::new();
         let mut delta = IncrementalQuantizedCodebookEval::new(&quantized);
-        let mut legacy = IncrementalQuantizedCodebookEval::new_with_directional_delta(&quantized, false);
+        let mut legacy =
+            IncrementalQuantizedCodebookEval::new_with_directional_delta(&quantized, false);
         assert!(delta.directional_delta_enabled());
         delta.refresh(&board, &quantized);
         legacy.refresh(&board, &quantized);
@@ -2417,8 +2435,8 @@ mod tests {
             check(&board, &mut delta, &mut legacy);
         }
         // The legacy geometry of the same seed is a different model.
-        let legacy_weights =
-            CodebookWeights::deterministic_with_num_ids(8, 4, PATTERN_NUM_IDS).quantize_i16_s32_s64();
+        let legacy_weights = CodebookWeights::deterministic_with_num_ids(8, 4, PATTERN_NUM_IDS)
+            .quantize_i16_s32_s64();
         assert!(!legacy_weights.is_full_vocab());
     }
 
@@ -2461,8 +2479,8 @@ mod tests {
         assert_eq!(from_json.head, weights.head);
         assert_eq!(from_json.factors, weights.factors);
     }
-    use crate::board::GameResult;
-    use crate::factored_codebook::PackedCodebookArtifact;
+    use engine::board::GameResult;
+    use engine::factored_codebook::PackedCodebookArtifact;
     use std::path::Path;
 
     const TOL: f32 = 1e-4;
@@ -2563,7 +2581,9 @@ mod tests {
         for &(old, new) in &[(0u16, 1u16), (1, 2), (585, 586), (4096, 4265)] {
             for component in 0..factored.dim() {
                 assert_eq!(
-                    cb2vec::QuantizedCodebookAccess::embedding_delta(&factored, old, new, component),
+                    cb2vec::QuantizedCodebookAccess::embedding_delta(
+                        &factored, old, new, component
+                    ),
                     cb2vec::QuantizedCodebookAccess::embedding_delta(&flat, old, new, component),
                     "embedding delta {old}->{new}, component {component}"
                 );

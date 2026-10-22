@@ -1,63 +1,22 @@
-//! A library for the Five-in-a-Row (Gomoku) game.
+//! Gomoku engines for 15x15 and 20x20 boards in the same build.
 //!
-//! Starting from 0.4.0 the primary engine is NNUE-based (powered by the
-//! [`noru`](https://crates.io/crates/noru) core). The pre-0.4 symbolic
-//! evaluator, rule/rec/tree stack, and generic `Eval<SZ>` trait live under
-//! the [`legacy`] module in 0.8.x versions.
-
-pub mod board;
-pub mod book;
-#[cfg(feature = "codebook-eval")]
-pub mod codebook_eval;
+//! Use [`size15`] and [`size20`] explicitly when using both sizes. The crate-root
+//! exports retain the old default (`board20` selects the legacy default only).
+pub mod bitboard;
 pub mod coord;
-pub mod d4_hash;
-pub mod eval;
-#[cfg(feature = "codebook-eval")]
-pub mod factored_codebook;
-pub mod features;
-pub mod heuristic;
-pub mod pattern_dense;
-pub mod p4r0_census;
-pub mod pattern_table;
-pub mod policy_move;
-pub mod renju;
-pub mod search;
-pub mod threat_field;
-pub mod transposition;
-pub mod tss;
-pub mod vct;
-#[cfg(feature = "codebook-eval")]
-pub(crate) mod white_root_order;
-
-pub use board::{
-    BOARD_SIZE, BitBoard, Board, GameResult, Move, NUM_CELLS, RuleSet, Stone, to_idx, to_rc,
-};
-pub use coord::{Coord, Coord15, Coord20, CoordState, Rotation};
-pub use eval::{IncrementalEval, evaluate};
-pub use features::GOMOKU_NNUE_CONFIG;
-pub use heuristic::{DIR, LineInfo, scan_line};
-pub use search::{
-    MovePickerStats, ProgressCallback, SearchProfileSnapshot, SearchProgress, SearchResult, SearchShapeStats,
-    Searcher,
-};
-pub use threat_field::IncrementalThreatField;
-pub use tss::{
-    DependencyCandidateArms, DependencyQuietCandidate, Q1CandidateAttempt, Q1DefenseAttempt,
-    Q1DefenseOutcome, Q1TssConfig, Q1TssResult, Q1TssStopReason, QuietThreatCandidate,
-    QuietThreatConfig, ResponseRelevanceAudit, audit_quiet_response_relevance,
-    classify_move_with_directions, directional_aggregation_mismatches,
-    generate_dependency_quiet_candidates, generate_quiet_threat_candidates, search_q1_tss_root,
-};
-pub use vct::{
-    VctConfig, VctSearchResult, VctSearchStats, search_vct, search_vct_audit_json, search_vct_exact,
-    search_vct_with_stats,
-};
-#[cfg(feature = "cb-p1-audit")]
-pub use vct::dfpn::{
-    BoundedDfpnConfig, BoundedDfpnSession, DfpnCertificateReplay, DfpnCheckpoint, DfpnError,
-    DfpnStatus, DfpnWidthBin,
-};
-
+pub mod game;
+pub mod position;
+pub mod size15;
+pub mod size20;
+pub use bitboard::{BitBoard15, BitBoard20};
+#[cfg(not(feature = "board20"))]
+pub use size15::*;
+#[cfg(feature = "board20")]
+pub use size20::*;
+pub type Board15 = size15::Board;
+pub type Board20 = size20::Board;
+pub type Searcher15 = size15::Searcher;
+pub type Searcher20 = size20::Searcher;
 /// Possible errors returned from this crate.
 #[derive(Clone, Debug, PartialEq)]
 #[repr(u8)]

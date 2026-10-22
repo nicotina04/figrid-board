@@ -1,107 +1,12 @@
-/// 오목 보드 엔진
-///
-/// 15×15 보드. Bitboard 표현 (u128 × 2로 225비트 커버).
-/// 흑(선공)과 백(후공) 각각 bitboard 보유.
+//! A board position and its size-specialized incremental caches.
+use super::engine;
+pub use super::{BOARD_SIZE, NativeBitBoard as BitBoard, NativeBitBoardIter as BitBoardIter};
+pub use crate::game::{GameResult, RuleSet, Stone};
 use std::fmt;
-
-/// Board side: 15 by default; the `board20` feature builds the 20x20 engine (Gomocup Freestyle / Fastgame).
-#[cfg(not(feature = "board20"))]
-pub const BOARD_SIZE: usize = 15;
-#[cfg(feature = "board20")]
-pub const BOARD_SIZE: usize = 20;
-/// Smallest unsigned type that holds a cell index (`u8` for 15x15, `u16` for 20x20).
-#[cfg(not(feature = "board20"))]
-pub type CellIdx = u8;
-#[cfg(feature = "board20")]
-pub type CellIdx = u16;
-/// 128-bit words in a [`BitBoard`].
+pub type CellIdx = super::CellIdx;
+pub const NUM_CELLS: usize = BOARD_SIZE * BOARD_SIZE;
 pub const BITBOARD_WORDS: usize = NUM_CELLS.div_ceil(128);
-pub const NUM_CELLS: usize = BOARD_SIZE * BOARD_SIZE; // 225
 pub const LINE_PATTERN_FRONTIER_MAX: usize = 41;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stone {
-    Black,
-    White,
-}
-
-impl Stone {
-    pub fn opponent(self) -> Stone {
-        match self {
-            Stone::Black => Stone::White,
-            Stone::White => Stone::Black,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleSet {
-    Freestyle,
-    Standard,
-    Caro,
-    /// Black wins with exactly five and may not play forbidden points (double-four, double-three, overline;
-    /// see [`crate::renju`]); white wins with five or more.
-    Renju,
-    /// Korean omok rule: both sides win only with exactly five and neither may play a double-three
-    /// ([`crate::renju::is_forbidden_omok`]); double-fours and overlines are legal. Not a Gomocup rule; the pbrain
-    /// protocol uses `INFO rule 17` (16 | exact five) for it.
-    Omok,
-}
-
-impl RuleSet {
-    #[inline]
-    pub const fn uses_exact_five(self) -> bool {
-        matches!(self, RuleSet::Standard | RuleSet::Renju | RuleSet::Omok)
-    }
-
-    /// Win test when only the empty terminals are known. For Caro this treats
-    /// a board edge as blocking, which is stricter than Gomocup; prefer
-    /// [`RuleSet::line_wins_with_edges`] whenever the edge count is available.
-    #[inline]
-    pub const fn line_wins(self, side: Stone, count: u32, open_ends: u32) -> bool {
-        self.line_wins_with_edges(side, count, open_ends, 0)
-    }
-
-    /// Win test with the GomocupJudge terminal semantics: `open_ends` counts
-    /// empty in-board terminals and `edge_ends` counts terminals past the
-    /// board. Caro (Gomocup `rule 9`) wins only with exactly five that is not
-    /// blocked at both ends by opponent stones; a board edge does not block.
-    #[inline]
-    pub const fn line_wins_with_edges(
-        self,
-        side: Stone,
-        count: u32,
-        open_ends: u32,
-        edge_ends: u32,
-    ) -> bool {
-        match self {
-            RuleSet::Freestyle => count >= 5,
-            RuleSet::Standard | RuleSet::Omok => count == 5,
-            RuleSet::Caro => count == 5 && open_ends + edge_ends > 0,
-            RuleSet::Renju => match side {
-                Stone::Black => count == 5,
-                Stone::White => count >= 5,
-            },
-        }
-    }
-}
-
-/// 225비트를 u128 × 2로 표현
-/// lo: 비트 0~127, hi: 비트 128~224
-#[cfg(not(feature = "board20"))]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct BitBoard {
-    pub lo: u128,
-    pub hi: u128,
-}
-
-/// 400 cells in four 128-bit words (`board20`), bit `i` in word `i / 128`.
-#[cfg(feature = "board20")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct BitBoard {
-    pub w: [u128; BITBOARD_WORDS],
-}
-
 // Clipped radius-two neighborhoods. Enumerating stones and each newly seen
 // neighborhood in ascending order preserves the legacy candidate tie-breaking.
 const CANDIDATE_NEIGHBOURS: [BitBoard; NUM_CELLS] = {
@@ -125,224 +30,6 @@ const CANDIDATE_NEIGHBOURS: [BitBoard; NUM_CELLS] = {
     }
     masks
 };
-
-#[cfg(not(feature = "board20"))]
-impl BitBoard {
-    pub const EMPTY: Self = Self { lo: 0, hi: 0 };
-
-    /// Words in ascending bit order (`[lo, hi]`).
-    #[inline]
-    pub const fn words(&self) -> [u128; BITBOARD_WORDS] {
-        [self.lo, self.hi]
-    }
-
-    /// Copy with bit `idx` set (usable in const tables).
-    pub const fn with(self, idx: usize) -> Self {
-        if idx < 128 {
-            Self { lo: self.lo | 1u128 << idx, hi: self.hi }
-        } else {
-            Self { lo: self.lo, hi: self.hi | 1u128 << (idx - 128) }
-        }
-    }
-
-    #[inline]
-    pub fn and(&self, other: &BitBoard) -> BitBoard {
-        BitBoard { lo: self.lo & other.lo, hi: self.hi & other.hi }
-    }
-
-    #[inline]
-    pub fn intersects(&self, other: &BitBoard) -> bool {
-        (self.lo & other.lo) != 0 || (self.hi & other.hi) != 0
-    }
-
-    #[inline]
-    pub fn and_not(&self, other: &BitBoard) -> BitBoard {
-        BitBoard { lo: self.lo & !other.lo, hi: self.hi & !other.hi }
-    }
-
-    #[inline]
-    pub fn is_zero(&self) -> bool {
-        self.lo == 0 && self.hi == 0
-    }
-
-    #[inline]
-    pub fn get(&self, idx: usize) -> bool {
-        if idx < 128 {
-            (self.lo >> idx) & 1 != 0
-        } else {
-            (self.hi >> (idx - 128)) & 1 != 0
-        }
-    }
-
-    #[inline]
-    pub fn set(&mut self, idx: usize) {
-        if idx < 128 {
-            self.lo |= 1u128 << idx;
-        } else {
-            self.hi |= 1u128 << (idx - 128);
-        }
-    }
-
-    #[inline]
-    pub fn clear(&mut self, idx: usize) {
-        if idx < 128 {
-            self.lo &= !(1u128 << idx);
-        } else {
-            self.hi &= !(1u128 << (idx - 128));
-        }
-    }
-
-    #[inline]
-    pub fn or(&self, other: &BitBoard) -> BitBoard {
-        BitBoard {
-            lo: self.lo | other.lo,
-            hi: self.hi | other.hi,
-        }
-    }
-
-    #[inline]
-    pub fn count_ones(&self) -> u32 {
-        self.lo.count_ones() + self.hi.count_ones()
-    }
-
-    /// Iterate over the indices of set bits, lowest first.
-    /// Enables feature extraction loops to skip empty cells entirely —
-    /// critical when the board is sparse (early/midgame), since a
-    /// stone-driven pass is ~6× cheaper than scanning all 225 cells.
-    #[inline]
-    pub fn iter_ones(&self) -> BitBoardIter {
-        BitBoardIter {
-            lo: self.lo,
-            hi: self.hi,
-        }
-    }
-}
-
-#[cfg(feature = "board20")]
-impl BitBoard {
-    pub const EMPTY: Self = Self { w: [0; BITBOARD_WORDS] };
-
-    /// Words in ascending bit order.
-    #[inline]
-    pub const fn words(&self) -> [u128; BITBOARD_WORDS] {
-        self.w
-    }
-
-    /// Copy with bit `idx` set (usable in const tables).
-    pub const fn with(self, idx: usize) -> Self {
-        let mut w = self.w;
-        w[idx >> 7] |= 1u128 << (idx & 127);
-        Self { w }
-    }
-
-    #[inline]
-    pub fn get(&self, idx: usize) -> bool {
-        (self.w[idx >> 7] >> (idx & 127)) & 1 != 0
-    }
-
-    #[inline]
-    pub fn set(&mut self, idx: usize) {
-        self.w[idx >> 7] |= 1u128 << (idx & 127);
-    }
-
-    #[inline]
-    pub fn clear(&mut self, idx: usize) {
-        self.w[idx >> 7] &= !(1u128 << (idx & 127));
-    }
-
-    #[inline]
-    pub fn or(&self, other: &BitBoard) -> BitBoard {
-        BitBoard { w: std::array::from_fn(|i| self.w[i] | other.w[i]) }
-    }
-
-    #[inline]
-    pub fn and(&self, other: &BitBoard) -> BitBoard {
-        BitBoard { w: std::array::from_fn(|i| self.w[i] & other.w[i]) }
-    }
-
-    #[inline]
-    pub fn intersects(&self, other: &BitBoard) -> bool {
-        self.w.iter().zip(other.w.iter()).any(|(a, b)| a & b != 0)
-    }
-
-    #[inline]
-    pub fn and_not(&self, other: &BitBoard) -> BitBoard {
-        BitBoard { w: std::array::from_fn(|i| self.w[i] & !other.w[i]) }
-    }
-
-    #[inline]
-    pub fn is_zero(&self) -> bool {
-        self.w.iter().all(|&x| x == 0)
-    }
-
-    #[inline]
-    pub fn count_ones(&self) -> u32 {
-        self.w.iter().map(|x| x.count_ones()).sum()
-    }
-
-    /// Iterate over the indices of set bits, lowest first.
-    #[inline]
-    pub fn iter_ones(&self) -> BitBoardIter {
-        BitBoardIter { w: self.w, i: 0 }
-    }
-}
-
-#[cfg(feature = "board20")]
-pub struct BitBoardIter {
-    w: [u128; BITBOARD_WORDS],
-    i: usize,
-}
-
-#[cfg(feature = "board20")]
-impl Iterator for BitBoardIter {
-    type Item = usize;
-    #[inline]
-    fn next(&mut self) -> Option<usize> {
-        while self.i < BITBOARD_WORDS {
-            let word = &mut self.w[self.i];
-            if *word != 0 {
-                let bit = word.trailing_zeros() as usize;
-                *word &= *word - 1;
-                return Some(self.i * 128 + bit);
-            }
-            self.i += 1;
-        }
-        None
-    }
-}
-
-#[cfg(not(feature = "board20"))]
-pub struct BitBoardIter {
-    lo: u128,
-    hi: u128,
-}
-
-#[cfg(not(feature = "board20"))]
-impl Iterator for BitBoardIter {
-    type Item = usize;
-    #[inline]
-    fn next(&mut self) -> Option<usize> {
-        if self.lo != 0 {
-            let idx = self.lo.trailing_zeros() as usize;
-            self.lo &= self.lo - 1;
-            Some(idx)
-        } else if self.hi != 0 {
-            let idx = 128 + self.hi.trailing_zeros() as usize;
-            self.hi &= self.hi - 1;
-            Some(idx)
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GameResult {
-    BlackWin,
-    WhiteWin,
-    Draw,
-    Ongoing,
-}
 
 /// 착수 = 보드 인덱스 (0~224)
 pub type Move = usize;
@@ -532,7 +219,7 @@ pub type LinePackedWindowState = Box<[[u32; 4]; NUM_CELLS]>;
 pub struct BoardSearchState {
     line_packed_windows: Option<LinePackedWindowState>,
     candidate_frontier: Option<Box<CandidateFrontierState>>,
-    d4_hash: Option<crate::d4_hash::D4HashState>,
+    d4_hash: Option<engine::d4_hash::D4HashState>,
     synchronized_position: Option<(u64, usize, RuleSet)>,
 }
 
@@ -602,7 +289,7 @@ impl BoardSearchState {
                     let row = (cell / BOARD_SIZE) as i32;
                     let col = (cell % BOARD_SIZE) as i32;
                     for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
-                        let window = crate::pattern_table::read_window(
+                        let window = engine::pattern_table::read_window(
                             &board.black,
                             &board.white,
                             row,
@@ -610,10 +297,10 @@ impl BoardSearchState {
                             dr,
                             dc,
                         );
-                        let packed = crate::pattern_table::pack_window(&window);
+                        let packed = engine::pattern_table::pack_window(&window);
                         debug_assert_eq!(
                             board.line_pattern_ids[cell][dir_idx],
-                            crate::pattern_table::lookup_mapped_id(packed),
+                            engine::pattern_table::lookup_mapped_id(packed),
                             "line pattern ID stale before packed-window enable"
                         );
                         windows[cell][dir_idx] = packed;
@@ -669,7 +356,7 @@ impl BoardSearchState {
         self.synchronize(board);
         if enabled {
             if self.d4_hash.is_none() {
-                self.d4_hash = Some(crate::d4_hash::D4HashState::rebuild(board));
+                self.d4_hash = Some(engine::d4_hash::D4HashState::rebuild(board));
             }
         } else {
             self.d4_hash = None;
@@ -697,13 +384,13 @@ impl BoardSearchState {
     /// Return the current canonical hash context only for synchronized state.
     #[doc(hidden)]
     #[inline]
-    pub fn d4_canonical_context(&self, board: &Board) -> Option<crate::d4_hash::CanonicalContext> {
+    pub fn d4_canonical_context(&self, board: &Board) -> Option<engine::d4_hash::CanonicalContext> {
         if !self.is_synchronized(board) {
             return None;
         }
         self.d4_hash
             .as_ref()
-            .map(crate::d4_hash::D4HashState::canonical_context)
+            .map(engine::d4_hash::D4HashState::canonical_context)
     }
 
     /// Predict all child hashes without mutating either the board or sidecar.
@@ -723,7 +410,7 @@ impl BoardSearchState {
         &self,
         board: &Board,
         mv: Move,
-    ) -> Option<crate::d4_hash::CanonicalContext> {
+    ) -> Option<engine::d4_hash::CanonicalContext> {
         if !self.is_synchronized(board) {
             return None;
         }
@@ -807,30 +494,8 @@ impl BoardSearchState {
     }
 }
 
-#[derive(Clone)]
-pub struct Board {
-    pub black: BitBoard,
-    pub white: BitBoard,
-    pub side_to_move: Stone,
-    pub move_count: usize,
-    pub last_move: Option<Move>,
-    /// 착수 이력 (undo를 위해)
-    pub history: Vec<Move>,
-    /// Zobrist 해시. make_move/undo_move에서 XOR로 incremental 갱신.
-    /// 보드 상태(돌 배치 + side_to_move)의 64-bit fingerprint —
-    /// transposition table 키로 사용.
-    pub zobrist: u64,
-    /// Pattern4 mini state cache. 각 (cell, dir) 11-cell 윈도우의
-    /// canonical pattern ID (black-relative). 빈 보드는 모두 ID 0
-    /// (empty_pattern_id). make/undo가 영향받는 cell의 ID만 lookup으로
-    /// 재계산해 region recompute를 피함. NNUE feature 매핑은 Phase 3에서.
-    pub line_pattern_ids: LinePatternState,
-    /// Active Gomoku rule set for terminal line checks.
-    pub rule_set: RuleSet,
-    /// Backward-compatible Standard-rule flag used by older tools.
-    /// Prefer `set_rule_set` for new code.
-    pub exact5: bool,
-}
+/// This engine specializes the generic position for its native bitboard.
+pub type Board = crate::position::Board<BitBoard>;
 
 impl Board {
     pub fn new() -> Self {
@@ -880,10 +545,10 @@ impl Board {
             let col = (cell % BOARD_SIZE) as i32;
             for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
                 let w =
-                    crate::pattern_table::read_window(&self.black, &self.white, row, col, dr, dc);
-                let packed = crate::pattern_table::pack_window(&w);
+                    engine::pattern_table::read_window(&self.black, &self.white, row, col, dr, dc);
+                let packed = engine::pattern_table::pack_window(&w);
                 self.line_pattern_ids[cell][dir_idx] =
-                    crate::pattern_table::lookup_mapped_id(packed);
+                    engine::pattern_table::lookup_mapped_id(packed);
             }
         }
     }
@@ -1235,7 +900,7 @@ impl Board {
                 let mask = 0b11u32 << shift;
                 let packed = (windows[cell][dir_idx] & !mask) | (new_cell << shift);
                 windows[cell][dir_idx] = packed;
-                ids[cell][dir_idx] = crate::pattern_table::lookup_mapped_id(packed);
+                ids[cell][dir_idx] = engine::pattern_table::lookup_mapped_id(packed);
             });
         } else {
             Self::for_line_pattern_frontier(mv, |cell, dir_idx, _offset| {
@@ -1243,10 +908,10 @@ impl Board {
                 let r = (cell / BOARD_SIZE) as i32;
                 let c = (cell % BOARD_SIZE) as i32;
                 let window =
-                    crate::pattern_table::read_window(&self.black, &self.white, r, c, dr, dc);
-                let packed = crate::pattern_table::pack_window(&window);
+                    engine::pattern_table::read_window(&self.black, &self.white, r, c, dr, dc);
+                let packed = engine::pattern_table::pack_window(&window);
                 self.line_pattern_ids[cell][dir_idx] =
-                    crate::pattern_table::lookup_mapped_id(packed);
+                    engine::pattern_table::lookup_mapped_id(packed);
             });
         }
     }
@@ -1325,10 +990,13 @@ impl Board {
     #[inline]
     pub fn is_forbidden_for_side_to_move(&self, mv: Move) -> bool {
         match self.effective_rule_set() {
-            RuleSet::Renju => self.side_to_move == Stone::Black && crate::renju::is_forbidden(&self.black, &self.white, mv),
+            RuleSet::Renju => {
+                self.side_to_move == Stone::Black
+                    && engine::renju::is_forbidden(&self.black, &self.white, mv)
+            }
             RuleSet::Omok => match self.side_to_move {
-                Stone::Black => crate::renju::is_forbidden_omok(&self.black, &self.white, mv),
-                Stone::White => crate::renju::is_forbidden_omok(&self.white, &self.black, mv),
+                Stone::Black => engine::renju::is_forbidden_omok(&self.black, &self.white, mv),
+                Stone::White => engine::renju::is_forbidden_omok(&self.white, &self.black, mv),
             },
             _ => false,
         }
@@ -1391,6 +1059,7 @@ impl fmt::Display for Board {
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
 
     fn put_stone(board: &mut Board, side: Stone, row: usize, col: usize) -> Move {
@@ -1484,7 +1153,7 @@ mod tests {
                 let row = (cell / BOARD_SIZE) as i32;
                 let col = (cell % BOARD_SIZE) as i32;
                 for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
-                    let w = crate::pattern_table::read_window(
+                    let w = engine::pattern_table::read_window(
                         &board.black,
                         &board.white,
                         row,
@@ -1492,8 +1161,8 @@ mod tests {
                         dr,
                         dc,
                     );
-                    let packed = crate::pattern_table::pack_window(&w);
-                    let expected = crate::pattern_table::lookup_mapped_id(packed);
+                    let packed = engine::pattern_table::pack_window(&w);
+                    let expected = engine::pattern_table::lookup_mapped_id(packed);
                     let actual = board.line_pattern_ids[cell][dir_idx];
                     assert_eq!(
                         actual,
@@ -1539,9 +1208,15 @@ mod tests {
             let row = (cell / BOARD_SIZE) as i32;
             let col = (cell % BOARD_SIZE) as i32;
             for (dir_idx, &(dr, dc)) in DIRS.iter().enumerate() {
-                let window =
-                    crate::pattern_table::read_window(&board.black, &board.white, row, col, dr, dc);
-                let expected_packed = crate::pattern_table::pack_window(&window);
+                let window = engine::pattern_table::read_window(
+                    &board.black,
+                    &board.white,
+                    row,
+                    col,
+                    dr,
+                    dc,
+                );
+                let expected_packed = engine::pattern_table::pack_window(&window);
                 let actual_packed = state.packed_line_window(cell, dir_idx).unwrap();
                 assert_eq!(
                     actual_packed, expected_packed,
@@ -1549,7 +1224,7 @@ mod tests {
                 );
                 assert_eq!(
                     board.line_pattern_ids[cell][dir_idx],
-                    crate::pattern_table::lookup_mapped_id(expected_packed),
+                    engine::pattern_table::lookup_mapped_id(expected_packed),
                     "mapped-id mismatch after operation {operation}, cell {cell}, dir {dir_idx}"
                 );
             }
@@ -1597,7 +1272,7 @@ mod tests {
         let root_hashes = state.d4_hashes(&board).expect("D4 hash enabled");
         assert_eq!(
             root_hashes,
-            *crate::d4_hash::D4HashState::rebuild(&board).hashes()
+            *engine::d4_hash::D4HashState::rebuild(&board).hashes()
         );
 
         for &mv in &sequence {
@@ -1612,7 +1287,7 @@ mod tests {
             assert_eq!(state.d4_canonical_context(&board), Some(predicted_context));
             assert_eq!(
                 state.d4_hashes(&board),
-                Some(*crate::d4_hash::D4HashState::rebuild(&board).hashes())
+                Some(*engine::d4_hash::D4HashState::rebuild(&board).hashes())
             );
             assert_packed_windows_match_full_rebuild(&board, &state, board.move_count);
             assert_candidate_frontier_matches_full_rebuild(&board, &state, board.move_count);
@@ -1622,7 +1297,7 @@ mod tests {
             state.undo_move(&mut board);
             assert_eq!(
                 state.d4_hashes(&board),
-                Some(*crate::d4_hash::D4HashState::rebuild(&board).hashes()),
+                Some(*engine::d4_hash::D4HashState::rebuild(&board).hashes()),
                 "D4 hashes after undo {operation}"
             );
         }
@@ -1654,7 +1329,10 @@ mod tests {
         state.synchronize(&board);
         let caro = state.d4_hashes(&board).expect("D4 hash rebuilt");
         assert_ne!(caro, freestyle);
-        assert_eq!(caro, *crate::d4_hash::D4HashState::rebuild(&board).hashes());
+        assert_eq!(
+            caro,
+            *engine::d4_hash::D4HashState::rebuild(&board).hashes()
+        );
         assert!(state.packed_line_windows_enabled());
         assert!(state.candidate_frontier_enabled());
         assert!(state.d4_hash_enabled());
@@ -1979,7 +1657,9 @@ mod tests {
         for _ in 0..400 {
             let mut cells: Vec<_> = (0..NUM_CELLS).collect();
             for i in (1..NUM_CELLS).rev() {
-                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
                 cells.swap(i, rng as usize % (i + 1));
             }
             let mut board = Board::new();
@@ -1989,8 +1669,11 @@ mod tests {
             }
             for _ in 0..NUM_CELLS {
                 board.undo_move();
-                let expected = if board.move_count == 0 { vec![to_idx(BOARD_SIZE / 2, BOARD_SIZE / 2)] }
-                    else { board.candidate_moves_legacy() };
+                let expected = if board.move_count == 0 {
+                    vec![to_idx(BOARD_SIZE / 2, BOARD_SIZE / 2)]
+                } else {
+                    board.candidate_moves_legacy()
+                };
                 assert_eq!(board.candidate_moves(), expected);
             }
         }

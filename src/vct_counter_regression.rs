@@ -4,8 +4,9 @@
 //! The selected-attack test has no clock deadline: reaching its fixed node cap
 //! is a test failure, not evidence that the attack was refuted.
 
+use super::engine;
 use super::*;
-use crate::board::GameResult;
+use engine::board::GameResult;
 
 const ROOT_HISTORY: [Move; 27] = [
     112, 110, 140, 124, 152, 95, 64, 137, 83, 53, 105, 91, 126, 98, 154, 168, 151, 153, 82, 81,
@@ -42,14 +43,8 @@ fn replay(history: &[Move]) -> Board {
 }
 
 fn assert_board_restored(actual: &Board, expected: &Board) {
-    assert_eq!(
-        actual.black.words(),
-        expected.black.words()
-    );
-    assert_eq!(
-        actual.white.words(),
-        expected.white.words()
-    );
+    assert_eq!(actual.black.words(), expected.black.words());
+    assert_eq!(actual.white.words(), expected.white.words());
     assert_eq!(actual.side_to_move, expected.side_to_move);
     assert_eq!(actual.move_count, expected.move_count);
     assert_eq!(actual.last_move, expected.last_move);

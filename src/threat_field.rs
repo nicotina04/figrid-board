@@ -4,8 +4,9 @@
 //! tree may maintain it, but move ordering, pruning, eval, VCT, and qsearch
 //! must not read it until a later preregistered consumer card.
 
-use crate::board::{BitBoard, Board, LINE_PATTERN_FRONTIER_MAX, Move, NUM_CELLS, Stone};
-use crate::vct::{THREAT_KIND_COUNT, ThreatKind, classify_move_fast_with_flags};
+use super::engine;
+use engine::board::{BitBoard, Board, LINE_PATTERN_FRONTIER_MAX, Move, NUM_CELLS, Stone};
+use engine::vct::{THREAT_KIND_COUNT, ThreatKind, classify_move_fast_with_flags};
 
 const SIDES: usize = 2;
 
@@ -280,9 +281,10 @@ fn threat_kind_from_u8(kind: u8) -> ThreatKind {
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::GameResult;
-    use crate::board::to_idx;
+    use engine::GameResult;
+    use engine::board::to_idx;
 
     #[test]
     fn threat_field_query_api_smoke() {

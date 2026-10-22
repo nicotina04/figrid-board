@@ -66,8 +66,10 @@ instead, and `FIGRID_CODEBOOK_WEIGHTS` loads any other model file.
 - Korean omok rule (`RuleSet::Omok`, `INFO rule 17` — a figrid extension, not a Gomocup rule): both sides win only
   with exactly five, and neither side may play a double-three; double-fours and overlines are legal (an overline does
   not win). It uses the standard models.
-- Board sizes: 15×15 by default, 20×20 with the `board20` cargo feature (Gomocup Freestyle / Fastgame). The side is
-  a compile-time constant, so the two engines are separate builds of the same source.
+- Board sizes: both 15×15 and 20×20 in one build, using the shared `bitboard::BitBoard` trait and
+  `position::Board<B>`. `size15` and `size20` provide statically specialized search code. The pbrain adapter
+  selects the size at `START`; 20×20 play requires `codebook-eval`. The legacy `board20` feature only selects
+  the crate-root default aliases. See [the multi-size API and model routing](docs/multi-size.md).
 - Exact-length VCT analysis (`vct::search_vct_exact`): only an actual five ends a line, and the first attack can be
   pinned. Iterating the depth gives the minimal number of attacker moves to a five against every defence the prover
   considers. This is useful for puzzles and move review. The engine's own prover is unchanged.
@@ -282,13 +284,14 @@ cargo build --release --locked --target x86_64-pc-windows-msvc `
 Release preparation builds this command in two clean target directories and
 requires byte-identical executables before packaging.
 
-**20×20 engine** (Gomocup Freestyle / Fastgame): the same recipe with the
-`board20` feature, shipped as `pbrain-figrid_20.exe` beside the 15×15 binary:
+**Unified 15×15 and 20×20 engine**: a `codebook-eval` build accepts both
+`START 15` and `START 20`. One executable is sufficient; `board20` is no longer
+required for protocol support:
 
 ```powershell
 cargo build --release --locked --target x86_64-pc-windows-msvc `
     --bin pbrain-figrid `
-    --features embed-weights,codebook-eval,board20
+    --features embed-weights,codebook-eval
 ```
 
 **Portable builds with the GNU toolchain** — `-C target-cpu=native` is wrong

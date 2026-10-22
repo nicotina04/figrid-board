@@ -12,7 +12,8 @@
 //! census measures how often such nodes occur and how many moves the search
 //! actually visits there, which bounds what a sound restriction could win.
 
-use crate::board::{Board, Move, NUM_CELLS, Stone, to_rc};
+use super::engine;
+use engine::board::{Board, Move, NUM_CELLS, Stone, to_rc};
 
 /// Cells where `side` playing immediately completes a winning line.
 ///
@@ -92,10 +93,10 @@ pub enum SoundReply {
 /// filling that end defuses the threat without touching the completing cell.
 /// Renju adds forbidden-move interactions. Both are excluded rather than
 /// reasoned about.
-pub fn rule_admits_restriction(rules: crate::board::RuleSet) -> bool {
+pub fn rule_admits_restriction(rules: engine::board::RuleSet) -> bool {
     matches!(
         rules,
-        crate::board::RuleSet::Freestyle | crate::board::RuleSet::Standard
+        engine::board::RuleSet::Freestyle | engine::board::RuleSet::Standard
     )
 }
 
@@ -231,7 +232,13 @@ impl ForcedCensus {
     }
 
     pub fn report(&self) -> String {
-        let pct = |a: u64, b: u64| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
+        let pct = |a: u64, b: u64| {
+            if b == 0 {
+                0.0
+            } else {
+                100.0 * a as f64 / b as f64
+            }
+        };
         let avg = |a: u64, b: u64| if b == 0 { 0.0 } else { a as f64 / b as f64 };
         let mut s = String::new();
         s.push_str(&format!("interior_nodes        {}\n", self.interior_nodes));
@@ -282,9 +289,10 @@ impl ForcedCensus {
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::board::BOARD_SIZE;
-    use crate::board::Board;
+    use engine::board::BOARD_SIZE;
+    use engine::board::Board;
 
     #[test]
     fn sound_set_semantics() {
@@ -299,7 +307,12 @@ mod tests {
     fn open_four_has_two_five_cells() {
         let mut board = Board::new();
         // Black 7,7 / 7,8 / 7,9 / 7,10 with White answering far away.
-        let blacks = [7 * BOARD_SIZE + 7, 7 * BOARD_SIZE + 8, 7 * BOARD_SIZE + 9, 7 * BOARD_SIZE + 10];
+        let blacks = [
+            7 * BOARD_SIZE + 7,
+            7 * BOARD_SIZE + 8,
+            7 * BOARD_SIZE + 9,
+            7 * BOARD_SIZE + 10,
+        ];
         let whites = [0, 1, 2];
         for i in 0..4 {
             board.make_move(blacks[i]);
@@ -309,7 +322,11 @@ mod tests {
         }
         let mut cells = Vec::new();
         five_cells(&board, Stone::Black, &mut cells);
-        assert_eq!(cells.len(), 2, "open four completes at both ends: {cells:?}");
+        assert_eq!(
+            cells.len(),
+            2,
+            "open four completes at both ends: {cells:?}"
+        );
         assert!(cells.contains(&(7 * BOARD_SIZE + 6)));
         assert!(cells.contains(&(7 * BOARD_SIZE + 11)));
 
@@ -380,7 +397,8 @@ mod tests {
                     let dc = (rng() % 5) as i32 - 2;
                     let r = ar as i32 + dr;
                     let c = ac as i32 + dc;
-                    if !(0..BOARD_SIZE as i32).contains(&r) || !(0..BOARD_SIZE as i32).contains(&c) {
+                    if !(0..BOARD_SIZE as i32).contains(&r) || !(0..BOARD_SIZE as i32).contains(&c)
+                    {
                         continue;
                     }
                     let cell = (r as usize) * BOARD_SIZE + c as usize;
@@ -397,7 +415,10 @@ mod tests {
             }
         }
 
-        assert!(checked_positions > 500, "too few positions: {checked_positions}");
+        assert!(
+            checked_positions > 500,
+            "too few positions: {checked_positions}"
+        );
         assert!(
             positions_with_a_five > 50,
             "sample never produced five-threats ({positions_with_a_five}); the test would be vacuous"
@@ -482,7 +503,8 @@ mod tests {
                 for _try in 0..40 {
                     let r = ar as i32 + (rng() % 5) as i32 - 2;
                     let c = ac as i32 + (rng() % 5) as i32 - 2;
-                    if !(0..BOARD_SIZE as i32).contains(&r) || !(0..BOARD_SIZE as i32).contains(&c) {
+                    if !(0..BOARD_SIZE as i32).contains(&r) || !(0..BOARD_SIZE as i32).contains(&c)
+                    {
                         continue;
                     }
                     let cell = (r as usize) * BOARD_SIZE + c as usize;

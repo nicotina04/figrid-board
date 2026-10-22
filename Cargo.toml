@@ -22,6 +22,10 @@ categories = ["data-structures", "game-development"]
 include = [
     "/src/**",
     "/bin/pbrain_figrid_noru.rs",
+    "/bin/pbrain_engine.rs",
+    "/bin/pbrain15.rs",
+    "/bin/pbrain20.rs",
+    "/bin/environment.rs",
     "/bin/ngcb_convert.rs",
     "/bin/t1_eval_dump.rs",
     "/models/gomoku_v52_5stone_conv_93k.bin.gz",
@@ -33,15 +37,18 @@ include = [
     "/benches/engine.rs",
     "/tests/board_public_api_compat.rs",
     "/tests/public_codebook_asset.rs",
+    "/tests/multi_size.rs",
     "/README.md",
     "/CHANGELOG.md",
     "/docs/release-models.md",
+    "/docs/multi-size.md",
 ]
 
 [features]
 default = []
-# 20x20 board (Gomocup Freestyle / Fastgame). Builds a separate engine; the codebook evaluator is required
-# (the flat NNUE feature layout is 15x15-only).
+# Compatibility: select the 20x20 crate-root aliases. Both explicit size modules
+# and both protocol sizes are available in the same build. 20x20 play requires
+# codebook-eval because the flat NNUE feature layout remains 15x15-only.
 board20 = []
 # Embed compressed v52 NNUE weights into the binary at build time. Used for
 # the `pbrain-figrid` Gomocup submission build where Piskvork expects a

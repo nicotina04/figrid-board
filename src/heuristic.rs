@@ -9,7 +9,8 @@
 ///   - 닫힌 3: 500
 ///   - 열린 2: 100
 ///   - 닫힌 2: 10
-use crate::board::{BOARD_SIZE, BitBoard, Board, NUM_CELLS, Stone};
+use super::engine;
+use engine::board::{BOARD_SIZE, BitBoard, Board, NUM_CELLS, Stone};
 
 pub const DIR: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
 
@@ -325,8 +326,9 @@ impl HeuristicSearcher {
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::board::to_idx;
+    use engine::board::to_idx;
 
     #[test]
     fn test_heuristic_detects_open_four() {

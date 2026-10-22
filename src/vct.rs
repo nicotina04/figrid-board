@@ -18,14 +18,16 @@
 //! 승리 Threat(Five/OpenFour/DoubleFour/FourThree/DoubleThree)을 만들면 해당
 //! 수를 반환하고 즉시 성공. 그 외 Forcing Threat(ClosedFour/OpenThree)은 재귀.
 
+use super::engine;
 #[cfg(feature = "cb-p1-audit")]
+#[path = "vct/dfpn.rs"]
 pub mod dfpn;
 
-use crate::board::{
+use engine::board::{
     BOARD_SIZE, BitBoard, Board, BoardSearchState, Move, NUM_CELLS, RuleSet, Stone,
 };
-use crate::heuristic::{DIR, scan_line};
-use crate::pattern_table::{
+use engine::heuristic::{DIR, scan_line};
+use engine::pattern_table::{
     PATTERN_RARE_ID, WindowThreat, pattern_threat_after_my_play, pattern_threat_after_my_play_caro,
     pattern_threat_after_my_play_exact5, read_window, swap_mapped_id, visit_gap_four_gaps,
     window_has_gap_four, window_has_jump_three,
@@ -247,7 +249,12 @@ fn classify_move_rules_with_flags(
         // Caro: a run that ends at the board edge is not blocked there.
         if rule_set == RuleSet::Caro
             && line_threat != LineThreat::Five
-            && rule_set.line_wins_with_edges(side, info.count, open_ends, run_edge_ends(&my_tmp, row, col, dr, dc))
+            && rule_set.line_wins_with_edges(
+                side,
+                info.count,
+                open_ends,
+                run_edge_ends(&my_tmp, row, col, dr, dc),
+            )
         {
             line_threat = LineThreat::Five;
         }
@@ -1222,7 +1229,11 @@ pub fn search_vct_with_stats(board: &mut Board, cfg: &VctConfig) -> VctSearchRes
 /// smallest odd `cfg.max_depth` that proves is `2·k − 1`, where `k` is the number of attacker moves up to
 /// and including the five against the prover's best defence. `root_move` restricts the first attack to
 /// one move (it must be a forcing move the prover generates, otherwise the search fails).
-pub fn search_vct_exact(board: &mut Board, cfg: &VctConfig, root_move: Option<Move>) -> VctSearchResult {
+pub fn search_vct_exact(
+    board: &mut Board,
+    cfg: &VctConfig,
+    root_move: Option<Move>,
+) -> VctSearchResult {
     let mut flags = cfg.jump_three_flags();
     flags.five_only_terminal = true;
     flags.root_move = root_move;
@@ -2758,14 +2769,15 @@ fn tt_result_json(result: TtResult) -> &'static str {
 #[path = "vct_counter_regression.rs"]
 mod counter_regression;
 
-#[cfg(all(test, not(feature = "board20")))] // recorded 15x15 game positions
+#[cfg(test)] // recorded 15x15 game positions
 #[path = "vct_followup_regression.rs"]
 mod followup_regression;
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::board::to_idx;
+    use engine::board::to_idx;
     use noru::trainer::SimpleRng;
 
     /// GomocupJudge `ai_match.check_win` for a hypothetical move: only an
@@ -2811,10 +2823,15 @@ mod tests {
                 let (my, opp) = bb_pair(&board, side);
                 for mv in (0..NUM_CELLS).filter(|&m| board.is_empty(m)) {
                     let want = judge_reference_win(my, opp, mv, rule);
-                    assert_eq!(completes_five_at(my, opp, mv, side, rule), want, "{rule:?} completes_five_at {mv}");
+                    assert_eq!(
+                        completes_five_at(my, opp, mv, side, rule),
+                        want,
+                        "{rule:?} completes_five_at {mv}"
+                    );
                     let slow = classify_move_rules(my, opp, mv, side, rule) == ThreatKind::Five;
                     assert_eq!(slow, want, "{rule:?} classify_move_rules {mv}");
-                    let fast = classify_move_fast_with_flags(&board, mv, side, false, false) == ThreatKind::Five;
+                    let fast = classify_move_fast_with_flags(&board, mv, side, false, false)
+                        == ThreatKind::Five;
                     assert_eq!(fast, want, "{rule:?} classify_move_fast {mv}");
                     let mut after = board.clone();
                     after.make_move(mv);
@@ -2838,7 +2855,7 @@ mod tests {
             // any terminal result so we never query a finished game)
             let ply_target = 6 + rng.next_usize(45);
             for _ in 0..ply_target {
-                if !matches!(board.game_result(), crate::board::GameResult::Ongoing) {
+                if !matches!(board.game_result(), engine::board::GameResult::Ongoing) {
                     break;
                 }
                 let candidates = board.candidate_moves();
@@ -2848,7 +2865,7 @@ mod tests {
                 let idx = rng.next_usize(candidates.len());
                 board.make_move(candidates[idx]);
             }
-            if !matches!(board.game_result(), crate::board::GameResult::Ongoing) {
+            if !matches!(board.game_result(), engine::board::GameResult::Ongoing) {
                 continue;
             }
 
@@ -3590,8 +3607,9 @@ mod tests {
 
 #[cfg(test)]
 mod exact_length_tests {
+    use super::engine;
     use super::*;
-    use crate::board::to_idx;
+    use engine::board::to_idx;
 
     fn board_from(black: &[(usize, usize)], white: &[(usize, usize)]) -> Board {
         let mut b = Board::new();
@@ -3603,7 +3621,12 @@ mod exact_length_tests {
     }
 
     fn cfg(max_depth: u32) -> VctConfig {
-        VctConfig { max_depth, time_budget: None, node_budget: Some(1_000_000), ..VctConfig::default() }
+        VctConfig {
+            max_depth,
+            time_budget: None,
+            node_budget: Some(1_000_000),
+            ..VctConfig::default()
+        }
     }
 
     #[test]
@@ -3614,10 +3637,15 @@ mod exact_length_tests {
             &[(7, 2), (3, 6), (0, 0), (0, 14), (14, 0), (14, 14)],
         );
         // The engine prover stops at the double four (one attacker move).
-        assert_eq!(search_vct_with_stats(&mut b, &cfg(1)).sequence, Some(vec![to_idx(7, 6)]));
+        assert_eq!(
+            search_vct_with_stats(&mut b, &cfg(1)).sequence,
+            Some(vec![to_idx(7, 6)])
+        );
         // Exact mode needs two attacker moves (depth 2k - 1 = 3), not one.
         assert!(search_vct_exact(&mut b, &cfg(1), None).sequence.is_none());
-        let line = search_vct_exact(&mut b, &cfg(3), None).sequence.expect("double four then five");
+        let line = search_vct_exact(&mut b, &cfg(3), None)
+            .sequence
+            .expect("double four then five");
         assert_eq!(line[0], to_idx(7, 6));
         assert_eq!(line.len(), 3);
         assert_eq!(b.move_count, 12, "board restored");
@@ -3629,10 +3657,22 @@ mod exact_length_tests {
             &[(7, 3), (7, 4), (7, 5), (4, 6), (5, 6), (6, 6)],
             &[(7, 2), (3, 6), (0, 0), (0, 14), (14, 0), (14, 14)],
         );
-        assert!(search_vct_exact(&mut b, &cfg(3), Some(to_idx(7, 6))).sequence.is_some());
+        assert!(
+            search_vct_exact(&mut b, &cfg(3), Some(to_idx(7, 6)))
+                .sequence
+                .is_some()
+        );
         // A four elsewhere is answered and leaves no faster win within the same depth.
-        assert!(search_vct_exact(&mut b, &cfg(3), Some(to_idx(7, 7))).sequence.is_none());
+        assert!(
+            search_vct_exact(&mut b, &cfg(3), Some(to_idx(7, 7)))
+                .sequence
+                .is_none()
+        );
         // A quiet move is not an attack, so the pinned search fails.
-        assert!(search_vct_exact(&mut b, &cfg(9), Some(to_idx(10, 10))).sequence.is_none());
+        assert!(
+            search_vct_exact(&mut b, &cfg(9), Some(to_idx(10, 10)))
+                .sequence
+                .is_none()
+        );
     }
 }

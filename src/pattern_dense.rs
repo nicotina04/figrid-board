@@ -27,7 +27,8 @@
 //!    figrid sees at runtime; the seed and Kaiming-style scale below are
 //!    the only knobs that need to stay in sync.
 
-use crate::pattern_table::PATTERN_NUM_IDS;
+use super::engine;
+use engine::pattern_table::PATTERN_NUM_IDS;
 use noru::trainer::SimpleRng;
 use std::sync::OnceLock;
 
@@ -103,8 +104,9 @@ pub fn pool_dense_input(line_pattern_ids: &[[u16; 4]]) -> [f32; PATTERN4_DENSE_D
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::board::{Board, to_idx};
+    use engine::board::{Board, to_idx};
 
     #[test]
     fn embedding_table_has_expected_shape() {

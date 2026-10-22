@@ -1,5 +1,17 @@
 # Changes
 
+## Unreleased
+
+* Make 15x15 and 20x20 positions available together through the shared
+  `bitboard::BitBoard` trait and generic `position::Board<B>`. Keep the existing
+  two/four-word storage and statically specialized search/caches. Preserve old
+  crate-root aliases, including the `board20` default-alias selector.
+* Let one `pbrain-figrid` executable accept `START 15` and `START 20`, retaining
+  the independently trained 20x20 model and all 15x15 rule models/scales.
+  Preserve INFO before START and support size changes and RESTART in-process.
+* Fixed-depth comparison against the published 1.3.0 binaries: identical move,
+  depth, evaluation and displayed node count on all 248 positions across six configurations.
+
 ## 1.3.0 (2026-10-20)
 
 ### GitHub Windows binaries

@@ -1,6 +1,6 @@
 //! Per-move policy: a small shared-weight MLP that scores quiet candidate moves from the codebook evaluator's own
 //! incremental state. The search uses the scores to order quiet moves and to prune and reduce late ones (see
-//! [`crate::search::Searcher::set_policy_move`]).
+//! [`engine::search::Searcher::set_policy_move`]).
 //!
 //! Inputs per empty cell, side-to-move perspective (`hin = 6·dim + 21`):
 //! the cell's codebook activation `a_c` (dim), board planes (empty, own, opponent), ReLU of the four direction
@@ -12,6 +12,8 @@
 
 /// The policy shipped with figrid 1.1 (width 16, trained on strong-engine moves over a dim-32 full-vocabulary
 /// codebook). It applies to any full-vocabulary dim-32 codebook.
+#[cfg(test)]
+use super::engine;
 #[cfg(feature = "codebook-eval")]
 pub const EMBEDDED_POLICY_MOVE: &[u8] = include_bytes!("../models/policy_move_v1.pgm1");
 
@@ -29,7 +31,10 @@ fn read_f32s(bytes: &[u8], at: &mut usize, n: usize) -> Result<Vec<f32>, String>
     let end = *at + 4 * n;
     let slice = bytes.get(*at..end).ok_or("PGM1 file truncated")?;
     *at = end;
-    Ok(slice.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+    Ok(slice
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
 }
 
 fn read_u32(bytes: &[u8], at: &mut usize) -> Result<u32, String> {
@@ -47,7 +52,9 @@ impl PolicyMove {
         let hin = read_u32(bytes, &mut at)? as usize;
         let width = read_u32(bytes, &mut at)? as usize;
         if hin < 21 || (hin - 21) % 6 != 0 || width == 0 {
-            return Err(format!("PGM1 file has unsupported shape hin={hin} width={width}"));
+            return Err(format!(
+                "PGM1 file has unsupported shape hin={hin} width={width}"
+            ));
         }
         let raw = read_f32s(bytes, &mut at, width * hin)?;
         let mut w1 = vec![0f32; hin * width];
@@ -62,7 +69,14 @@ impl PolicyMove {
         if at != bytes.len() {
             return Err(format!("PGM1 file has {} trailing bytes", bytes.len() - at));
         }
-        Ok(Self { hin, width, w1, b1, w2, b2 })
+        Ok(Self {
+            hin,
+            width,
+            w1,
+            b1,
+            w2,
+            b2,
+        })
     }
 
     /// The bundled model ([`EMBEDDED_POLICY_MOVE`]).
@@ -105,9 +119,10 @@ impl PolicyMove {
 
 #[cfg(all(test, feature = "codebook-eval"))]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::board::{Board, NUM_CELLS, Stone};
-    use crate::codebook_eval::{CodebookWeights, IncrementalQuantizedCodebookEval};
+    use engine::board::{Board, NUM_CELLS, Stone};
+    use engine::codebook_eval::{CodebookWeights, IncrementalQuantizedCodebookEval};
 
     #[test]
     fn embedded_model_loads() {
@@ -131,14 +146,16 @@ mod tests {
     #[test]
     #[ignore]
     fn engine_inputs_match_pytorch() {
-        let (Ok(model), Ok(fixture), Ok(cb)) =
-            (std::env::var("PGM_MODEL"), std::env::var("PGM_FIXTURE"), std::env::var("PGM_CODEBOOK"))
-        else {
+        let (Ok(model), Ok(fixture), Ok(cb)) = (
+            std::env::var("PGM_MODEL"),
+            std::env::var("PGM_FIXTURE"),
+            std::env::var("PGM_CODEBOOK"),
+        ) else {
             return;
         };
         let pgm = PolicyMove::from_bytes(&std::fs::read(model).unwrap()).unwrap();
         let weights = CodebookWeights::from_bytes_auto(&std::fs::read(cb).unwrap()).unwrap();
-        crate::pattern_table::warm_full_vocab();
+        engine::pattern_table::warm_full_vocab();
         let q = weights.quantize_i16_s32_s64();
         let fx = std::fs::read(fixture).unwrap();
         let n = u32::from_le_bytes(fx[0..4].try_into().unwrap()) as usize;
@@ -159,7 +176,11 @@ mod tests {
             let own: Vec<usize> = (0..NUM_CELLS).filter(|&c| cells[c] == 1).collect();
             let opp: Vec<usize> = (0..NUM_CELLS).filter(|&c| cells[c] == 2).collect();
             let black_to_move = own.len() == opp.len();
-            let (black, white) = if black_to_move { (&own, &opp) } else { (&opp, &own) };
+            let (black, white) = if black_to_move {
+                (&own, &opp)
+            } else {
+                (&opp, &own)
+            };
             let mut board = Board::new();
             for i in 0..black.len().max(white.len()) {
                 if i < black.len() {
@@ -191,7 +212,9 @@ mod tests {
             }
             top_agree += (best_e.1 == best_t.1) as usize;
         }
-        eprintln!("pgm parity: {n} positions, {scored} quiet cells, max |logit diff| {max_err:.3e}, quiet argmax agree {top_agree}/{n}");
+        eprintln!(
+            "pgm parity: {n} positions, {scored} quiet cells, max |logit diff| {max_err:.3e}, quiet argmax agree {top_agree}/{n}"
+        );
         assert!(top_agree * 10 >= n * 9);
     }
 }

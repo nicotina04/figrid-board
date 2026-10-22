@@ -4,8 +4,9 @@
 //! so the unchanged engine produces reviewable negative-control observations.
 //! A node-budget stop is inconclusive and never counts as a repaired proof.
 
+use super::engine;
 use super::*;
-use crate::board::GameResult;
+use engine::board::GameResult;
 
 const HISTORY_68: [Move; 31] = [
     112, 140, 127, 124, 125, 153, 170, 201, 184, 156, 172, 138, 168, 169, 137, 108, 92, 155, 157,
@@ -98,14 +99,8 @@ fn transform(cell: Move, symmetry: usize) -> Move {
 
 fn restoration(actual: &Board, expected: &Board) -> Value {
     let fields = [
-        (
-            "black",
-            actual.black.words() == expected.black.words(),
-        ),
-        (
-            "white",
-            actual.white.words() == expected.white.words(),
-        ),
+        ("black", actual.black.words() == expected.black.words()),
+        ("white", actual.white.words() == expected.white.words()),
         ("side_to_move", actual.side_to_move == expected.side_to_move),
         ("move_count", actual.move_count == expected.move_count),
         ("last_move", actual.last_move == expected.last_move),
@@ -180,6 +175,9 @@ fn defenses_for_path(
 
 #[test]
 fn both_recorded_counters_are_present_across_d4_and_classification_paths() {
+    if engine::BOARD_SIZE != 15 {
+        return;
+    }
     let mut failures = Vec::new();
     for fixture in fixtures() {
         let mut rows = Vec::new();
@@ -364,6 +362,9 @@ fn valid_refutation(probe: &Value) -> bool {
 
 #[test]
 fn both_selected_attacks_and_actual_counter_positions_are_refuted_without_stops() {
+    if engine::BOARD_SIZE != 15 {
+        return;
+    }
     let mut failures = Vec::new();
     for fixture in fixtures() {
         let plain = selected_and_probe(&fixture, false);
@@ -393,6 +394,9 @@ fn both_selected_attacks_and_actual_counter_positions_are_refuted_without_stops(
 
 #[test]
 fn public_root_search_does_not_return_the_certified_bad_attack() {
+    if engine::BOARD_SIZE != 15 {
+        return;
+    }
     let mut failures = Vec::new();
     for fixture in fixtures() {
         let mut board = replay(fixture.history);
@@ -448,6 +452,9 @@ fn sidecar_snapshot(board: &Board, state: &BoardSearchState) -> SidecarSnapshot 
 
 #[test]
 fn product_sidecar_entry_preserves_all_three_counter_refutations_and_caches() {
+    if engine::BOARD_SIZE != 15 {
+        return;
+    }
     const HISTORY_139: [Move; 27] = [
         112, 110, 140, 124, 152, 95, 64, 137, 83, 53, 105, 91, 126, 98, 154, 168, 151, 153, 82, 81,
         109, 123, 138, 169, 185, 139, 107,

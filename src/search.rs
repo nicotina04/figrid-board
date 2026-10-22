@@ -1,32 +1,33 @@
-use crate::board::RuleSet;
+use super::engine;
+use engine::board::RuleSet;
 /// ????????ㅻ깹???????????????袁ｋ쨨?? ??????轅붽틓?????(NNUE ???)
 ///
 /// - ?????獄쏅챶留덌┼???????????(Iterative Deepening)
 /// - ????????ㅻ깹???????????????袁ｋ쨨?? ???????ル???????븐뼐???????????筌뤾퍓愿?????????ъ몴??/// - ??????????뀀?????? ????????????????????遺얘턁????????????(4??????? ???????ル????)
 /// - ?????????+ ????????⑤벡????????????????????????紐껊짍
 /// - ??????????????
-use crate::board::{
+use engine::board::{
     BOARD_SIZE, BitBoard, Board, BoardSearchState, GameResult, Move, NUM_CELLS, Stone,
 };
 #[cfg(feature = "codebook-eval")]
-use crate::codebook_eval::{
+use engine::codebook_eval::{
     CodebookWeights, IncrementalCodebookEval, IncrementalQuantizedCodebookEval,
     QuantizedCodebookAccess, QuantizedCodebookWeights,
 };
-use crate::eval::IncrementalEval;
+use engine::eval::IncrementalEval;
 #[cfg(feature = "codebook-eval")]
-use crate::factored_codebook::FactoredQuantizedCodebookWeights;
-use crate::heuristic::{DIR, scan_line};
-use crate::threat_field::{IncrementalThreatField, ThreatFieldUpdateMode};
-use crate::transposition::{Bound, TranspositionTable, TtStats};
-use crate::vct::{
+use engine::factored_codebook::FactoredQuantizedCodebookWeights;
+use engine::heuristic::{DIR, scan_line};
+use engine::policy_move::PolicyMove;
+use engine::threat_field::{IncrementalThreatField, ThreatFieldUpdateMode};
+use engine::transposition::{Bound, TranspositionTable, TtStats};
+use engine::vct::{
     THREAT_KIND_COUNT, ThreatKind, VctConfig, classify_move_fast, search_vct,
     search_vct_with_board_search_state,
 };
 #[cfg(feature = "codebook-eval")]
-use crate::white_root_order::WhiteRootOrder;
+use engine::white_root_order::WhiteRootOrder;
 use noru::network::NnueWeights;
-use crate::policy_move::PolicyMove;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -110,14 +111,13 @@ impl PolicyOrderTable {
             return Err(format!("{path}: bad PCB1 header"));
         }
         let n = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-        let full_vocab = n == crate::pattern_table::FULL_PATTERN_NUM_IDS;
-        if bytes.len() != 12 + n * 8
-            || (!full_vocab && n != crate::pattern_table::PATTERN_NUM_IDS)
+        let full_vocab = n == engine::pattern_table::FULL_PATTERN_NUM_IDS;
+        if bytes.len() != 12 + n * 8 || (!full_vocab && n != engine::pattern_table::PATTERN_NUM_IDS)
         {
             return Err(format!("{path}: bad PCB1 length (n={n})"));
         }
         if full_vocab {
-            crate::pattern_table::warm_full_vocab();
+            engine::pattern_table::warm_full_vocab();
         }
         let read = |off: usize| -> Vec<f32> {
             (0..n)
@@ -148,9 +148,9 @@ impl PolicyOrderTable {
         let white_to_move = board.side_to_move == Stone::White;
         let mut s = 0.0f32;
         if self.full_vocab {
-            let ids = crate::pattern_table::full_ids_for_cell(&board.black, &board.white, mv);
+            let ids = engine::pattern_table::full_ids_for_cell(&board.black, &board.white, mv);
             for &id in &ids {
-                let swapped = crate::pattern_table::full_swap_id(id);
+                let swapped = engine::pattern_table::full_swap_id(id);
                 let (my_id, opp_id) = if white_to_move {
                     (swapped, id)
                 } else {
@@ -162,9 +162,9 @@ impl PolicyOrderTable {
             let ids = board.line_pattern_ids[mv];
             for &id in &ids {
                 let (my_id, opp_id) = if white_to_move {
-                    (crate::pattern_table::swap_mapped_id(id), id)
+                    (engine::pattern_table::swap_mapped_id(id), id)
                 } else {
-                    (id, crate::pattern_table::swap_mapped_id(id))
+                    (id, engine::pattern_table::swap_mapped_id(id))
                 };
                 s += self.attack[my_id as usize] + self.defense[opp_id as usize];
             }
@@ -813,7 +813,8 @@ impl<W: QuantizedCodebookAccess> SearchEvalState for QuantizedCodebookEvalState<
     }
 
     fn policy_move_inputs(&self, board: &Board, cell: usize, out: &mut [f32]) {
-        self.inc.policy_move_inputs_with_access(board, self.weights, cell, 0, 0, out);
+        self.inc
+            .policy_move_inputs_with_access(board, self.weights, cell, 0, 0, out);
     }
 
     fn eval(&mut self, board: &Board, profile_enabled: bool) -> (i32, EvalStateStepProfile) {
@@ -933,8 +934,8 @@ pub struct Searcher {
     /// P4-R1: restrict the move list at nodes whose reply set the rules fix.
     use_forced_restriction: bool,
     /// P4-R0 forced-node census. Counting only; never affects search output.
-    pub census: crate::p4r0_census::ForcedCensus,
-    census_scratch: Vec<crate::board::Move>,
+    pub census: engine::p4r0_census::ForcedCensus,
+    census_scratch: Vec<engine::board::Move>,
 }
 
 impl Searcher {
@@ -988,7 +989,7 @@ impl Searcher {
             #[cfg(feature = "codebook-eval")]
             white_root_order_cache: None,
             use_forced_restriction: forced_restriction_enabled_by_env(),
-            census: crate::p4r0_census::ForcedCensus::default(),
+            census: engine::p4r0_census::ForcedCensus::default(),
             census_scratch: Vec::with_capacity(16),
         }
     }
@@ -1143,7 +1144,9 @@ impl Searcher {
 
     #[inline]
     fn stop_requested(&self) -> bool {
-        self.stop_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed))
+        self.stop_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
     }
 
     fn report_progress(&self, result: &SearchResult) {
@@ -1864,7 +1867,9 @@ impl Searcher {
             return result;
         }
         self.enable_main_search_candidate_frontier(board);
-        let scale = self.codebook_eval_scale_override.unwrap_or_else(codebook_eval_scale);
+        let scale = self
+            .codebook_eval_scale_override
+            .unwrap_or_else(codebook_eval_scale);
         let mut inc = CodebookEvalState::new(board, codebook_weights, scale);
         let result = self.search_with_eval_state(board, ordering_weights, &mut inc, max_depth);
         self.end_board_search_state(board);
@@ -1930,7 +1935,9 @@ impl Searcher {
         self.enable_main_search_candidate_frontier(board);
         self.prepare_white_root_order_cache(board, codebook_weights)
             .unwrap_or_else(|error| panic!("invalid white root ordering state: {error}"));
-        let scale = self.codebook_eval_scale_override.unwrap_or_else(codebook_eval_scale);
+        let scale = self
+            .codebook_eval_scale_override
+            .unwrap_or_else(codebook_eval_scale);
         let mut inc = QuantizedCodebookEvalState::new(
             board,
             codebook_weights,
@@ -1977,8 +1984,8 @@ impl Searcher {
             // TT prefetch ??same trick as in alpha_beta: warm the child's
             // TT bucket while make_move + accumulator delta runs.
             let next_zob = board.zobrist
-                ^ crate::board::zobrist_stone_key(board.side_to_move, mv)
-                ^ crate::board::ZOBRIST_SIDE;
+                ^ engine::board::zobrist_stone_key(board.side_to_move, mv)
+                ^ engine::board::ZOBRIST_SIDE;
             let profile_start = self.profile_start();
             self.tt.prefetch(next_zob);
             self.profile_add(SearchProfileBucket::Tt, profile_start);
@@ -2000,8 +2007,13 @@ impl Searcher {
             let score = if move_idx == 0 {
                 -self.alpha_beta(board, weights, inc, depth - 1, 1, -beta, -alpha)
             } else {
-                let reduction =
-                    lmr_reduction(depth, move_idx, is_forcing, is_killer, self.policy_sorted_node(0).then_some(move_idx));
+                let reduction = lmr_reduction(
+                    depth,
+                    move_idx,
+                    is_forcing,
+                    is_killer,
+                    self.policy_sorted_node(0).then_some(move_idx),
+                );
                 let reduced_depth = (depth - 1).saturating_sub(reduction);
                 let mut null =
                     -self.alpha_beta(board, weights, inc, reduced_depth, 1, -alpha - 1, -alpha);
@@ -2178,8 +2190,8 @@ impl Searcher {
         // LMR that reduced forcing moves and cost -43%p.
         let mut forced_only: Option<Move> = None;
         if self.use_forced_restriction {
-            use crate::p4r0_census::SoundReply;
-            match crate::p4r0_census::sound_reply(board, &mut self.census_scratch) {
+            use engine::p4r0_census::SoundReply;
+            match engine::p4r0_census::sound_reply(board, &mut self.census_scratch) {
                 SoundReply::NotForced => {}
                 SoundReply::WinNow(mv) | SoundReply::OnlyBlock(mv) => forced_only = Some(mv),
                 SoundReply::Lost => {
@@ -2331,9 +2343,9 @@ impl Searcher {
         };
         if self.census.enabled {
             let observed = match bound {
-                Bound::Upper => crate::p4r0_census::NodeBound::All,
-                Bound::Lower => crate::p4r0_census::NodeBound::Cut,
-                Bound::Exact => crate::p4r0_census::NodeBound::Exact,
+                Bound::Upper => engine::p4r0_census::NodeBound::All,
+                Bound::Lower => engine::p4r0_census::NodeBound::Cut,
+                Bound::Exact => engine::p4r0_census::NodeBound::Exact,
             };
             self.census.record(census_forced, searched_moves, observed);
         }
@@ -2386,7 +2398,12 @@ impl Searcher {
         let policy_scored = ply < 64 && self.policy_valid[ply];
         let policy_rank = if policy_scored { quiet_idx } else { move_idx };
 
-        if !is_pv && !is_forcing && !is_killer && policy_scored && policy_rank >= POLICY_MOVE_PRUNE_RANK {
+        if !is_pv
+            && !is_forcing
+            && !is_killer
+            && policy_scored
+            && policy_rank >= POLICY_MOVE_PRUNE_RANK
+        {
             return false;
         }
 
@@ -2404,8 +2421,8 @@ impl Searcher {
         }
 
         let next_zob = board.zobrist
-            ^ crate::board::zobrist_stone_key(board.side_to_move, mv)
-            ^ crate::board::ZOBRIST_SIDE;
+            ^ engine::board::zobrist_stone_key(board.side_to_move, mv)
+            ^ engine::board::ZOBRIST_SIDE;
         let profile_start = self.profile_start();
         self.tt.prefetch(next_zob);
         self.profile_add(SearchProfileBucket::Tt, profile_start);
@@ -2943,7 +2960,13 @@ impl Searcher {
         Some((score, mv, is_forcing))
     }
     /// Score this node's quiet moves with the per-move policy, or mark the ply as unscored.
-    fn prepare_policy_move<E: SearchEvalState>(&mut self, board: &Board, inc: &mut E, ply: usize, depth: u32) {
+    fn prepare_policy_move<E: SearchEvalState>(
+        &mut self,
+        board: &Board,
+        inc: &mut E,
+        ply: usize,
+        depth: u32,
+    ) {
         if ply >= 64 {
             return;
         }
@@ -2952,7 +2975,9 @@ impl Searcher {
         if depth < POLICY_MOVE_MIN_DEPTH {
             return;
         }
-        let Some(model) = self.policy_move.take() else { return };
+        let Some(model) = self.policy_move.take() else {
+            return;
+        };
         if inc.policy_move_prepare(model.codebook_dim()) {
             let stm = board.side_to_move;
             self.policy_input.resize(model.input_len(), 0.0);
@@ -2967,7 +2992,8 @@ impl Searcher {
                     continue;
                 }
                 inc.policy_move_inputs(board, c, &mut self.policy_input);
-                self.policy_logits[ply][c] = model.score(&self.policy_input, &mut self.policy_hidden);
+                self.policy_logits[ply][c] =
+                    model.score(&self.policy_input, &mut self.policy_hidden);
             }
             self.policy_valid[ply] = true;
         }
@@ -2977,7 +3003,8 @@ impl Searcher {
     /// Whether the current node at `ply` has policy-sorted quiet moves (P-CB2 table with `NORU_POLICY_REDUCE`, or the
     /// per-move policy), which switches LMP and LMR to the policy-rank schedule.
     fn policy_sorted_node(&self, ply: usize) -> bool {
-        (policy_reduce_enabled() && policy_order_table().is_some()) || (ply < 64 && self.policy_valid[ply])
+        (policy_reduce_enabled() && policy_order_table().is_some())
+            || (ply < 64 && self.policy_valid[ply])
     }
 
     fn order_moves(&self, board: &Board, ply: usize) -> Vec<(Move, bool)> {
@@ -3028,8 +3055,8 @@ impl Searcher {
         mv: Move,
         ply: usize,
         side: usize,
-        my: &crate::board::BitBoard,
-        opp: &crate::board::BitBoard,
+        my: &engine::board::BitBoard,
+        opp: &engine::board::BitBoard,
         board: &Board,
     ) -> (i32, bool) {
         let row = (mv / BOARD_SIZE) as i32;
@@ -3218,7 +3245,13 @@ fn is_forcing_kind(kind: ThreatKind) -> bool {
 /// ???????ル??????/ killer / ??LMR_MIN_MOVE_IDX ?????/ ??? depth??0 (????????ш끽踰椰??????????.
 /// ??????forcing tier 0 ????? depth/idx??????????산뭐???1~2 ply.
 /// reduction?? depth-2????? ??????癲ル슢?????cap (qsearch ????븐뼐??????????롮쾸?椰?????????獄쏅챶留??逆곷틳源븃떋?).
-fn lmr_reduction(depth: u32, move_idx: usize, is_forcing: bool, is_killer: bool, policy_rank: Option<usize>) -> u32 {
+fn lmr_reduction(
+    depth: u32,
+    move_idx: usize,
+    is_forcing: bool,
+    is_killer: bool,
+    policy_rank: Option<usize>,
+) -> u32 {
     if depth < LMR_MIN_DEPTH || move_idx < LMR_MIN_MOVE_IDX || is_forcing || is_killer {
         return 0;
     }
@@ -3261,6 +3294,7 @@ fn threat_priority(kind: ThreatKind, defending: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
 
     #[test]
@@ -3277,7 +3311,11 @@ mod tests {
             classify_move_fast(&board, square, Stone::White)
         ));
         let forcing_of = |searcher: &Searcher| {
-            searcher.order_moves(&board, 0).into_iter().find(|&(mv, _)| mv == square).map(|(_, f)| f)
+            searcher
+                .order_moves(&board, 0)
+                .into_iter()
+                .find(|&(mv, _)| mv == square)
+                .map(|(_, f)| f)
         };
         let mut searcher = Searcher::new();
         assert_eq!(forcing_of(&searcher), Some(true));
@@ -3305,8 +3343,14 @@ mod tests {
             [5, 9, 17, 33],
             [60, 61, 62, 63],
         ];
-        let before: Vec<f32> = samples.iter().map(|&ids| sum8(&orig_a, &orig_d, ids)).collect();
-        assert!(before.iter().any(|s| s.abs() >= 30.0), "fixture must saturate");
+        let before: Vec<f32> = samples
+            .iter()
+            .map(|&ids| sum8(&orig_a, &orig_d, ids))
+            .collect();
+        assert!(
+            before.iter().any(|s| s.abs() >= 30.0),
+            "fixture must saturate"
+        );
 
         let k = desaturate_policy_tables(&mut attack, &mut defense).expect("must rescale");
         assert!((k - 8.0 * 45.0 / 29.0).abs() < 1e-9);
@@ -3315,14 +3359,21 @@ mod tests {
             .chain(defense.iter())
             .fold(0.0f32, |m, &v| m.max(v.abs()));
         assert!(8.0 * max_after < 30.0, "8*max after = {}", 8.0 * max_after);
-        let after: Vec<f32> = samples.iter().map(|&ids| sum8(&attack, &defense, ids)).collect();
+        let after: Vec<f32> = samples
+            .iter()
+            .map(|&ids| sum8(&attack, &defense, ids))
+            .collect();
         for i in 0..samples.len() {
             for j in 0..samples.len() {
                 if before[i] < before[j] {
                     assert!(after[i] < after[j], "order flipped for samples {i},{j}");
                 }
             }
-            assert!(after[i].abs() < 30.0, "sample {i} still saturates: {}", after[i]);
+            assert!(
+                after[i].abs() < 30.0,
+                "sample {i} still saturates: {}",
+                after[i]
+            );
         }
 
         // Non-saturating table: max|entry| = 3 -> 24 < 30, bit-identical.
@@ -3331,14 +3382,24 @@ mod tests {
         small_a[0] = 3.0;
         let (ref_a, ref_d) = (small_a.clone(), small_d.clone());
         assert!(desaturate_policy_tables(&mut small_a, &mut small_d).is_none());
-        assert!(small_a.iter().zip(&ref_a).all(|(x, y)| x.to_bits() == y.to_bits()));
-        assert!(small_d.iter().zip(&ref_d).all(|(x, y)| x.to_bits() == y.to_bits()));
+        assert!(
+            small_a
+                .iter()
+                .zip(&ref_a)
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+        );
+        assert!(
+            small_d
+                .iter()
+                .zip(&ref_d)
+                .all(|(x, y)| x.to_bits() == y.to_bits())
+        );
     }
 
-    use crate::board::{Board, to_idx};
+    use engine::board::{Board, to_idx};
     #[cfg(feature = "codebook-eval")]
-    use crate::factored_codebook::PackedCodebookArtifact;
-    use crate::features::GOMOKU_NNUE_CONFIG;
+    use engine::factored_codebook::PackedCodebookArtifact;
+    use engine::features::GOMOKU_NNUE_CONFIG;
 
     #[cfg(feature = "codebook-eval")]
     fn install_white_root_order_entries(
@@ -3572,6 +3633,24 @@ mod tests {
         let _ = searcher.search_codebook_eval(&mut board, &ordering, &codebook, 1, None);
     }
 
+    // Flat NNUE inputs are 15x15-only; test the production codebook path on 20x20.
+    impl Searcher {
+        fn search_for_test(
+            &mut self,
+            board: &mut Board,
+            weights: &NnueWeights,
+            depth: u32,
+            time: Option<Duration>,
+        ) -> SearchResult {
+            #[cfg(feature = "codebook-eval")]
+            if BOARD_SIZE == 20 {
+                let codebook = CodebookWeights::deterministic(16, 8).quantize_i16_s32_s64();
+                return self.search_codebook_eval_quantized(board, weights, &codebook, depth, time);
+            }
+            self.search(board, weights, depth, time)
+        }
+    }
+
     fn quiet_board() -> Board {
         let mut board = Board::new();
         for (r, c) in [(7, 7), (8, 8), (6, 8), (8, 6)] {
@@ -3582,22 +3661,38 @@ mod tests {
 
     #[test]
     fn progress_reports_every_completed_depth_in_order() {
+        #[cfg(not(feature = "codebook-eval"))]
+        if BOARD_SIZE == 20 {
+            return;
+        }
         let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = Arc::clone(&seen);
         let mut searcher = Searcher::new();
         searcher.set_use_root_vct_for_audit(false);
-        searcher.set_progress_callback(Some(Arc::new(move |p: &SearchProgress| sink.lock().unwrap().push(*p))));
+        searcher.set_progress_callback(Some(Arc::new(move |p: &SearchProgress| {
+            sink.lock().unwrap().push(*p)
+        })));
         let mut board = quiet_board();
-        let result = searcher.search(&mut board, &weights, 4, None);
+        let result = searcher.search_for_test(&mut board, &weights, 4, None);
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.iter().map(|p| p.depth).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            seen.iter().map(|p| p.depth).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
         let last = seen.last().unwrap();
-        assert_eq!((last.best_move, last.score), (result.best_move, result.score));
+        assert_eq!(
+            (last.best_move, last.score),
+            (result.best_move, result.score)
+        );
     }
 
     #[test]
     fn stop_flag_ends_an_unbounded_search() {
+        #[cfg(not(feature = "codebook-eval"))]
+        if BOARD_SIZE == 20 {
+            return;
+        }
         let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
         let flag = Arc::new(AtomicBool::new(false));
         let mut searcher = Searcher::new();
@@ -3610,14 +3705,23 @@ mod tests {
         });
         let started = Instant::now();
         let mut board = quiet_board();
-        let result = searcher.search(&mut board, &weights, 60, None);
+        let result = searcher.search_for_test(&mut board, &weights, 60, None);
         t.join().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(5), "stopped after {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "stopped after {:?}",
+            started.elapsed()
+        );
         assert!(result.best_move.is_some() && result.depth >= 1 && result.depth < 60);
         // Without a flag (or with it cleared) the same search runs to its depth limit.
         flag.store(false, Ordering::Relaxed);
         let mut board = quiet_board();
-        assert_eq!(searcher.search(&mut board, &weights, 3, None).depth, 3);
+        assert_eq!(
+            searcher
+                .search_for_test(&mut board, &weights, 3, None)
+                .depth,
+            3
+        );
     }
 
     #[test]
@@ -3649,15 +3753,23 @@ mod tests {
 
     #[test]
     fn test_search_depth_1() {
+        #[cfg(not(feature = "codebook-eval"))]
+        if BOARD_SIZE == 20 {
+            return;
+        }
         let mut board = Board::new();
         let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
         let mut searcher = Searcher::new();
-        let result = searcher.search(&mut board, &weights, 1, None);
+        let result = searcher.search_for_test(&mut board, &weights, 1, None);
         assert!(result.best_move.is_some());
     }
 
     #[test]
     fn search_resynchronizes_retained_sidecar_for_replacement_board() {
+        #[cfg(not(feature = "codebook-eval"))]
+        if BOARD_SIZE == 20 {
+            return;
+        }
         let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
         let mut accelerated = Searcher::new();
         accelerated.set_use_packed_line_windows(true);
@@ -3665,7 +3777,7 @@ mod tests {
 
         // Seed a retained A2 sidecar for a different root.
         let mut first_root = Board::new();
-        let _ = accelerated.search(&mut first_root, &weights, 1, None);
+        let _ = accelerated.search_for_test(&mut first_root, &weights, 1, None);
         assert!(
             accelerated
                 .board_search_state
@@ -3681,8 +3793,8 @@ mod tests {
         let mut baseline_board = replacement.clone();
         let mut baseline_searcher = Searcher::new();
 
-        let actual = accelerated.search(&mut replacement, &weights, 2, None);
-        let expected = baseline_searcher.search(&mut baseline_board, &weights, 2, None);
+        let actual = accelerated.search_for_test(&mut replacement, &weights, 2, None);
+        let expected = baseline_searcher.search_for_test(&mut baseline_board, &weights, 2, None);
 
         assert_eq!(actual.best_move, expected.best_move);
         assert_eq!(actual.score, expected.score);
@@ -3724,6 +3836,10 @@ mod tests {
 
     #[test]
     fn d4_hash_sidecar_is_search_transparent_and_retained() {
+        #[cfg(not(feature = "codebook-eval"))]
+        if BOARD_SIZE == 20 {
+            return;
+        }
         let weights = NnueWeights::zeros(GOMOKU_NNUE_CONFIG);
         let mut root = Board::new();
         for mv in [
@@ -3743,7 +3859,7 @@ mod tests {
         let mut off = Searcher::new();
         assert!(!off.d4_hash_sidecar_requested());
         off.set_use_root_vct_for_audit(false);
-        let off_result = off.search(&mut off_board, &weights, 2, None);
+        let off_result = off.search_for_test(&mut off_board, &weights, 2, None);
         assert!(
             off.board_search_state.is_none(),
             "default search must not allocate a sidecar"
@@ -3752,7 +3868,7 @@ mod tests {
         let mut on = Searcher::new();
         on.set_use_d4_hash_sidecar(true);
         on.set_use_root_vct_for_audit(false);
-        let on_result = on.search(&mut on_board, &weights, 2, None);
+        let on_result = on.search_for_test(&mut on_board, &weights, 2, None);
 
         assert_eq!(on_result.best_move, off_result.best_move);
         assert_eq!(on_result.score, off_result.score);
@@ -3782,7 +3898,7 @@ mod tests {
         assert!(retained.d4_hash_enabled());
         assert_eq!(
             retained.d4_hashes(&on_board),
-            Some(*crate::d4_hash::D4HashState::rebuild(&on_board).hashes())
+            Some(*engine::d4_hash::D4HashState::rebuild(&on_board).hashes())
         );
         assert!(!retained.packed_line_windows_enabled());
         assert!(!retained.candidate_frontier_enabled());
@@ -3796,7 +3912,7 @@ impl Searcher {
         &mut self,
         board: &mut Board,
         ordering: &NnueWeights,
-        codebook: &crate::codebook_eval::ExactI8Codebook,
+        codebook: &engine::codebook_eval::ExactI8Codebook,
         depth: u32,
         time: Option<Duration>,
     ) -> SearchResult {

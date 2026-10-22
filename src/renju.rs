@@ -8,11 +8,12 @@
 //! itself not forbidden (checked recursively). Precedence follows the Gomocup judge: five, double-four,
 //! double-three, overline. The board edge blocks like a white stone.
 //!
-//! **Omok** ([`RuleSet::Omok`](crate::board::RuleSet::Omok)): either side may not play a double-three; double-fours
+//! **Omok** ([`RuleSet::Omok`](engine::board::RuleSet::Omok)): either side may not play a double-three; double-fours
 //! and overlines are allowed (an overline simply does not win). A three is defined as in Renju for the side to move
 //! (exact-five straight four), and its completion only counts if that completion is not itself a double-three.
 
-use crate::board::{BOARD_SIZE, BitBoard, Move};
+use super::engine;
+use engine::board::{BOARD_SIZE, BitBoard, Move};
 use std::collections::HashMap;
 
 const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
@@ -40,13 +41,21 @@ enum Variant {
 
 /// Whether black may not play `mv` (an empty cell) under Renju.
 pub fn is_forbidden(black: &BitBoard, white: &BitBoard, mv: Move) -> bool {
-    matches!(foul(black, white, mv), Foul::DoubleFour | Foul::DoubleThree | Foul::Overline)
+    matches!(
+        foul(black, white, mv),
+        Foul::DoubleFour | Foul::DoubleThree | Foul::Overline
+    )
 }
 
 /// Classification of black playing the empty cell `mv` under Renju.
 pub fn foul(black: &BitBoard, white: &BitBoard, mv: Move) -> Foul {
     // `HashMap::new` does not allocate; the memo only fills (and allocates) once a double-three needs recursion.
-    Ctx { white, memo: HashMap::new(), variant: Variant::Renju }.classify(black, mv)
+    Ctx {
+        white,
+        memo: HashMap::new(),
+        variant: Variant::Renju,
+    }
+    .classify(black, mv)
 }
 
 /// Whether the side owning `own` may not play `mv` (an empty cell) under the omok rule: a double-three.
@@ -57,14 +66,19 @@ pub fn is_forbidden_omok(own: &BitBoard, opp: &BitBoard, mv: Move) -> bool {
 /// Classification of the side owning `own` playing the empty cell `mv` under the omok rule: `Five`, `DoubleThree`
 /// or `None` (double-fours and overlines are legal there).
 pub fn omok_foul(own: &BitBoard, opp: &BitBoard, mv: Move) -> Foul {
-    Ctx { white: opp, memo: HashMap::new(), variant: Variant::Omok }.classify(own, mv)
+    Ctx {
+        white: opp,
+        memo: HashMap::new(),
+        variant: Variant::Omok,
+    }
+    .classify(own, mv)
 }
 
 /// One top-level query: white is fixed, recursive sub-queries (is this three's completion forbidden?) are memoised
 /// on (black stones, cell) so shared sub-positions are solved once.
 struct Ctx<'a> {
     white: &'a BitBoard,
-    memo: HashMap<([u128; crate::board::BITBOARD_WORDS], Move), Foul>,
+    memo: HashMap<([u128; engine::board::BITBOARD_WORDS], Move), Foul>,
     variant: Variant,
 }
 
@@ -88,7 +102,9 @@ impl Ctx<'_> {
         if lines.iter().any(|l| run_len(l, R) == 5) {
             return Foul::Five;
         }
-        if self.variant == Variant::Renju && lines.iter().map(fours_through_center).sum::<u32>() >= 2 {
+        if self.variant == Variant::Renju
+            && lines.iter().map(fours_through_center).sum::<u32>() >= 2
+        {
             return Foul::DoubleFour;
         }
         // Candidate completions per line, without recursion; a double-three needs two lines with candidates.
@@ -103,7 +119,8 @@ impl Ctx<'_> {
                 remaining -= 1;
                 let (dr, dc) = DIRS[d];
                 let real = c.offs[..c.n].iter().any(|&q| {
-                    let qmv = ((row + dr * (q - R)) as usize) * BOARD_SIZE + (col + dc * (q - R)) as usize;
+                    let qmv = ((row + dr * (q - R)) as usize) * BOARD_SIZE
+                        + (col + dc * (q - R)) as usize;
                     let f = self.foul(&b, qmv);
                     match self.variant {
                         Variant::Renju => f == Foul::None,
@@ -150,7 +167,14 @@ fn straight_four_completions(l: &[u8; LEN]) -> Completions {
     c
 }
 
-fn read_line(black: &BitBoard, white: &BitBoard, row: i32, col: i32, dr: i32, dc: i32) -> [u8; LEN] {
+fn read_line(
+    black: &BitBoard,
+    white: &BitBoard,
+    row: i32,
+    col: i32,
+    dr: i32,
+    dc: i32,
+) -> [u8; LEN] {
     let mut l = [BLOCK; LEN];
     for (i, cell) in l.iter_mut().enumerate() {
         let off = i as i32 - R;
@@ -172,7 +196,11 @@ fn read_line(black: &BitBoard, white: &BitBoard, row: i32, col: i32, dr: i32, dc
 
 #[inline]
 fn at(l: &[u8; LEN], i: i32) -> u8 {
-    if (0..LEN as i32).contains(&i) { l[i as usize] } else { BLOCK }
+    if (0..LEN as i32).contains(&i) {
+        l[i as usize]
+    } else {
+        BLOCK
+    }
 }
 
 /// Length of the contiguous black run through index `i` (0 when `i` is not black).
@@ -213,7 +241,12 @@ fn fours_through_center(l: &[u8; LEN]) -> u32 {
                 _ => {}
             }
         }
-        if blacks == 4 && empties == 1 && at(l, s - 1) != BLACK && at(l, s + 5) != BLACK && !seen[..n].contains(&mask) {
+        if blacks == 4
+            && empties == 1
+            && at(l, s - 1) != BLACK
+            && at(l, s + 5) != BLACK
+            && !seen[..n].contains(&mask)
+        {
             seen[n] = mask;
             n += 1;
         }
@@ -231,18 +264,28 @@ fn is_straight_four_through(t: &[u8; LEN], a: i32, b: i32) -> bool {
         lo -= 1;
     }
     let hi = lo + 3;
-    b >= lo && b <= hi && at(t, lo - 1) == EMPTY && at(t, hi + 1) == EMPTY && at(t, lo - 2) != BLACK && at(t, hi + 2) != BLACK
+    b >= lo
+        && b <= hi
+        && at(t, lo - 1) == EMPTY
+        && at(t, hi + 1) == EMPTY
+        && at(t, lo - 2) != BLACK
+        && at(t, hi + 2) != BLACK
 }
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::board::to_idx;
+    use engine::board::to_idx;
 
     fn board(stones: &[(usize, usize, bool)]) -> (BitBoard, BitBoard) {
         let (mut b, mut w) = (BitBoard::EMPTY, BitBoard::EMPTY);
         for &(r, c, is_black) in stones {
-            if is_black { b.set(to_idx(r, c)) } else { w.set(to_idx(r, c)) }
+            if is_black {
+                b.set(to_idx(r, c))
+            } else {
+                w.set(to_idx(r, c))
+            }
         }
         (b, w)
     }
@@ -256,17 +299,43 @@ mod tests {
 
     #[test]
     fn four_three_is_allowed() {
-        let (b, w) = board(&[(7, 4, true), (7, 5, true), (7, 6, true), (5, 7, true), (6, 7, true)]);
+        let (b, w) = board(&[
+            (7, 4, true),
+            (7, 5, true),
+            (7, 6, true),
+            (5, 7, true),
+            (6, 7, true),
+        ]);
         assert_eq!(foul(&b, &w, to_idx(7, 7)), Foul::None);
     }
 
     #[test]
     fn double_four_and_overline_are_forbidden() {
-        let (b, w) = board(&[(7, 3, true), (7, 4, true), (7, 5, true), (3, 7, true), (4, 7, true), (5, 7, true)]);
+        let (b, w) = board(&[
+            (7, 3, true),
+            (7, 4, true),
+            (7, 5, true),
+            (3, 7, true),
+            (4, 7, true),
+            (5, 7, true),
+        ]);
         assert_eq!(foul(&b, &w, to_idx(7, 7)), Foul::DoubleFour); // two broken fours XXX.X
-        let (b, w) = board(&[(7, 4, true), (7, 5, true), (7, 6, true), (4, 7, true), (5, 7, true), (6, 7, true)]);
+        let (b, w) = board(&[
+            (7, 4, true),
+            (7, 5, true),
+            (7, 6, true),
+            (4, 7, true),
+            (5, 7, true),
+            (6, 7, true),
+        ]);
         assert_eq!(foul(&b, &w, to_idx(7, 7)), Foul::DoubleFour);
-        let (b, w) = board(&[(7, 2, true), (7, 3, true), (7, 4, true), (7, 5, true), (7, 6, true)]);
+        let (b, w) = board(&[
+            (7, 2, true),
+            (7, 3, true),
+            (7, 4, true),
+            (7, 5, true),
+            (7, 6, true),
+        ]);
         assert_eq!(foul(&b, &w, to_idx(7, 7)), Foul::Overline);
     }
 
@@ -283,24 +352,65 @@ mod tests {
         let (own, opp) = board(&[(7, 5, true), (7, 6, true), (5, 7, true), (6, 7, true)]);
         assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::DoubleThree);
         // Double-four and overline are legal under the omok rule.
-        let (own, opp) = board(&[(7, 4, true), (7, 5, true), (7, 6, true), (4, 7, true), (5, 7, true), (6, 7, true)]);
+        let (own, opp) = board(&[
+            (7, 4, true),
+            (7, 5, true),
+            (7, 6, true),
+            (4, 7, true),
+            (5, 7, true),
+            (6, 7, true),
+        ]);
         assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::None);
-        let (own, opp) = board(&[(7, 2, true), (7, 3, true), (7, 4, true), (7, 5, true), (7, 6, true)]);
+        let (own, opp) = board(&[
+            (7, 2, true),
+            (7, 3, true),
+            (7, 4, true),
+            (7, 5, true),
+            (7, 6, true),
+        ]);
         assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::None);
         // Four-three is legal; an exact five wins regardless.
-        let (own, opp) = board(&[(7, 4, true), (7, 5, true), (7, 6, true), (5, 7, true), (6, 7, true)]);
+        let (own, opp) = board(&[
+            (7, 4, true),
+            (7, 5, true),
+            (7, 6, true),
+            (5, 7, true),
+            (6, 7, true),
+        ]);
         assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::None);
-        let (own, opp) =
-            board(&[(7, 3, true), (7, 4, true), (7, 5, true), (7, 6, true), (5, 7, true), (6, 7, true), (6, 6, true), (5, 5, true)]);
+        let (own, opp) = board(&[
+            (7, 3, true),
+            (7, 4, true),
+            (7, 5, true),
+            (7, 6, true),
+            (5, 7, true),
+            (6, 7, true),
+            (6, 6, true),
+            (5, 5, true),
+        ]);
         assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::Five);
         // A three blocked by the opponent at one end is not a three.
-        let (own, opp) = board(&[(7, 5, true), (7, 6, true), (7, 4, false), (5, 7, true), (6, 7, true)]);
+        let (own, opp) = board(&[
+            (7, 5, true),
+            (7, 6, true),
+            (7, 4, false),
+            (5, 7, true),
+            (6, 7, true),
+        ]);
         assert_eq!(omok_foul(&own, &opp, to_idx(7, 7)), Foul::None);
     }
 
     #[test]
     fn exact_five_beats_fouls() {
-        let (b, w) = board(&[(7, 3, true), (7, 4, true), (7, 5, true), (7, 6, true), (4, 7, true), (5, 7, true), (6, 7, true)]);
+        let (b, w) = board(&[
+            (7, 3, true),
+            (7, 4, true),
+            (7, 5, true),
+            (7, 6, true),
+            (4, 7, true),
+            (5, 7, true),
+            (6, 7, true),
+        ]);
         assert_eq!(foul(&b, &w, to_idx(7, 7)), Foul::Five);
     }
 }

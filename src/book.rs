@@ -10,9 +10,10 @@
 //! the side to move; when figrid plays the other colour the opening hash
 //! will not match and the search runs as usual.
 
+use super::engine;
 use std::sync::OnceLock;
 
-use crate::board::{Board, to_idx};
+use engine::board::{Board, to_idx};
 
 /// Raw book entries. Coordinates are `(x, y)` = `(column, row)` matching
 /// pbrain protocol and `idx_to_xy`. The replay logic in `build_book` converts

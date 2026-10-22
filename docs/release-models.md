@@ -1,6 +1,8 @@
 # GitHub release model builds (1.3.0)
 
-The Windows ZIP contains self-contained 15x15 and 20x20 Piskvork executables.
+The published 1.3.0 Windows ZIP contains separate self-contained 15x15 and 20x20
+Piskvork executables. The current source builds one executable supporting both
+sizes; the existing release models remain separate and are selected at `START`.
 It requires an x86-64-v3 (AVX2-class) CPU and uses the static Windows CRT.
 
 | Rule | Embedded model | Evaluation scale |
@@ -24,9 +26,7 @@ are deliberately absent from public Git and the crate package. On Windows:
 $env:FIGRID_RELEASE_MODEL_DIR = 'C:/absolute/path/to/models'
 $env:RUSTFLAGS = '-C target-cpu=x86-64-v3 -C target-feature=+crt-static'
 cargo build --release --features release-models --bin pbrain-figrid
-# Copy target/release/pbrain-figrid.exe before the second build.
-cargo build --release --features release-models,board20 --bin pbrain-figrid
-# Name the second executable pbrain-figrid_20.exe in the Gomocup ZIP.
+# The resulting pbrain-figrid.exe accepts both START 15 and START 20.
 ```
 
 Normal crate builds retain their existing public assets. This GitHub release does

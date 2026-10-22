@@ -5,10 +5,11 @@
 //! Proof search and main-search integration remain separate, preregistered
 //! work.
 
-use crate::board::{BOARD_SIZE, BitBoard, Board, Move, NUM_CELLS, Stone};
-use crate::heuristic::DIR;
-use crate::pattern_table::{WindowThreat, classify_window_after_play_with_flags, read_window};
-use crate::vct::{ThreatKind, VctConfig, classify_move_fast_with_flags, search_vct_with_stats};
+use super::engine;
+use engine::board::{BOARD_SIZE, BitBoard, Board, Move, NUM_CELLS, Stone};
+use engine::heuristic::DIR;
+use engine::pattern_table::{WindowThreat, classify_window_after_play_with_flags, read_window};
+use engine::vct::{ThreatKind, VctConfig, classify_move_fast_with_flags, search_vct_with_stats};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -962,8 +963,9 @@ fn threat_strength(kind: ThreatKind) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::board::to_idx;
+    use engine::board::to_idx;
 
     #[test]
     fn quiet_pair_builder_is_generated_and_board_is_restored() {

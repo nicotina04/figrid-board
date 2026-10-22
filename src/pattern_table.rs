@@ -9,7 +9,8 @@
 //! encoding, 그리고 모든 가능 패턴의 enumeration. NNUE 통합과 보드 상태
 //! 유지는 후속 단계에서 추가된다.
 
-use crate::board::{RuleSet, Stone};
+use super::engine;
+use engine::board::{RuleSet, Stone};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -338,11 +339,11 @@ pub fn full_swap_id(id: u32) -> u32 {
 /// 한 cell의 4방향 full-vocabulary id (black-relative, board 관례와 동일한
 /// 방향 순서 [(0,1),(1,0),(1,1),(1,-1)]).
 pub fn full_ids_for_cell(
-    black: &crate::board::BitBoard,
-    white: &crate::board::BitBoard,
+    black: &engine::board::BitBoard,
+    white: &engine::board::BitBoard,
     cell: usize,
 ) -> [u32; 4] {
-    use crate::board::BOARD_SIZE;
+    use engine::board::BOARD_SIZE;
     const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
     let row = (cell / BOARD_SIZE) as i32;
     let col = (cell % BOARD_SIZE) as i32;
@@ -357,15 +358,22 @@ pub fn full_ids_for_cell(
 /// horizontal, vertical, diagonal, anti-diagonal).
 #[inline]
 pub fn full_id_for_cell_dir(
-    black: &crate::board::BitBoard,
-    white: &crate::board::BitBoard,
+    black: &engine::board::BitBoard,
+    white: &engine::board::BitBoard,
     cell: usize,
     dir_idx: usize,
 ) -> u32 {
-    use crate::board::BOARD_SIZE;
+    use engine::board::BOARD_SIZE;
     const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
     let (dr, dc) = DIRS[dir_idx];
-    let w = read_window(black, white, (cell / BOARD_SIZE) as i32, (cell % BOARD_SIZE) as i32, dr, dc);
+    let w = read_window(
+        black,
+        white,
+        (cell / BOARD_SIZE) as i32,
+        (cell % BOARD_SIZE) as i32,
+        dr,
+        dc,
+    );
     full_lookup_id(pack_window(&w))
 }
 
@@ -598,14 +606,14 @@ fn build_threat_after_my_play_table(rule_set: RuleSet) -> [WindowThreat; PATTERN
 /// 읽어내는 helper. mine/opp 관점에 따라 cell 값 결정.
 #[inline]
 pub fn read_window(
-    mine: &crate::board::BitBoard,
-    opp: &crate::board::BitBoard,
+    mine: &engine::board::BitBoard,
+    opp: &engine::board::BitBoard,
     row: i32,
     col: i32,
     dr: i32,
     dc: i32,
 ) -> LineWindow {
-    use crate::board::BOARD_SIZE;
+    use engine::board::BOARD_SIZE;
     let mut w = [3u8; 11]; // 기본 boundary
     for off in -5i32..=5 {
         let r = row + dr * off;
@@ -628,6 +636,7 @@ pub fn read_window(
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
 
     #[test]
@@ -723,11 +732,11 @@ mod tests {
 
     #[test]
     fn read_window_centers_on_anchor() {
-        use crate::board::BitBoard;
+        use engine::board::BitBoard;
         let mut mine = BitBoard::EMPTY;
         let mut opp = BitBoard::EMPTY;
-        mine.set(7 * crate::board::BOARD_SIZE + 7); // (7,7) mine
-        opp.set(7 * crate::board::BOARD_SIZE + 8); // (7,8) opp
+        mine.set(7 * engine::board::BOARD_SIZE + 7); // (7,7) mine
+        opp.set(7 * engine::board::BOARD_SIZE + 8); // (7,8) opp
 
         let w = read_window(&mine, &opp, 7, 7, 0, 1);
         // anchor (7,7) at slot 5, (7,8) at slot 6

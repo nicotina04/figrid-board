@@ -4,13 +4,14 @@
 //! the independent `cb2vec` crate. This module preserves the public 0.8.x
 //! FIGRID types and applies the stricter Pattern4 deployment schema.
 
+use super::engine;
 use cb2vec::QuantizedCodebookAccess;
 
-use crate::codebook_eval::{
+use engine::codebook_eval::{
     CodebookWeights, QUANT_EMBED_SCALE, QUANT_FACTOR_SCALE, QUANT_HEAD_SCALE,
     QuantizedCodebookWeights,
 };
-use crate::pattern_table::PATTERN_NUM_IDS;
+use engine::pattern_table::PATTERN_NUM_IDS;
 
 pub const PACKED_CODEBOOK_MAGIC: [u8; 8] = cb2vec::LEGACY_NORU_CBF_MAGIC;
 pub const PACKED_CODEBOOK_VERSION: u16 = cb2vec::CB2VEC_ARTIFACT_VERSION;
@@ -363,8 +364,9 @@ fn validate_scales(embedding_scale: i32, head_scale: i32, factor_scale: i32) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::pattern_table::swap_mapped_id;
+    use engine::pattern_table::swap_mapped_id;
 
     const FACTORED_ARTIFACT: &[u8] =
         include_bytes!("../models/gomoku_codebook_v1_swapclosed_factored.cbf");

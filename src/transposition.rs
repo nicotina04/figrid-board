@@ -7,7 +7,8 @@
 //! 한 entry는 16 bytes — bucket 2개면 32 bytes. 64K bucket = 2 MB로
 //! 시작 (figrid Piskvork submission 메모리 여유 안에).
 
-use crate::board::Move;
+use super::engine;
+use engine::board::Move;
 use std::cell::Cell;
 
 /// TT entry value의 bound 종류.

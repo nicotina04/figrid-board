@@ -169,7 +169,7 @@ impl ExactI8Codebook {
 
 #[cfg(test)]
 mod exact_i8_tests {
-    use super::*;
+        use super::*;
     fn fixture() -> QuantizedCodebookWeights {
         QuantizedCodebookWeights {
             dim: 32,

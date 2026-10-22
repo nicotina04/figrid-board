@@ -5,8 +5,9 @@
 //! AND node contains every legal defender move.  A solved result is therefore
 //! a statement about this finite, registered graph only.
 
+use super::engine;
 use super::{VctScratch, bb_pair, gather_attack_moves, reach_mask_for_side};
-use crate::board::{BOARD_SIZE, Board, Move, NUM_CELLS, RuleSet, Stone};
+use engine::board::{BOARD_SIZE, Board, Move, NUM_CELLS, RuleSet, Stone};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Instant;
@@ -163,8 +164,8 @@ enum NodeRole {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExactStateKey {
-    black: [u128; crate::board::BITBOARD_WORDS],
-    white: [u128; crate::board::BITBOARD_WORDS],
+    black: [u128; engine::board::BITBOARD_WORDS],
+    white: [u128; engine::board::BITBOARD_WORDS],
     side_to_move: Stone,
     root_attacker: Stone,
     role: NodeRole,
@@ -1489,8 +1490,9 @@ const fn status_tag(status: DfpnStatus) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::engine;
     use super::*;
-    use crate::board::to_idx;
+    use engine::board::to_idx;
 
     fn board_from_moves(moves: &[(usize, usize)]) -> Board {
         let mut board = Board::new();

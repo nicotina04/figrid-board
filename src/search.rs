@@ -2562,54 +2562,80 @@ impl Searcher {
             GameResult::Ongoing => {}
         }
 
+        // A forced reply is not a position in which passing is an option. Check
+        // exact five-completions before stand-pat, beta cutoffs or the qply cap.
+        // The completing-cell restriction is sound for Freestyle/Standard;
+        // Caro end-blocks and forbidden-point rules need their own reply sets.
+        let mut forced_reply = false;
+        let prechecked = if crate::p4r0_census::rule_admits_restriction(board.effective_rule_set()) {
+            let candidates = self.board_candidate_moves(board);
+            let kinds: Vec<(ThreatKind, ThreatKind)> = candidates
+                .iter()
+                .map(|&mv| {
+                    (
+                        classify_move_fast(board, mv, board.side_to_move),
+                        classify_move_fast(board, mv, board.side_to_move.opponent()),
+                    )
+                })
+                .collect();
+            if kinds.iter().any(|&(my, _)| my == ThreatKind::Five) {
+                self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
+                return WIN_SCORE - (ply as i32 + 1);
+            }
+            let fives = kinds
+                .iter()
+                .filter(|&&(_, opp)| opp == ThreatKind::Five)
+                .count();
+            if fives >= 2 {
+                self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
+                return -(WIN_SCORE - (ply as i32 + 2));
+            }
+            forced_reply = fives == 1;
+            Some((candidates, kinds))
+        } else {
+            None
+        };
+
         let profile_start = self.profile_start();
         let (stand_pat, detail) = inc.eval(board, self.profile.enabled);
         self.profile_add(SearchProfileBucket::Eval, profile_start);
         self.profile.add_eval_state_detail(detail);
-        if qply >= QSEARCH_MAX_PLY {
+        if !forced_reply && qply >= QSEARCH_MAX_PLY {
             self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
-        if stand_pat >= beta {
+        if !forced_reply && stand_pat >= beta {
             self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
-        if stand_pat > alpha {
+        if !forced_reply && stand_pat > alpha {
             alpha = stand_pat;
         }
 
-        let candidates = self.board_candidate_moves(board);
+        let (candidates, kinds) = prechecked.unwrap_or_else(|| {
+            let candidates = self.board_candidate_moves(board);
+            let kinds = candidates
+                .iter()
+                .map(|&mv| {
+                    (
+                        classify_move_fast(board, mv, board.side_to_move),
+                        classify_move_fast(board, mv, board.side_to_move.opponent()),
+                    )
+                })
+                .collect();
+            (candidates, kinds)
+        });
         if candidates.is_empty() {
             self.profile_add(SearchProfileBucket::QSearch, qsearch_profile_start);
             return stand_pat;
         }
 
-        let (my, opp) = match board.side_to_move {
-            Stone::Black => (&board.black, &board.white),
-            Stone::White => (&board.white, &board.black),
-        };
-
-        // 0.6.9: cache opp_kind by scanning candidates once instead of letting
-        // (a) the must-block precheck and (b) the per-move OpenFour-block
-        // check each call `classify_move(opp, my, mv)` again ??together they
-        // had been costing up to 2N calls. 0.7.0 swaps the per-call body for
-        // the Pattern4 fast path (~10x cheaper per call), so we keep the
-        // cache to lock the call count at N as well.
-        let opp_side = match board.side_to_move {
-            Stone::Black => Stone::White,
-            Stone::White => Stone::Black,
-        };
-        let _ = (my, opp); // moved into classify_move_fast(board, mv, side) form
-        let opp_kinds: Vec<ThreatKind> = candidates
-            .iter()
-            .map(|&m| classify_move_fast(board, m, opp_side))
-            .collect();
-        let opp_has_five = opp_kinds.iter().any(|&k| matches!(k, ThreatKind::Five));
+        // Reuse both classifications for move generation.
+        let opp_has_five = kinds.iter().any(|&(_, k)| matches!(k, ThreatKind::Five));
 
         let mut forcing: Vec<(Move, i32)> = Vec::new();
         for (i, &mv) in candidates.iter().enumerate() {
-            let opp_kind = opp_kinds[i];
-            let my_kind = classify_move_fast(board, mv, board.side_to_move);
+            let (my_kind, opp_kind) = kinds[i];
 
             // ????븐뼐????傭?끆?????Β?ｊ콞?轅붽틓?????⑸걦?????????諛몃마嶺뚮?????꾩렯?????must-block ????? ????轅붽틓???壤굿??덊뒌??????????怨뺤떪???????????????.
             // Q1: an immediate five wins outright. Return the score its child would report
@@ -2648,7 +2674,7 @@ impl Searcher {
 
         forcing.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-        let mut best = stand_pat;
+        let mut best = if forced_reply { -INF } else { stand_pat };
         for &(mv, _) in &forcing {
             let make_undo_profile_start = self.profile_start();
             let profile_start = self.profile_start();
@@ -3803,3 +3829,6 @@ impl Searcher {
         self.search_codebook_eval_quantized_with(board, ordering, codebook, depth, time)
     }
 }
+#[cfg(test)]
+#[path = "mobile_11358_regression.rs"]
+mod mobile_11358_regression;

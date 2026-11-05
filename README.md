@@ -36,7 +36,7 @@ search integration. The dependency is optional and is activated only by the
 
 ## Download
 
-The [latest release](https://github.com/nicotina04/figrid-board/releases/latest) ships a Windows zip with two
+The [1.3.0 release](https://github.com/nicotina04/figrid-board/releases/tag/v1.3.0) ships a Windows zip with two
 self-contained engines (embedded models, static C runtime, x86_64-v3 CPU required):
 
 | File | Board | Rules |
@@ -45,7 +45,8 @@ self-contained engines (embedded models, static C runtime, x86_64-v3 CPU require
 | `pbrain-figrid_20.exe` | 20×20 | Freestyle, Fastgame |
 
 Both pass GomocupJudge `test_zip_rules.py` in all six formats, and the judge picks the `_20` executable for 20×20 games.
-Load either one in Piskvork or any pbrain-compatible manager. The release binaries embed trained models that are not
+Load either one in Piskvork or any pbrain-compatible manager. Since 1.4.0 a single `codebook-eval` build accepts both
+board sizes (see [Build](#build)). The release binaries embed trained models that are not
 part of the crate package; a build from source with `embed-weights,codebook-eval` embeds the older default models
 instead, and `FIGRID_CODEBOOK_WEIGHTS` loads any other model file.
 
@@ -58,6 +59,8 @@ instead, and `FIGRID_CODEBOOK_WEIGHTS` loads any other model file.
   swap-closed model supplies the deployed quantized leaf evaluator while
   `figrid-board` supplies all game-specific token and search semantics.
 - α-β search with transposition table, threat-aware move ordering, killer/history heuristics, late-move pruning, and a quiescence layer for forcing sequences.
+  Since 1.4, quiescence never stands pat on a forced reply: when the opponent has exactly one five-completing cell
+  (Freestyle and Standard), that block is searched first, and an own immediate five or double five-threat scores as a mate.
 - Optional VCF / VCT tactical search at the search root.
 - Rule support: Freestyle (`rule 0`), Standard exact-five (`rule 1`), Renju (`rule 4`: black exact five with
   forbidden double-four / double-three / overline, white five or more), and Caro as Gomocup plays it (`rule 9`:

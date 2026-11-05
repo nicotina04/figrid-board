@@ -1,7 +1,12 @@
 # Changes
 
-## Unreleased
+## 1.4.0 (2026-11-05)
 
+* Quiescence search answers a forced reply before standing pat: when the opponent
+  has exactly one five-completing cell, that block is searched before stand-pat,
+  beta cutoff or the quiescence ply cap, and an immediate own five or a double
+  five-threat is scored as a mate first. Applies to Freestyle and Standard, where
+  the completing cell is the full reply set.
 * Make 15x15 and 20x20 positions available together through the shared
   `bitboard::BitBoard` trait and generic `position::Board<B>`. Keep the existing
   two/four-word storage and statically specialized search/caches. Preserve old

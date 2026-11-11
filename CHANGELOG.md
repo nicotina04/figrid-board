@@ -1,5 +1,36 @@
 # Changes
 
+## 1.5.0 (2026-11-11)
+
+* Four search changes, on by default in `Searcher` and in `pbrain-figrid`:
+  * The transposition table is kept between searches (`Searcher::set_keep_transposition_table`, `NORU_KEEP_TT`)
+    in the quantized codebook searches. It is cleared when the rule set, the weights or the evaluation scale
+    change, by `Searcher::clear_transposition_table`, and by the engine at `START` and `RESTART`. A search result
+    now depends on the searches made before it on the same `Searcher`; clear the table where a search has to be
+    reproducible on its own.
+  * When a search is interrupted inside an iteration, a root move which that iteration finished with a score above
+    the lower bound of its window replaces the move of the last completed depth
+    (`Searcher::set_use_partial_iteration`, `NORU_PARTIAL_ITERATION`). The reported depth stays the last completed one.
+  * Reverse futility pruning at non-PV nodes with at most three remaining plies: the static evaluation is returned
+    when it exceeds beta by 5 per remaining ply, unless the opponent has a cell that completes a five or makes an
+    open four, a double four, a four-three or a double three (`Searcher::set_use_reverse_futility`,
+    `NORU_REVERSE_FUTILITY`). Codebook searches only.
+  * The forced-reply restriction that 1.4.0 carried as an opt-in switch is on
+    (`Searcher::set_use_forced_restriction`, `NORU_FORCED_REPLY_RESTRICTION`): in front of a five-threat only the
+    own five or the single block is searched. Freestyle and Standard; it changes nothing under the other rules.
+* Each switch set to off restores the previous behaviour. With all four off the search is identical to 1.4.0: the
+  same move, score, depth and node count on every fixed-node search compared (Freestyle, Standard, Omok, Caro,
+  Renju, 20x20 and the flat evaluator, 171 to 180 searches each).
+* Measured against 1.4.0 with the same release models in both builds:
+  * Against Pela at 1000 ms per move, 200 balanced openings with both colours: 257.5/400 against 195.5/400
+    (+15.5 percentage points, paired 95% interval +10.0 to +21.1). Mean completed depth in those games went from
+    6.90 to 7.67 at the same time per move. The run was cut by a system restart after 300 of its 800 games and
+    completed by cell; each part alone is positive.
+  * Self-play against 1.4.0 at 200 ms per move, 1,200 games per setting: Freestyle 74.9%, Standard 69.3%,
+    Omok 62.8%, Caro 63.0%, Renju 61.2%, 20x20 72.6%. Same-model self-play overstates the difference against
+    another engine, as the two Freestyle figures show.
+  * One opponent and one time control against an external engine; not a general ranking.
+
 ## 1.4.0 (2026-11-05)
 
 * Quiescence search answers a forced reply before standing pat: when the opponent

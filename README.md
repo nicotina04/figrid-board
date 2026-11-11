@@ -61,6 +61,9 @@ instead, and `FIGRID_CODEBOOK_WEIGHTS` loads any other model file.
 - α-β search with transposition table, threat-aware move ordering, killer/history heuristics, late-move pruning, and a quiescence layer for forcing sequences.
   Since 1.4, quiescence never stands pat on a forced reply: when the opponent has exactly one five-completing cell
   (Freestyle and Standard), that block is searched first, and an own immediate five or double five-threat scores as a mate.
+  Since 1.5, the transposition table is kept between the moves of a game, a better move found in an interrupted last
+  iteration is used, shallow non-PV nodes are pruned by reverse futility (codebook evaluators), and in front of a
+  five-threat only the forced reply is searched (Freestyle and Standard).
 - Optional VCF / VCT tactical search at the search root.
 - Rule support: Freestyle (`rule 0`), Standard exact-five (`rule 1`), Renju (`rule 4`: black exact five with
   forbidden double-four / double-three / overline, white five or more), and Caro as Gomocup plays it (`rule 9`:
@@ -129,6 +132,11 @@ figrid was inherited as a small board library in April 2026 and rebuilt as an en
    of "forcing" move — pre-empting an opponent's three — was less useful than a quiet move. Narrowing the forcing set
    and letting a cheap policy prune quiet moves made the search about 1.3 plies deeper and stronger against every
    opponent measured.
+6. **Search driver (1.5).** An audit of how a move's time is spent found four things outside the evaluator: the
+   table was cleared at every move, an interrupted iteration was thrown away, shallow nodes had no static cutoff, and
+   every move was expanded in front of a five-threat. Two of the four had been tried before and set aside, one
+   measured on a much older engine and one on a sample too small to show it. Changed together, with the model
+   untouched, they scored 257.5/400 against 195.5/400 for 1.4.0 against Pela at 1000 ms per move.
 
 Every step was gated the same way: refactors must reproduce evaluation dumps and fixed-depth searches exactly, and
 strength claims come from matched-seed matches against external engines, replicated on fresh seeds.
@@ -204,6 +212,16 @@ Selective-search switches (on by default since 1.1):
 
 With both off the search is identical to 1.0.
 
+Search switches on by default since 1.5 (`Searcher` has a setter for each):
+
+- `NORU_KEEP_TT=off` clears the transposition table at every move again.
+- `NORU_PARTIAL_ITERATION=off` discards an interrupted iteration and plays the move of the last completed depth.
+- `NORU_REVERSE_FUTILITY=off` disables reverse futility pruning at shallow non-PV nodes.
+- `NORU_FORCED_REPLY_RESTRICTION=off` searches every move again when the opponent threatens an immediate five
+  (the restriction applies to Freestyle and Standard).
+
+With all four off the search is identical to 1.4.
+
 Opt-in search switches (all off by default):
 
 - `NORU_POLICY_ORDER=path/to/table.bin` ranks quiet moves with a learned
@@ -212,8 +230,6 @@ Opt-in search switches (all off by default):
   could saturate the ordering band are rescaled once at load.
 - `NORU_POLICY_REDUCE=on` (requires `NORU_POLICY_ORDER`) adds policy-rank late
   move reductions and an earlier late-move-pruning cutoff.
-- `NORU_FORCED_REPLY_RESTRICTION=on` searches only the rules-determined reply
-  when the opponent threatens an immediate five (Freestyle and Standard).
 
 An empty value means "default" for every boolean switch. `pbrain-figrid`
 fails closed on stale or misspelled switches: any non-empty `NORU_*` /

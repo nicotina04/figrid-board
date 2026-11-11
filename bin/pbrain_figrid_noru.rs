@@ -205,6 +205,14 @@ impl RuntimeEngine {
             e.started = true;
         });
     }
+    /// START on a running engine and RESTART begin a new game; BOARD only replaces the position.
+    fn new_game(&mut self, rule: RuleSet) {
+        dispatch!(self, e, {
+            e.new_game();
+            e.board.set_rule_set(rule);
+            e.started = true;
+        });
+    }
     fn choose_move(&mut self) -> Option<(u8, u8)> {
         dispatch!(self, e, e.choose_move())
     }
@@ -278,10 +286,7 @@ fn main() {
                     continue;
                 }
                 if engine.as_ref().is_some_and(|e| e.size() == size) {
-                    engine
-                        .as_mut()
-                        .unwrap()
-                        .reset_board(info.rule_set().unwrap());
+                    engine.as_mut().unwrap().new_game(info.rule_set().unwrap());
                 } else {
                     match RuntimeEngine::new(size, &info) {
                         Ok(e) => engine = Some(e),
@@ -406,7 +411,7 @@ fn main() {
                     reply!("ERROR - engine not started");
                     continue;
                 };
-                e.reset_board(info.rule_set().unwrap_or(RuleSet::Freestyle));
+                e.new_game(info.rule_set().unwrap_or(RuleSet::Freestyle));
                 reply!("OK");
             }
             "ABOUT" => reply!(

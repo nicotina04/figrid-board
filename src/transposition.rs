@@ -48,16 +48,83 @@ impl TtEntry {
     }
 }
 
+/// A stored entry: [`TtEntry`] plus the generation of the search that wrote it. Still 16 bytes — the bound and the
+/// generation share one byte.
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    key: u64,
+    score: i32,
+    depth: u8,
+    /// Bits 0..2: [`Bound`]; bits 2..8: generation.
+    bound_generation: u8,
+    best_move: u16,
+}
+
+/// Generations wrap after this many searches. An entry that old then reads as current, which only delays its
+/// replacement.
+const GENERATION_COUNT: u8 = 64;
+
+impl Slot {
+    const EMPTY: Self = Slot {
+        key: 0,
+        score: 0,
+        depth: 0,
+        bound_generation: 0,
+        best_move: u16::MAX,
+    };
+
+    #[inline]
+    fn new(entry: TtEntry, generation: u8) -> Self {
+        Slot {
+            key: entry.key,
+            score: entry.score,
+            depth: entry.depth,
+            bound_generation: entry.bound as u8 | (generation << 2),
+            best_move: entry.best_move,
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.best_move == u16::MAX && self.key == 0
+    }
+
+    #[inline]
+    fn generation(&self) -> u8 {
+        self.bound_generation >> 2
+    }
+
+    #[inline]
+    fn set_generation(&mut self, generation: u8) {
+        self.bound_generation = (self.bound_generation & 3) | (generation << 2);
+    }
+
+    #[inline]
+    fn entry(&self) -> TtEntry {
+        TtEntry {
+            key: self.key,
+            score: self.score,
+            depth: self.depth,
+            bound: match self.bound_generation & 3 {
+                0 => Bound::Exact,
+                1 => Bound::Lower,
+                _ => Bound::Upper,
+            },
+            best_move: self.best_move,
+        }
+    }
+}
+
 /// 2-슬롯 bucket (depth-preferred + always-replace).
 #[derive(Debug, Clone, Copy)]
 struct Bucket {
-    depth_pref: TtEntry,
-    always_replace: TtEntry,
+    depth_pref: Slot,
+    always_replace: Slot,
 }
 
 const EMPTY_BUCKET: Bucket = Bucket {
-    depth_pref: TtEntry::EMPTY,
-    always_replace: TtEntry::EMPTY,
+    depth_pref: Slot::EMPTY,
+    always_replace: Slot::EMPTY,
 };
 
 /// 진단용 카운터 — TT 효과 측정. `Cell`이라 `&self probe()`에서도 갱신 가능.
@@ -76,6 +143,8 @@ pub struct TtStats {
 pub struct TranspositionTable {
     buckets: Vec<Bucket>,
     mask: usize, // index = key as usize & mask (buckets.len()는 2^N)
+    /// Generation given to new entries; advanced by [`Self::new_search`].
+    generation: u8,
     probes: Cell<u64>,
     hits: Cell<u64>,
     stores: Cell<u64>,
@@ -91,6 +160,7 @@ impl TranspositionTable {
         Self {
             buckets: vec![EMPTY_BUCKET; n],
             mask: n - 1,
+            generation: 0,
             probes: Cell::new(0),
             hits: Cell::new(0),
             stores: Cell::new(0),
@@ -103,9 +173,15 @@ impl TranspositionTable {
     /// 모든 슬롯 비우기 (탐색 시작 시). 카운터는 보존 — search() 호출 누적.
     pub fn clear(&mut self) {
         for b in self.buckets.iter_mut() {
-            b.depth_pref = TtEntry::EMPTY;
-            b.always_replace = TtEntry::EMPTY;
+            b.depth_pref = Slot::EMPTY;
+            b.always_replace = Slot::EMPTY;
         }
+    }
+
+    /// Start a new search on a table that keeps its entries: what was written before this call no longer outranks
+    /// by depth what is written after it. A table that is cleared before every search never needs this.
+    pub fn new_search(&mut self) {
+        self.generation = (self.generation + 1) % GENERATION_COUNT;
     }
 
     /// 진단 카운터 리셋 (한 search() 단위 측정 시작 시).
@@ -158,11 +234,11 @@ impl TranspositionTable {
         let bucket = &self.buckets[(key as usize) & self.mask];
         if bucket.depth_pref.key == key && !bucket.depth_pref.is_empty() {
             self.hits.set(self.hits.get() + 1);
-            return Some(bucket.depth_pref);
+            return Some(bucket.depth_pref.entry());
         }
         if bucket.always_replace.key == key && !bucket.always_replace.is_empty() {
             self.hits.set(self.hits.get() + 1);
-            return Some(bucket.always_replace);
+            return Some(bucket.always_replace.entry());
         }
         None
     }
@@ -188,27 +264,41 @@ impl TranspositionTable {
         let depth_idx = (depth as usize).min(15);
         let h = &self.depth_hist[depth_idx];
         h.set(h.get() + 1);
-        let entry = TtEntry {
-            key,
-            score,
-            depth,
-            bound,
-            best_move: best_move.map(|m| m as u16).unwrap_or(u16::MAX),
-        };
+        let generation = self.generation;
+        let entry = Slot::new(
+            TtEntry {
+                key,
+                score,
+                depth,
+                bound,
+                best_move: best_move.map(|m| m as u16).unwrap_or(u16::MAX),
+            },
+            generation,
+        );
         let bucket = &mut self.buckets[(key as usize) & self.mask];
-        if bucket.depth_pref.is_empty() || depth >= bucket.depth_pref.depth {
-            if !bucket.depth_pref.is_empty() {
+        let held = bucket.depth_pref;
+        let held_empty = held.is_empty();
+        // An entry left by an earlier search (possible only after `new_search`) gives way to another position
+        // whatever its depth. Every generation is equal on a table cleared per search, which leaves the rule below
+        // as plain depth preference.
+        let held_stale = !held_empty && held.generation() != generation;
+        if held_empty || depth >= held.depth || (held_stale && held.key != key) {
+            if !held_empty {
                 self.displaced_depth_pref
                     .set(self.displaced_depth_pref.get() + 1);
                 // Push-down: 같은 키 update가 아닐 때만 always-replace로 보존.
                 // 같은 키면 새 entry가 갱신본이라 기존을 보존할 이유 없음.
-                if bucket.depth_pref.key != key {
-                    bucket.always_replace = bucket.depth_pref;
+                if held.key != key {
+                    bucket.always_replace = held;
                 }
             }
             bucket.depth_pref = entry;
         } else {
             self.stored_to_always.set(self.stored_to_always.get() + 1);
+            if held_stale {
+                // The same position, searched deeper by an earlier search: keep it and count it as current.
+                bucket.depth_pref.set_generation(generation);
+            }
             bucket.always_replace = entry;
         }
     }
@@ -272,5 +362,75 @@ mod tests {
         let probed = tt.probe(k1).unwrap();
         // depth_pref는 여전히 100/depth 6
         assert_eq!(probed.score, 100);
+    }
+
+    #[test]
+    fn slot_keeps_the_entry_and_stays_sixteen_bytes() {
+        assert_eq!(std::mem::size_of::<Slot>(), 16);
+        for (bound, generation) in [
+            (Bound::Exact, 0),
+            (Bound::Lower, 1),
+            (Bound::Upper, GENERATION_COUNT - 1),
+        ] {
+            let entry = TtEntry {
+                key: 0x1234_5678_9ABC_DEF0,
+                score: -998_877,
+                depth: 19,
+                bound,
+                best_move: 399,
+            };
+            let slot = Slot::new(entry, generation);
+            assert_eq!(slot.generation(), generation);
+            let back = slot.entry();
+            assert_eq!(back.key, entry.key);
+            assert_eq!(back.score, entry.score);
+            assert_eq!(back.depth, entry.depth);
+            assert_eq!(back.bound, entry.bound);
+            assert_eq!(back.best_move, entry.best_move);
+        }
+    }
+
+    #[test]
+    fn an_earlier_search_gives_way_to_another_position() {
+        let mut tt = TranspositionTable::new(4);
+        let (k1, k2, k3) = (0u64, 0x0000_0001_0000_0000u64, 0x0000_0002_0000_0000u64);
+        tt.store(k1, 100, 6, Bound::Exact, Some(1));
+        tt.new_search();
+        // Shallower, but k1 is from the earlier search: k2 takes the depth-preferred slot and k1 moves down.
+        tt.store(k2, 200, 2, Bound::Exact, Some(2));
+        assert_eq!(tt.probe(k2).unwrap().score, 200);
+        assert_eq!(tt.probe(k1).unwrap().score, 100);
+        // Within one search depth preference is unchanged: the shallower k3 lands in the second slot.
+        tt.store(k3, 300, 1, Bound::Exact, Some(3));
+        assert_eq!(tt.probe(k2).unwrap().score, 200);
+        assert_eq!(tt.probe(k3).unwrap().score, 300);
+        assert!(tt.probe(k1).is_none());
+    }
+
+    #[test]
+    fn a_deeper_result_for_the_same_position_survives_a_new_search() {
+        let mut tt = TranspositionTable::new(4);
+        let (k1, k2) = (0u64, 0x0000_0001_0000_0000u64);
+        tt.store(k1, 100, 6, Bound::Exact, Some(1));
+        tt.new_search();
+        tt.store(k1, 50, 2, Bound::Exact, Some(3));
+        let probed = tt.probe(k1).unwrap();
+        assert_eq!((probed.score, probed.depth), (100, 6));
+        // Kept and counted as current: a shallower store of another position no longer displaces it.
+        tt.store(k2, 200, 3, Bound::Exact, Some(2));
+        assert_eq!(tt.probe(k1).unwrap().depth, 6);
+        assert_eq!(tt.probe(k2).unwrap().score, 200);
+    }
+
+    #[test]
+    fn clearing_removes_entries_of_every_generation() {
+        let mut tt = TranspositionTable::new(4);
+        tt.store(7, 1, 3, Bound::Lower, Some(4));
+        tt.new_search();
+        tt.store(9, 2, 3, Bound::Upper, None);
+        tt.clear();
+        assert!(tt.probe(7).is_none());
+        assert!(tt.probe(9).is_none());
+        assert_eq!(tt.occupancy(), (0, 0, 16));
     }
 }

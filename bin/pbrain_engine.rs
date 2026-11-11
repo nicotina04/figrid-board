@@ -203,6 +203,17 @@ fn demote_preempt_three_enabled() -> bool {
     })
 }
 
+/// Search switches the pbrain runs with; `<NAME>=off` turns one off.
+/// `NORU_FORCED_REPLY_RESTRICTION`: only the forced reply to a five threat is searched.
+/// `NORU_KEEP_TT`: the transposition table is kept between the moves of a game.
+/// `NORU_PARTIAL_ITERATION`: an interrupted last iteration still counts when it has found a better move.
+/// `NORU_REVERSE_FUTILITY`: reverse futility pruning at shallow depth.
+fn search_switch_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|raw| env_bool_default(&raw, true))
+        .unwrap_or(true)
+}
+
 /// Per-move quiet policy (1.1): unset or empty uses the embedded model, `off`/`0`/`false`/`no` disables it, anything
 /// else is a `PGM1` file. Returns the model and its label for the config line.
 fn load_policy_move() -> Result<
@@ -820,10 +831,14 @@ impl Engine {
         let (policy_move, policy_move_label) = load_policy_move()?;
         searcher.set_policy_move(policy_move);
         searcher.set_demote_preempt_three(demote_preempt_three_enabled());
+        searcher.set_use_forced_restriction(search_switch_enabled("NORU_FORCED_REPLY_RESTRICTION"));
+        searcher.set_keep_transposition_table(search_switch_enabled("NORU_KEEP_TT"));
+        searcher.set_use_partial_iteration(search_switch_enabled("NORU_PARTIAL_ITERATION"));
+        searcher.set_use_reverse_futility(search_switch_enabled("NORU_REVERSE_FUTILITY"));
         // Resolving the search switches here reports a bad NORU_POLICY_ORDER
         // (or NORU_POLICY_REDUCE without a table) at startup instead of at the
         // first search.
-        let search_config = backend::search::runtime_config_summary()?;
+        let search_config = searcher.config_summary()?;
         #[cfg(feature = "codebook-eval")]
         let codebook_config = {
             let base = codebook_config_summary(&codebook_weights, &searcher);
@@ -868,6 +883,12 @@ impl Engine {
 
     pub(super) fn reset_board(&mut self) {
         self.board = Board::new();
+    }
+
+    /// A new game: nothing the searcher kept from the previous one carries over.
+    pub(super) fn new_game(&mut self) {
+        self.reset_board();
+        self.searcher.clear_transposition_table();
     }
 
     pub(super) fn apply_opp_move(&mut self, x: u8, y: u8) -> Result<(), String> {

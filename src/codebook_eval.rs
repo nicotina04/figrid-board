@@ -2279,6 +2279,40 @@ fn quant_value_from_features<W: QuantizedCodebookAccess>(features: &[i32], weigh
     weights.score_uniform(features, region_cell_count(0))
 }
 
+/// A cheap content fingerprint of quantized weights: their shape, embedding rows spread over the table and one
+/// evaluation of the head. The search uses it to notice that it has been handed a different model.
+pub(crate) fn quantized_weights_fingerprint<W: QuantizedCodebookAccess>(weights: &W) -> u64 {
+    const ROWS: usize = 64;
+    fn mix(hash: u64, value: u64) -> u64 {
+        (hash ^ value).wrapping_mul(0x0000_0100_0000_01B3)
+    }
+    weights.validate_access();
+    let dim = weights.dim();
+    let count = weights.pattern_count();
+    let features = weights.feature_len();
+    let mut hash = 0xCBF2_9CE4_8422_2325u64;
+    for value in [dim, count, features] {
+        hash = mix(hash, value as u64);
+    }
+    hash = mix(hash, weights.embedding_scale() as u64);
+    let mut row = vec![0i32; dim];
+    for k in 0..ROWS.min(count) {
+        let id = (k * count / ROWS.min(count)).min(count - 1);
+        row.fill(0);
+        weights.add_embedding_to(id as u32, &mut row);
+        for &value in &row {
+            hash = mix(hash, value as u32 as u64);
+        }
+    }
+    let probe: Vec<i32> = (0..features)
+        .map(|i| ((i * 37 + 11) % 97) as i32 - 48)
+        .collect();
+    mix(
+        hash,
+        u64::from(quant_value_from_features(&probe, weights).to_bits()),
+    )
+}
+
 #[inline]
 fn cell_slice(cells: &[f32], cell: usize, dim: usize) -> &[f32] {
     let start = cell * dim;

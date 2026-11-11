@@ -261,7 +261,7 @@ fn policy_reduce_enabled() -> bool {
 
 fn forced_restriction_enabled_by_env() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("NORU_FORCED_REPLY_RESTRICTION", false))
+    *ENABLED.get_or_init(|| env_flag_enabled("NORU_FORCED_REPLY_RESTRICTION", true))
 }
 
 /// Resolves every env-driven search switch now (instead of lazily at the
@@ -270,6 +270,10 @@ fn forced_restriction_enabled_by_env() -> bool {
 /// `NORU_POLICY_REDUCE` without a table is reported as `Err` here rather
 /// than panicking mid-game.
 pub fn runtime_config_summary() -> Result<String, String> {
+    config_summary(forced_restriction_enabled_by_env(), "")
+}
+
+fn config_summary(forced_restriction: bool, searcher_switches: &str) -> Result<String, String> {
     let policy_order = match policy_order_table_init() {
         Ok(None) => "off".to_string(),
         Ok(Some((path, table))) => match table.desat_k() {
@@ -281,9 +285,10 @@ pub fn runtime_config_summary() -> Result<String, String> {
     let policy_reduce = policy_reduce_init().clone()?;
     let on_off = |b: bool| if b { "on" } else { "off" };
     Ok(format!(
-        "policy_order={policy_order}; policy_reduce={}; forced_reply_restriction={}; search_profile={}",
+        "policy_order={policy_order}; policy_reduce={}; forced_reply_restriction={}; \
+         {searcher_switches}search_profile={}",
         on_off(policy_reduce),
-        on_off(forced_restriction_enabled_by_env()),
+        on_off(forced_restriction),
         on_off(search_profile_enabled()),
     ))
 }
@@ -344,6 +349,95 @@ const LMP_MIN_DEPTH: u32 = 1;
 const LMP_MAX_DEPTH: u32 = 3;
 const LMP_BASE: usize = 8;
 const LMP_PER_DEPTH: usize = 4;
+
+/// Reverse futility pruning ([`Searcher::set_use_reverse_futility`]): the deepest remaining depth it applies to. The
+/// margin is [`SearchEvalState::REVERSE_FUTILITY_MARGIN`].
+const REVERSE_FUTILITY_MAX_DEPTH: u32 = 3;
+/// Reverse futility margin per remaining ply for the codebook evaluators, in their units.
+#[cfg(feature = "codebook-eval")]
+const CODEBOOK_REVERSE_FUTILITY_MARGIN: i32 = 5;
+
+/// Scores beyond this magnitude are forced results: `WIN_SCORE` less the number of plies to the end.
+const FORCED_SCORE_BAND: i32 = WIN_SCORE - 1_000;
+
+/// A forced-result score counts plies from the root. The table stores it relative to its own node, so that it is
+/// still correct when a later search meets the position from another root. Within one search a position always sits
+/// at the same ply (every move adds a stone), so there the round trip returns the score unchanged.
+#[inline]
+fn score_to_tt(score: i32, ply: usize) -> i32 {
+    if score >= FORCED_SCORE_BAND {
+        score + ply as i32
+    } else if score <= -FORCED_SCORE_BAND {
+        score - ply as i32
+    } else {
+        score
+    }
+}
+
+/// Inverse of [`score_to_tt`] at the probing node's ply.
+#[inline]
+fn score_from_tt(score: i32, ply: usize) -> i32 {
+    if score >= FORCED_SCORE_BAND {
+        score - ply as i32
+    } else if score <= -FORCED_SCORE_BAND {
+        score + ply as i32
+    } else {
+        score
+    }
+}
+
+/// A candidate move with its threat class for the side to move and for the opponent.
+#[derive(Clone, Copy)]
+struct ClassifiedMove {
+    mv: Move,
+    my: ThreatKind,
+    opp: ThreatKind,
+}
+
+/// Opponent threats that rule out reverse futility: a square where the opponent completes a five or makes an open
+/// four, double four, four-three or double three. The static evaluation is not trusted over those.
+#[inline]
+fn blocks_reverse_futility(opp: ThreatKind) -> bool {
+    matches!(
+        opp,
+        ThreatKind::Five
+            | ThreatKind::OpenFour
+            | ThreatKind::DoubleFour
+            | ThreatKind::FourThree
+            | ThreatKind::DoubleThree
+    )
+}
+
+/// [`engine::p4r0_census::sound_reply`] read from an already classified candidate list. A square that completes a
+/// five adjoins a stone of that side, so it is always a candidate and both functions see the same squares; ties
+/// resolve to the lowest cell, as there.
+fn sound_reply_from_classified(
+    board: &Board,
+    classified: &[ClassifiedMove],
+) -> engine::p4r0_census::SoundReply {
+    use engine::p4r0_census::SoundReply;
+    if !engine::p4r0_census::rule_admits_restriction(board.effective_rule_set()) {
+        return SoundReply::NotForced;
+    }
+    let mut win: Option<Move> = None;
+    let mut block: Option<Move> = None;
+    let mut blocks = 0usize;
+    for c in classified {
+        if c.my == ThreatKind::Five {
+            win = Some(win.map_or(c.mv, |w| w.min(c.mv)));
+        }
+        if c.opp == ThreatKind::Five {
+            blocks += 1;
+            block = Some(block.map_or(c.mv, |b| b.min(c.mv)));
+        }
+    }
+    match (blocks, win, block) {
+        (0, _, _) => SoundReply::NotForced,
+        (_, Some(win), _) => SoundReply::WinNow(win),
+        (1, None, Some(block)) => SoundReply::OnlyBlock(block),
+        _ => SoundReply::Lost,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -679,6 +773,9 @@ trait SearchEvalState {
     }
     /// Per-move policy inputs of an empty cell (see [`PolicyMove`]).
     fn policy_move_inputs(&self, _board: &Board, _cell: usize, _out: &mut [f32]) {}
+    /// Reverse futility margin per remaining ply in this evaluator's units; `None` where none has been set, which
+    /// leaves the evaluator out of that pruning.
+    const REVERSE_FUTILITY_MARGIN: Option<i32> = None;
 }
 
 struct FlatEvalState<'a> {
@@ -746,6 +843,8 @@ impl<'a> CodebookEvalState<'a> {
 
 #[cfg(feature = "codebook-eval")]
 impl SearchEvalState for CodebookEvalState<'_> {
+    const REVERSE_FUTILITY_MARGIN: Option<i32> = Some(CODEBOOK_REVERSE_FUTILITY_MARGIN);
+
     fn push_move(
         &mut self,
         board: &Board,
@@ -789,6 +888,8 @@ impl<'a, W: QuantizedCodebookAccess> QuantizedCodebookEvalState<'a, W> {
 
 #[cfg(feature = "codebook-eval")]
 impl<W: QuantizedCodebookAccess> SearchEvalState for QuantizedCodebookEvalState<'_, W> {
+    const REVERSE_FUTILITY_MARGIN: Option<i32> = Some(CODEBOOK_REVERSE_FUTILITY_MARGIN);
+
     fn push_move(
         &mut self,
         board: &Board,
@@ -933,6 +1034,15 @@ pub struct Searcher {
     white_root_order_cache: Option<WhiteRootOrderCache>,
     /// P4-R1: restrict the move list at nodes whose reply set the rules fix.
     use_forced_restriction: bool,
+    /// Keep transposition-table entries between searches ([`Searcher::set_keep_transposition_table`]).
+    keep_tt: bool,
+    /// What the kept entries were computed for (rule set, evaluator, scale); `None` after a search that cannot
+    /// keep them. A different value clears the table.
+    tt_context: Option<u64>,
+    /// Use the best fully searched root move of an interrupted iteration.
+    use_partial_iteration: bool,
+    /// Reverse futility pruning at shallow non-PV nodes.
+    use_reverse_futility: bool,
     /// P4-R0 forced-node census. Counting only; never affects search output.
     pub census: engine::p4r0_census::ForcedCensus,
     census_scratch: Vec<engine::board::Move>,
@@ -989,6 +1099,10 @@ impl Searcher {
             #[cfg(feature = "codebook-eval")]
             white_root_order_cache: None,
             use_forced_restriction: forced_restriction_enabled_by_env(),
+            keep_tt: true,
+            tt_context: None,
+            use_partial_iteration: true,
+            use_reverse_futility: true,
             census: engine::p4r0_census::ForcedCensus::default(),
             census_scratch: Vec::with_capacity(16),
         }
@@ -1076,9 +1190,77 @@ impl Searcher {
     /// the opponent threatens an immediate five, search only the reply the
     /// rules leave (our own five, else the single blocking cell; two or more
     /// completing cells score as a loss). Freestyle and Standard only.
-    /// Defaults to `NORU_FORCED_REPLY_RESTRICTION` (off when unset).
+    /// On by default since 1.5; `NORU_FORCED_REPLY_RESTRICTION=off` changes the default.
     pub fn set_use_forced_restriction(&mut self, enabled: bool) {
         self.use_forced_restriction = enabled;
+    }
+
+    pub fn use_forced_restriction(&self) -> bool {
+        self.use_forced_restriction
+    }
+
+    /// Keep the transposition table between searches instead of clearing it at the start of each one, so a search
+    /// begins with what the earlier moves of the same game established. Entries written by earlier searches give
+    /// way to new ones. On by default since 1.5.
+    ///
+    /// Applies to the quantized codebook searches ([`Searcher::search_codebook_eval_quantized`],
+    /// [`Searcher::search_codebook_eval_quantized_factored`], [`Searcher::search_codebook_eval_exact_i8`]); the
+    /// other entry points clear the table every time. The table is also cleared when the rule set, the weights or
+    /// the evaluation scale differ from the previous search. With this on, a result depends on the searches made
+    /// before it: call [`Searcher::clear_transposition_table`] where a search has to be reproducible on its own,
+    /// such as at the start of a game.
+    pub fn set_keep_transposition_table(&mut self, enabled: bool) {
+        self.keep_tt = enabled;
+    }
+
+    pub fn keep_transposition_table(&self) -> bool {
+        self.keep_tt
+    }
+
+    /// Forget every stored search result (see [`Searcher::set_keep_transposition_table`]).
+    pub fn clear_transposition_table(&mut self) {
+        self.tt.clear();
+        self.tt_context = None;
+    }
+
+    /// When a search is interrupted partway through an iteration, return the best root move that iteration had
+    /// fully searched, provided it scored above the lower bound of the iteration's window (and is not a forced
+    /// result). On by default since 1.5. When off, an interrupted iteration is discarded and the previous depth's
+    /// move is returned. The reported depth remains the last completed one.
+    pub fn set_use_partial_iteration(&mut self, enabled: bool) {
+        self.use_partial_iteration = enabled;
+    }
+
+    pub fn use_partial_iteration(&self) -> bool {
+        self.use_partial_iteration
+    }
+
+    /// Reverse futility pruning: at a non-PV node with at most three remaining plies, return the static evaluation
+    /// when it exceeds beta by 5 per remaining ply, unless the opponent has a square that completes a five or
+    /// makes an open four, a double four, a four-three or a double three. The margin is in the units of the
+    /// codebook evaluators and the pruning applies to the codebook searches only; [`Searcher::search`] is never
+    /// pruned this way. On by default since 1.5.
+    pub fn set_use_reverse_futility(&mut self, enabled: bool) {
+        self.use_reverse_futility = enabled;
+    }
+
+    pub fn use_reverse_futility(&self) -> bool {
+        self.use_reverse_futility
+    }
+
+    /// [`runtime_config_summary`] for this searcher: its own switches replace the environment defaults, and the
+    /// switches that have no environment default are added.
+    pub fn config_summary(&self) -> Result<String, String> {
+        let on_off = |b: bool| if b { "on" } else { "off" };
+        config_summary(
+            self.use_forced_restriction,
+            &format!(
+                "keep_tt={}; partial_iteration={}; reverse_futility={}; ",
+                on_off(self.keep_tt),
+                on_off(self.use_partial_iteration),
+                on_off(self.use_reverse_futility),
+            ),
+        )
     }
 
     pub fn set_node_limit(&mut self, limit: Option<u64>) {
@@ -1340,7 +1522,9 @@ impl Searcher {
         }
     }
 
-    fn reset_for_search(&mut self, time_limit: Option<Duration>) {
+    /// `tt_context` identifies what this search's table entries are computed for; `None` for a search that never
+    /// keeps them.
+    fn reset_for_search(&mut self, time_limit: Option<Duration>, tt_context: Option<u64>) {
         self.search_started = Instant::now();
         self.nodes = 0;
         self.tt_cutoffs = 0;
@@ -1357,7 +1541,12 @@ impl Searcher {
         }
         self.deadline = time_limit.map(|d| Instant::now() + d);
         self.tt.reset_stats();
-        self.tt.clear();
+        if self.keep_tt && tt_context.is_some() && tt_context == self.tt_context {
+            self.tt.new_search();
+        } else {
+            self.tt.clear();
+        }
+        self.tt_context = if self.keep_tt { tt_context } else { None };
         self.profile.reset(search_profile_enabled());
         self.threat_field = None;
         self.move_picker_stats = MovePickerStats::default();
@@ -1632,6 +1821,18 @@ impl Searcher {
             };
 
             if self.aborted {
+                // The interrupted iteration searched the previous best move first. A root move it finished with a
+                // score above the window's lower bound was searched to this depth and found at least as good as
+                // every move finished before it, so it replaces the shallower choice.
+                if self.use_partial_iteration && best_result.best_move.is_some() {
+                    if let (Some(mv), score) = iter_result {
+                        if score > alpha && score.abs() < WIN_SCORE - 100 {
+                            best_result.best_move = Some(mv);
+                            best_result.score = score;
+                            best_result.nodes = self.nodes;
+                        }
+                    }
+                }
                 break;
             }
 
@@ -1669,182 +1870,17 @@ impl Searcher {
             self.white_root_order.is_none(),
             "white root ordering requires the quantized codebook search path"
         );
-        self.search_started = Instant::now();
-        self.nodes = 0;
-        self.tt_cutoffs = 0;
-        self.aborted = false;
-        self.node_limit = self.configured_node_limit;
-        self.node_limit_hit = false;
-        self.killers = [[None; 2]; 64];
-        self.history = [[0; NUM_CELLS]; 2];
-        for row in self.cont_hist_1.iter_mut() {
-            row.fill(0);
-        }
-        for row in self.cont_hist_2.iter_mut() {
-            row.fill(0);
-        }
-        self.deadline = time_limit.map(|d| Instant::now() + d);
-        // TT ????븐뼐?????????????筌뤾퍓愿??????????ш끽紐?????????醫딇떍????????search() ???遺얘턁??????????????븐뼐?????????????????⑤벡苑?
-        self.tt.reset_stats();
-        // ???????롮쾸?椰???search ???遺얘턁????????????癲됱빖???嶺???????????????????????????롮쾸?椰?嚥▲굧???븍툖????????곗뵰?????TT ????.
-        // ???????ル???? search() ???遺얘턁?????????iterative deepening ????????TT???????ル??? ??????耀붾굝????????        // ???????????? iteration????? iteration??cutoff/PV ???遺얘턁?????????????????ル탛????????耀붾굝???????????
-        self.tt.clear();
-        self.profile.reset(search_profile_enabled());
-        self.threat_field = None;
-        self.move_picker_stats = MovePickerStats::default();
-        self.shape_stats = SearchShapeStats::default();
-        #[cfg(feature = "codebook-eval")]
-        {
-            self.white_root_order_cache = None;
-        }
+        self.reset_for_search(time_limit, None);
         self.begin_board_search_state(board);
-
-        // Root VCT: ????븐뼐?????????? ????????????????????????ル???????????諛몃마嶺뚮?????꾩렯???????耀붾굝????????????븐뼐?????????????????????????븐뼐?곭춯?竊???????.
-        // Dynamic budget ???????????1/ROOT_VCT_BUDGET_FRACTION (cap/floor ?????????泥??.
-        if self.use_root_vct_for_audit {
-            let vct_budget = match time_limit {
-                Some(d) => (d / ROOT_VCT_BUDGET_FRACTION)
-                    .max(Duration::from_millis(ROOT_VCT_BUDGET_FLOOR_MS))
-                    .min(Duration::from_millis(ROOT_VCT_BUDGET_CAP_MS)),
-                None => Duration::from_millis(ROOT_VCT_BUDGET_MS),
-            };
-            let vct_cfg = VctConfig {
-                max_depth: ROOT_VCT_DEPTH,
-                time_budget: Some(vct_budget),
-                node_budget: None,
-                enable_jump_three: false,
-                enable_jump_three_attack_defense: false,
-                enable_jump_three_counter: false,
-                enable_jump_three_kind_scoped_defense: false,
-                jump_attack_max_or_levels: u32::MAX,
-                enable_gap_four: false,
-                gap_four_attack_max_or_levels: u32::MAX,
-                use_fast_classify: true,
-                use_threat_index: false,
-                profile: false,
-                use_reach_mask: true,
-                use_fast_immediate_five: false,
-                use_vct_scratch_buffers: false,
-            };
-            let profile_start = self.profile_start();
-            let seq = if let Some(state) = self.board_search_state.as_mut() {
-                search_vct_with_board_search_state(board, &vct_cfg, state)
-            } else {
-                search_vct(board, &vct_cfg)
-            };
-            self.profile_add(SearchProfileBucket::RootVct, profile_start);
-            if let Some(seq) = seq {
-                if let Some(&first) = seq.first() {
-                    let result = SearchResult {
-                        best_move: Some(first),
-                        score: WIN_SCORE,
-                        depth: seq.len() as u32,
-                        nodes: self.nodes,
-                    };
-                    self.profile.finish();
-                    self.end_board_search_state(board);
-                    return result;
-                }
-            }
+        if let Some(result) = self.try_root_vct(board, time_limit) {
+            self.end_board_search_state(board);
+            return result;
         }
-
         self.enable_main_search_candidate_frontier(board);
-        let mut best_result = SearchResult {
-            best_move: None,
-            score: 0,
-            depth: 0,
-            nodes: 0,
-        };
-
-        // Incremental NNUE state ??????????耀붾굝?????傭?끆????椰???????full refresh, ???????꾩룆梨띰쭕??        // make_move/undo_move?? ?????????딅즹???push/pop????????源낅?????leaf?????full
-        // compute_active_features????? ??????????Accumulator forward??????????
-        self.reset_threat_field(board);
         let mut inc = FlatEvalState::new(board, weights);
-
-        // PV-move priority: the best move from iteration depth-1 becomes the
-        // first move we try at iteration depth. Combined with PVS + Aspiration,
-        // this drastically reduces re-search cost.
-        let mut prev_best: Option<Move> = None;
-        let mut prev_score: Option<i32> = None;
-
-        for depth in 1..=max_depth {
-            // Aspiration windows: depth ??4 ???????깆궔?????????????대첐??iteration score ??????獄쏅챷???
-            // ???????筌띿솘?? [s-delta, s+delta] ?????耀붾굝?????傭?끆????椰? fail-low/high ???????
-            // ???遺얘턁???????????怨뺤름???score????????⑤벡瑜???????????筌띿솘?? window ?????????耀붾굝???????????cutoff ??????????????
-            // ???????ル탛????? window ????????????????widening.
-            let aspirate = depth >= ASPIRATION_MIN_DEPTH && prev_score.is_some();
-            let (alpha_init, beta_init) = if aspirate {
-                let s = prev_score.unwrap();
-                (s - ASPIRATION_INITIAL_DELTA, s + ASPIRATION_INITIAL_DELTA)
-            } else {
-                (-INF, INF)
-            };
-
-            let mut alpha = alpha_init;
-            let mut beta = beta_init;
-            let mut delta = ASPIRATION_INITIAL_DELTA;
-
-            // Aspiration re-search loop. fail-high/low ????븐뼐????????window widen.
-            let iter_result = loop {
-                let current = self
-                    .root_pvs_iteration(board, weights, &mut inc, depth, alpha, beta, prev_best);
-                if self.aborted {
-                    break current;
-                }
-                let score = current.1;
-                if !aspirate {
-                    break current;
-                }
-                if score <= alpha {
-                    // fail-low: alpha ??????
-                    delta = (delta * 2).min(INF / 4);
-                    alpha = (alpha - delta).max(-INF);
-                    if alpha == -INF {
-                        // ?????????耀붾굝????????????full window??break???????
-                        // ????癲됱빖???嶺????????????롮쾸?椰???iteration????????? ?????break ??                        // ????????袁④뎬??-INF/INF??
-                        // re-search with full window once
-                        break self.root_pvs_iteration(
-                            board, weights, &mut inc, depth, -INF, INF, prev_best,
-                        );
-                    }
-                } else if score >= beta {
-                    delta = (delta * 2).min(INF / 4);
-                    beta = (beta + delta).min(INF);
-                    if beta == INF {
-                        break self.root_pvs_iteration(
-                            board, weights, &mut inc, depth, -INF, INF, prev_best,
-                        );
-                    }
-                } else {
-                    // window ????OK
-                    break current;
-                }
-            };
-
-            if self.aborted {
-                break;
-            }
-
-            let (best_move, score) = iter_result;
-            best_result = SearchResult {
-                best_move,
-                score,
-                depth,
-                nodes: self.nodes,
-            };
-            self.report_progress(&best_result);
-
-            if score.abs() > WIN_SCORE - 100 {
-                break;
-            }
-
-            prev_best = best_move;
-            prev_score = Some(score);
-        }
-
-        self.profile.finish();
+        let result = self.search_with_eval_state(board, weights, &mut inc, max_depth);
         self.end_board_search_state(board);
-        best_result
+        result
     }
 
     #[cfg(feature = "codebook-eval")]
@@ -1860,7 +1896,7 @@ impl Searcher {
             self.white_root_order.is_none(),
             "white root ordering cannot run on the float codebook search path"
         );
-        self.reset_for_search(time_limit);
+        self.reset_for_search(time_limit, None);
         self.begin_board_search_state(board);
         if let Some(result) = self.try_root_vct(board, time_limit) {
             self.end_board_search_state(board);
@@ -1926,7 +1962,23 @@ impl Searcher {
         max_depth: u32,
         time_limit: Option<Duration>,
     ) -> SearchResult {
-        self.reset_for_search(time_limit);
+        let scale = self
+            .codebook_eval_scale_override
+            .unwrap_or_else(codebook_eval_scale);
+        // Kept table entries are valid for one rule set, one set of weights and one scale.
+        let tt_context = self.keep_tt.then(|| {
+            let mut context =
+                engine::codebook_eval::quantized_weights_fingerprint(codebook_weights);
+            for part in [
+                board.effective_rule_set() as u64,
+                u64::from(scale.to_bits()),
+                NUM_CELLS as u64,
+            ] {
+                context = (context ^ part).wrapping_mul(0x0000_0100_0000_01B3);
+            }
+            context
+        });
+        self.reset_for_search(time_limit, tt_context);
         self.begin_board_search_state(board);
         if let Some(result) = self.try_root_vct(board, time_limit) {
             self.end_board_search_state(board);
@@ -1935,9 +1987,6 @@ impl Searcher {
         self.enable_main_search_candidate_frontier(board);
         self.prepare_white_root_order_cache(board, codebook_weights)
             .unwrap_or_else(|error| panic!("invalid white root ordering state: {error}"));
-        let scale = self
-            .codebook_eval_scale_override
-            .unwrap_or_else(codebook_eval_scale);
         let mut inc = QuantizedCodebookEvalState::new(
             board,
             codebook_weights,
@@ -1966,7 +2015,7 @@ impl Searcher {
         let mut best_move: Option<Move> = None;
         let mut leader_score = -INF;
 
-        self.prepare_policy_move(board, inc, 0, depth);
+        self.prepare_policy_move(board, inc, 0, depth, None);
         let profile_start = self.profile_start();
         let mut moves = self.order_moves(board, 0);
         #[cfg(feature = "codebook-eval")]
@@ -2121,7 +2170,7 @@ impl Searcher {
                 Some(entry.best_move as Move)
             };
             if entry.depth as u32 >= depth {
-                let cached = entry.score;
+                let cached = score_from_tt(entry.score, ply);
                 match entry.bound {
                     Bound::Exact => {
                         self.tt_cutoffs += 1;
@@ -2188,10 +2237,25 @@ impl Searcher {
         // completing cell, else the node is lost. Restricting to it is a theorem
         // rather than a heuristic, which is what separates this from the naive
         // LMR that reduced forcing moves and cost -43%p.
+        //
+        // Outside the staged move picker every candidate is generated once, with its threat class for both sides;
+        // this restriction, reverse futility, the move policy and the ordering all read that one list.
+        let staged = self.use_move_picker && ply > 0;
+        let mut classified: Vec<ClassifiedMove> = Vec::new();
+        if !staged {
+            let profile_start = self.profile_start();
+            classified = self.classified_candidates(board);
+            self.profile_add(SearchProfileBucket::MovegenOrder, profile_start);
+        }
         let mut forced_only: Option<Move> = None;
         if self.use_forced_restriction {
             use engine::p4r0_census::SoundReply;
-            match engine::p4r0_census::sound_reply(board, &mut self.census_scratch) {
+            let reply = if staged {
+                engine::p4r0_census::sound_reply(board, &mut self.census_scratch)
+            } else {
+                sound_reply_from_classified(board, &classified)
+            };
+            match reply {
                 SoundReply::NotForced => {}
                 SoundReply::WinNow(mv) | SoundReply::OnlyBlock(mv) => forced_only = Some(mv),
                 SoundReply::Lost => {
@@ -2221,7 +2285,7 @@ impl Searcher {
                 &mut best_move_at_node,
             );
             searched_moves += 1;
-        } else if self.use_move_picker && ply > 0 {
+        } else if staged {
             self.move_picker_stats.enabled_nodes += 1;
             let mut emitted = [false; NUM_CELLS];
             let mut stop = false;
@@ -2279,9 +2343,35 @@ impl Searcher {
             }
         } else {
             self.move_picker_stats.legacy_nodes += 1;
-            self.prepare_policy_move(board, inc, ply, depth);
+
+            // === Reverse futility ===
+            // A shallow non-PV node whose static evaluation clears beta by a margin is taken to fail high without
+            // searching it. The evaluation knows nothing of tactics, so the node must be free of the opponent
+            // threats in `blocks_reverse_futility`; a five-threat never reaches this branch when the forced-reply
+            // restriction is on, and is refused here when it is off.
+            if let Some(margin) = E::REVERSE_FUTILITY_MARGIN.filter(|_| self.use_reverse_futility) {
+                if !is_pv
+                    && depth <= REVERSE_FUTILITY_MAX_DEPTH
+                    && alpha.abs() < FORCED_SCORE_BAND
+                    && beta.abs() < FORCED_SCORE_BAND
+                    && !classified.is_empty()
+                    && !classified.iter().any(|c| blocks_reverse_futility(c.opp))
+                {
+                    let profile_start = self.profile_start();
+                    let (static_eval, detail) = inc.eval(board, self.profile.enabled);
+                    self.profile_add(SearchProfileBucket::Eval, profile_start);
+                    self.profile.add_eval_state_detail(detail);
+                    if static_eval.abs() < FORCED_SCORE_BAND
+                        && static_eval - margin * depth as i32 >= beta
+                    {
+                        return static_eval;
+                    }
+                }
+            }
+
+            self.prepare_policy_move(board, inc, ply, depth, Some(&classified));
             let profile_start = self.profile_start();
-            let mut moves = self.order_moves(board, ply);
+            let mut moves = self.order_classified(board, ply, &classified);
             self.profile_add(SearchProfileBucket::MovegenOrder, profile_start);
             if moves.is_empty() {
                 return 0;
@@ -2353,7 +2443,7 @@ impl Searcher {
         let profile_start = self.profile_start();
         self.tt.store(
             board.zobrist,
-            best_score,
+            score_to_tt(best_score, ply),
             depth.min(255) as u8,
             bound,
             best_move_at_node,
@@ -2985,13 +3075,29 @@ impl Searcher {
         emitted[mv] = true;
         Some((score, mv, is_forcing))
     }
-    /// Score this node's quiet moves with the per-move policy, or mark the ply as unscored.
+    /// The node's candidate moves, each with its threat class for the side to move and for the opponent.
+    fn classified_candidates(&self, board: &Board) -> Vec<ClassifiedMove> {
+        let stm = board.side_to_move;
+        let opponent = stm.opponent();
+        self.board_candidate_moves(board)
+            .into_iter()
+            .map(|mv| ClassifiedMove {
+                mv,
+                my: classify_move_fast(board, mv, stm),
+                opp: classify_move_fast(board, mv, opponent),
+            })
+            .collect()
+    }
+
+    /// Score this node's quiet moves with the per-move policy, or mark the ply as unscored. `classified` is the
+    /// node's candidate list when the caller already has it.
     fn prepare_policy_move<E: SearchEvalState>(
         &mut self,
         board: &Board,
         inc: &mut E,
         ply: usize,
         depth: u32,
+        classified: Option<&[ClassifiedMove]>,
     ) {
         if ply >= 64 {
             return;
@@ -3005,20 +3111,25 @@ impl Searcher {
             return;
         };
         if inc.policy_move_prepare(model.codebook_dim()) {
-            let stm = board.side_to_move;
+            let generated;
+            let classified = match classified {
+                Some(classified) => classified,
+                None => {
+                    generated = self.classified_candidates(board);
+                    &generated[..]
+                }
+            };
             self.policy_input.resize(model.input_len(), 0.0);
-            for c in self.board_candidate_moves(board) {
-                if !board.is_legal_move(c) {
+            for c in classified {
+                if !board.is_legal_move(c.mv) {
                     continue;
                 }
                 // Threat moves keep their tier order; only quiet moves are scored.
-                if classify_move_fast(board, c, stm) != ThreatKind::None
-                    || classify_move_fast(board, c, stm.opponent()) != ThreatKind::None
-                {
+                if c.my != ThreatKind::None || c.opp != ThreatKind::None {
                     continue;
                 }
-                inc.policy_move_inputs(board, c, &mut self.policy_input);
-                self.policy_logits[ply][c] =
+                inc.policy_move_inputs(board, c.mv, &mut self.policy_input);
+                self.policy_logits[ply][c.mv] =
                     model.score(&self.policy_input, &mut self.policy_hidden);
             }
             self.policy_valid[ply] = true;
@@ -3034,7 +3145,17 @@ impl Searcher {
     }
 
     fn order_moves(&self, board: &Board, ply: usize) -> Vec<(Move, bool)> {
-        let candidates = self.board_candidate_moves(board);
+        let classified = self.classified_candidates(board);
+        self.order_classified(board, ply, &classified)
+    }
+
+    /// Order an already classified candidate list (see [`Self::classified_candidates`]).
+    fn order_classified(
+        &self,
+        board: &Board,
+        ply: usize,
+        classified: &[ClassifiedMove],
+    ) -> Vec<(Move, bool)> {
         let side = board.side_to_move as usize;
 
         let (my, opp) = match board.side_to_move {
@@ -3050,10 +3171,11 @@ impl Searcher {
         const MV_MASK: u64 = (1 << 9) - 1;
         const FORCING_BIT: u64 = 1 << 9;
 
-        let mut packed: Vec<u64> = candidates
-            .into_iter()
-            .map(|m| {
-                let (s, f) = self.move_score_and_forcing(m, ply, side, my, opp, board);
+        let mut packed: Vec<u64> = classified
+            .iter()
+            .map(|c| {
+                let m = c.mv;
+                let (s, f) = self.score_classified_move(m, c.my, c.opp, ply, side, my, opp, board);
                 let score_u = (s as i64 + SCORE_BIAS) as u64;
                 (score_u << 16) | (if f { FORCING_BIT } else { 0 }) | (m as u64)
             })
@@ -3085,15 +3207,29 @@ impl Searcher {
         opp: &engine::board::BitBoard,
         board: &Board,
     ) -> (i32, bool) {
-        let row = (mv / BOARD_SIZE) as i32;
-        let col = (mv % BOARD_SIZE) as i32;
-
         let opp_side = match board.side_to_move {
             Stone::Black => Stone::White,
             Stone::White => Stone::Black,
         };
         let my_kind = classify_move_fast(board, mv, board.side_to_move);
         let opp_kind = classify_move_fast(board, mv, opp_side);
+        self.score_classified_move(mv, my_kind, opp_kind, ply, side, my, opp, board)
+    }
+
+    /// [`Self::move_score_and_forcing`] for a move whose threat classes are already known.
+    fn score_classified_move(
+        &self,
+        mv: Move,
+        my_kind: ThreatKind,
+        opp_kind: ThreatKind,
+        ply: usize,
+        side: usize,
+        my: &engine::board::BitBoard,
+        opp: &engine::board::BitBoard,
+        board: &Board,
+    ) -> (i32, bool) {
+        let row = (mv / BOARD_SIZE) as i32;
+        let col = (mv % BOARD_SIZE) as i32;
 
         // 0.6.9: ??????????已????????轅붽틓?????packed-table tier scoring. TIER ?????????泥????buffer???????ル???
         // ??100 000?????????????????????? max() ??癲됱빖???嶺??????轅붽틓????? if-else ????븐뼐??????????轅붽틓??????????????꾨굴????????類?킅????????⑤벡瑜????
@@ -4073,6 +4209,413 @@ mod qsearch_forced_reply_tests {
                     -10
                 }
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod search_switch_tests {
+    use super::*;
+
+    fn to_idx(row: usize, col: usize) -> Move {
+        row * BOARD_SIZE + col
+    }
+
+    fn board_after(moves: &[(usize, usize)]) -> Board {
+        let mut board = Board::new();
+        for &(row, col) in moves {
+            board.make_move(to_idx(row, col));
+        }
+        board
+    }
+
+    /// The same evaluation for whoever is to move, with or without a reverse futility margin.
+    struct MarginEval(i32);
+    struct PlainEval(i32);
+
+    impl SearchEvalState for MarginEval {
+        const REVERSE_FUTILITY_MARGIN: Option<i32> = Some(5);
+
+        fn push_move(&mut self, _: &Board, _: Move, _: bool) -> EvalStateStepProfile {
+            EvalStateStepProfile::default()
+        }
+        fn pop_move(&mut self, _: bool) -> EvalStateStepProfile {
+            EvalStateStepProfile::default()
+        }
+        fn eval(&mut self, _: &Board, _: bool) -> (i32, EvalStateStepProfile) {
+            (self.0, EvalStateStepProfile::default())
+        }
+    }
+
+    impl SearchEvalState for PlainEval {
+        fn push_move(&mut self, _: &Board, _: Move, _: bool) -> EvalStateStepProfile {
+            EvalStateStepProfile::default()
+        }
+        fn pop_move(&mut self, _: bool) -> EvalStateStepProfile {
+            EvalStateStepProfile::default()
+        }
+        fn eval(&mut self, _: &Board, _: bool) -> (i32, EvalStateStepProfile) {
+            (self.0, EvalStateStepProfile::default())
+        }
+    }
+
+    /// Three scattered stones: nobody threatens anything.
+    const QUIET: [(usize, usize); 3] = [(7, 7), (9, 9), (3, 3)];
+    /// Black to move against an open white three on row 7.
+    const OPEN_THREE: [(usize, usize); 6] = [(0, 0), (7, 5), (2, 13), (7, 6), (13, 2), (7, 7)];
+
+    #[test]
+    fn table_scores_follow_the_node_that_reads_them() {
+        for score in [0, 37, -412, FORCED_SCORE_BAND - 1, -(FORCED_SCORE_BAND - 1)] {
+            for ply in [0, 3, 40] {
+                assert_eq!(score_to_tt(score, ply), score);
+                assert_eq!(score_from_tt(score, ply), score);
+            }
+        }
+        for ply in [0usize, 1, 6, 30] {
+            for distance in [0i32, 1, 2, 9] {
+                for sign in [1, -1] {
+                    let score = sign * (WIN_SCORE - ply as i32 - distance);
+                    let stored = score_to_tt(score, ply);
+                    assert_eq!(stored, sign * (WIN_SCORE - distance));
+                    assert_eq!(score_from_tt(stored, ply), score);
+                    // Met again four plies deeper in another search, the result is still `distance` plies away.
+                    assert_eq!(
+                        score_from_tt(stored, ply + 4),
+                        sign * (WIN_SCORE - (ply as i32 + 4) - distance)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forced_reply_from_the_classified_list_matches_the_board_scan() {
+        use engine::p4r0_census::{SoundReply, sound_reply};
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut rng = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let searcher = Searcher::new();
+        let mut scratch = Vec::new();
+        let (mut positions, mut forced) = (0usize, 0usize);
+        for rule in [RuleSet::Freestyle, RuleSet::Standard] {
+            for _game in 0..60 {
+                let mut board = Board::new();
+                board.set_rule_set(rule);
+                for _ply in 0..44 {
+                    if board.game_result() != GameResult::Ongoing {
+                        break;
+                    }
+                    let expected = sound_reply(&board, &mut scratch);
+                    let classified = searcher.classified_candidates(&board);
+                    assert_eq!(
+                        sound_reply_from_classified(&board, &classified),
+                        expected,
+                        "{rule:?} after {:?}",
+                        board.history
+                    );
+                    positions += 1;
+                    if expected != SoundReply::NotForced {
+                        forced += 1;
+                    }
+                    // Play near the last stone so that five threats appear.
+                    let anchor = board.history.last().copied().unwrap_or(to_idx(7, 7));
+                    let (row, col) = ((anchor / BOARD_SIZE) as i32, (anchor % BOARD_SIZE) as i32);
+                    let mut played = None;
+                    for _try in 0..40 {
+                        let r = row + (rng() % 5) as i32 - 2;
+                        let c = col + (rng() % 5) as i32 - 2;
+                        if !(0..BOARD_SIZE as i32).contains(&r)
+                            || !(0..BOARD_SIZE as i32).contains(&c)
+                        {
+                            continue;
+                        }
+                        let cell = to_idx(r as usize, c as usize);
+                        if board.is_empty(cell) {
+                            played = Some(cell);
+                            break;
+                        }
+                    }
+                    let Some(cell) = played else { break };
+                    board.make_move(cell);
+                }
+            }
+        }
+        assert!(positions > 2_000, "too few positions: {positions}");
+        assert!(forced > 100, "too few forced positions: {forced}");
+
+        // Outside the rules the restriction is proven for, neither reports a forced node.
+        let mut renju = board_after(&[(7, 3), (0, 0), (7, 4), (0, 5), (7, 5), (0, 10), (7, 6)]);
+        renju.set_rule_set(RuleSet::Renju);
+        let classified = searcher.classified_candidates(&renju);
+        assert_eq!(sound_reply(&renju, &mut scratch), SoundReply::NotForced);
+        assert_eq!(
+            sound_reply_from_classified(&renju, &classified),
+            SoundReply::NotForced
+        );
+    }
+
+    #[test]
+    fn reverse_futility_returns_the_evaluation_at_a_quiet_shallow_node() {
+        let ordering = NnueWeights::zeros(crate::GOMOKU_NNUE_CONFIG);
+        for depth in 1..=REVERSE_FUTILITY_MAX_DEPTH {
+            let mut board = board_after(&QUIET);
+            let mut searcher = Searcher::new();
+            searcher.set_use_reverse_futility(true);
+            let beta = 300 - 5 * depth as i32;
+            let score = searcher.alpha_beta(
+                &mut board,
+                &ordering,
+                &mut MarginEval(300),
+                depth,
+                1,
+                beta - 1,
+                beta,
+            );
+            assert_eq!(score, 300, "depth {depth}");
+            assert_eq!(searcher.nodes, 1, "depth {depth}: no move is searched");
+            assert_eq!(board.history.len(), QUIET.len());
+        }
+    }
+
+    #[test]
+    fn reverse_futility_leaves_every_other_node_to_the_search() {
+        let ordering = NnueWeights::zeros(crate::GOMOKU_NNUE_CONFIG);
+        // (switch, position, depth, alpha, beta, evaluation) with exactly one condition unmet in each. The depth
+        // case allows for the one-ply internal reduction of a node that has no table move.
+        let cases: [(bool, &[(usize, usize)], u32, i32, i32, i32); 5] = [
+            (false, &QUIET, 2, 99, 100, 300),
+            (true, &QUIET, REVERSE_FUTILITY_MAX_DEPTH + 2, 99, 100, 300),
+            (true, &QUIET, 2, 99, 200, 300),
+            (true, &QUIET, 2, 99, 100, 109),
+            (true, &OPEN_THREE, 2, 99, 100, 300),
+        ];
+        for (index, (switch, moves, depth, alpha, beta, value)) in cases.into_iter().enumerate() {
+            let mut board = board_after(moves);
+            let mut searcher = Searcher::new();
+            searcher.set_use_reverse_futility(switch);
+            searcher.alpha_beta(
+                &mut board,
+                &ordering,
+                &mut MarginEval(value),
+                depth,
+                1,
+                alpha,
+                beta,
+            );
+            assert!(searcher.nodes > 1, "case {index} must be searched");
+        }
+        // An evaluator without a margin is never pruned.
+        let mut board = board_after(&QUIET);
+        let mut searcher = Searcher::new();
+        searcher.set_use_reverse_futility(true);
+        searcher.alpha_beta(&mut board, &ordering, &mut PlainEval(300), 2, 1, 99, 100);
+        assert!(searcher.nodes > 1);
+    }
+
+    #[test]
+    fn the_open_three_position_has_the_threat_that_blocks_reverse_futility() {
+        let board = board_after(&OPEN_THREE);
+        let searcher = Searcher::new();
+        let classified = searcher.classified_candidates(&board);
+        assert!(classified.iter().any(|c| blocks_reverse_futility(c.opp)));
+        let quiet = board_after(&QUIET);
+        let classified = searcher.classified_candidates(&quiet);
+        assert!(!classified.is_empty());
+        assert!(!classified.iter().any(|c| blocks_reverse_futility(c.opp)));
+    }
+
+    #[test]
+    fn a_new_searcher_has_the_search_switches_on() {
+        let searcher = Searcher::new();
+        assert_eq!(
+            searcher.use_forced_restriction(),
+            forced_restriction_enabled_by_env()
+        );
+        assert!(searcher.keep_transposition_table());
+        assert!(searcher.use_partial_iteration());
+        assert!(searcher.use_reverse_futility());
+    }
+
+    #[test]
+    fn the_summary_reports_the_switches_of_the_searcher() {
+        let mut searcher = Searcher::new();
+        searcher.set_use_forced_restriction(false);
+        searcher.set_keep_transposition_table(false);
+        searcher.set_use_partial_iteration(false);
+        searcher.set_use_reverse_futility(false);
+        let summary = searcher.config_summary().unwrap();
+        for part in [
+            "forced_reply_restriction=off",
+            "keep_tt=off",
+            "partial_iteration=off",
+            "reverse_futility=off",
+        ] {
+            assert!(summary.contains(part), "{summary}");
+        }
+        searcher.set_use_forced_restriction(true);
+        searcher.set_keep_transposition_table(true);
+        searcher.set_use_partial_iteration(true);
+        searcher.set_use_reverse_futility(true);
+        let summary = searcher.config_summary().unwrap();
+        for part in [
+            "forced_reply_restriction=on",
+            "keep_tt=on",
+            "partial_iteration=on",
+            "reverse_futility=on",
+        ] {
+            assert!(summary.contains(part), "{summary}");
+        }
+        assert!(!runtime_config_summary().unwrap().contains("keep_tt"));
+    }
+
+    #[cfg(feature = "codebook-eval")]
+    mod codebook {
+        use super::*;
+
+        const OPENING: [(usize, usize); 6] = [(7, 7), (8, 8), (7, 9), (6, 8), (8, 6), (9, 7)];
+
+        fn weights() -> QuantizedCodebookWeights {
+            CodebookWeights::deterministic(4, 2).quantize_i16_s32_s64()
+        }
+
+        /// A searcher with the four switches off; each test turns on what it examines.
+        fn searcher() -> Searcher {
+            let mut searcher = Searcher::new();
+            // The root prover runs on a wall-clock budget; these tests compare node counts.
+            searcher.set_use_root_vct_for_audit(false);
+            searcher.set_use_forced_restriction(false);
+            searcher.set_keep_transposition_table(false);
+            searcher.set_use_partial_iteration(false);
+            searcher.set_use_reverse_futility(false);
+            searcher
+        }
+
+        fn found(
+            searcher: &mut Searcher,
+            board: &mut Board,
+            weights: &QuantizedCodebookWeights,
+            depth: u32,
+        ) -> (Option<Move>, i32, u32, u64) {
+            let ordering = NnueWeights::zeros(crate::GOMOKU_NNUE_CONFIG);
+            let result =
+                searcher.search_codebook_eval_quantized(board, &ordering, weights, depth, None);
+            (result.best_move, result.score, result.depth, result.nodes)
+        }
+
+        #[test]
+        fn a_cleared_table_makes_every_search_independent() {
+            let weights = weights();
+            let mut board = board_after(&OPENING);
+            let mut searcher = searcher();
+            let first = found(&mut searcher, &mut board, &weights, 4);
+            assert_eq!(found(&mut searcher, &mut board, &weights, 4), first);
+        }
+
+        #[test]
+        fn a_default_searcher_keeps_the_table_until_it_is_cleared() {
+            let weights = weights();
+            let mut board = board_after(&OPENING);
+            let mut searcher = Searcher::new();
+            searcher.set_use_root_vct_for_audit(false);
+            let first = found(&mut searcher, &mut board, &weights, 4);
+            let again = found(&mut searcher, &mut board, &weights, 4);
+            assert!(again.3 < first.3, "{} nodes after {}", again.3, first.3);
+            searcher.clear_transposition_table();
+            assert_eq!(found(&mut searcher, &mut board, &weights, 4), first);
+        }
+
+        #[test]
+        fn a_kept_table_shortens_the_next_search_of_the_position() {
+            let weights = weights();
+            let mut board = board_after(&OPENING);
+            let fresh = found(&mut searcher(), &mut board, &weights, 4);
+
+            let mut searcher = searcher();
+            searcher.set_keep_transposition_table(true);
+            // Nothing is kept yet, so the first search is the one a cleared table gives.
+            assert_eq!(found(&mut searcher, &mut board, &weights, 4), fresh);
+            let again = found(&mut searcher, &mut board, &weights, 4);
+            assert!(again.3 < fresh.3, "{} nodes after {}", again.3, fresh.3);
+            assert_eq!(again.2, fresh.2);
+
+            searcher.clear_transposition_table();
+            assert_eq!(found(&mut searcher, &mut board, &weights, 4), fresh);
+
+            // Turned off, the table is cleared again before every search.
+            searcher.set_keep_transposition_table(false);
+            assert_eq!(found(&mut searcher, &mut board, &weights, 4), fresh);
+            assert_eq!(found(&mut searcher, &mut board, &weights, 4), fresh);
+        }
+
+        #[test]
+        fn a_kept_table_is_dropped_when_what_it_was_computed_for_changes() {
+            let weights = weights();
+            let same_weights = self::weights();
+            let other_weights = CodebookWeights::deterministic(5, 2).quantize_i16_s32_s64();
+            let mut board = board_after(&OPENING);
+            let mut kept = searcher();
+            kept.set_keep_transposition_table(true);
+            let first = found(&mut kept, &mut board, &weights, 4);
+
+            // Equal weights in another allocation are the same context.
+            assert!(found(&mut kept, &mut board, &same_weights, 4).3 < first.3);
+
+            // Other weights, another scale and another rule each start from an empty table.
+            let fresh_other = found(&mut searcher(), &mut board, &other_weights, 4);
+            assert_eq!(found(&mut kept, &mut board, &other_weights, 4), fresh_other);
+
+            let mut fresh = searcher();
+            fresh.set_codebook_eval_scale(Some(7.5));
+            let fresh_scaled = found(&mut fresh, &mut board, &other_weights, 4);
+            kept.set_codebook_eval_scale(Some(7.5));
+            assert_eq!(
+                found(&mut kept, &mut board, &other_weights, 4),
+                fresh_scaled
+            );
+
+            board.set_rule_set(RuleSet::Standard);
+            let fresh_standard = found(&mut fresh, &mut board, &other_weights, 4);
+            assert_eq!(
+                found(&mut kept, &mut board, &other_weights, 4),
+                fresh_standard
+            );
+        }
+
+        #[test]
+        fn partial_iteration_changes_nothing_in_a_search_that_completes() {
+            let weights = weights();
+            let mut board = board_after(&OPENING);
+            let complete = found(&mut searcher(), &mut board, &weights, 4);
+            let mut partial = searcher();
+            partial.set_use_partial_iteration(true);
+            assert_eq!(found(&mut partial, &mut board, &weights, 4), complete);
+        }
+
+        #[test]
+        fn an_interrupted_search_keeps_its_completed_depth_and_a_legal_move() {
+            let weights = weights();
+            for limit in [150u64, 400, 900, 2_000, 4_500] {
+                let mut board = board_after(&OPENING);
+                let mut plain = searcher();
+                plain.set_node_limit(Some(limit));
+                let expected = found(&mut plain, &mut board, &weights, 12);
+                let mut partial = searcher();
+                partial.set_node_limit(Some(limit));
+                partial.set_use_partial_iteration(true);
+                let got = found(&mut partial, &mut board, &weights, 12);
+                assert_eq!(got.2, expected.2, "limit {limit}");
+                let mv = got.0.expect("a move");
+                assert!(board.is_legal_move(mv), "limit {limit}");
+                if got.0 != expected.0 {
+                    // The replacement comes from the interrupted iteration, never from a forced score.
+                    assert!(got.1.abs() < WIN_SCORE - 100, "limit {limit}");
+                }
+            }
         }
     }
 }

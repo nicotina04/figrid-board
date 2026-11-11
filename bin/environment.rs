@@ -25,6 +25,9 @@ const KNOWN_ENGINE_VARS: &[&str] = &[
     "NORU_POLICY_MOVE",
     "NORU_DEMOTE_PREEMPT_THREE",
     "NORU_FORCED_REPLY_RESTRICTION",
+    "NORU_KEEP_TT",
+    "NORU_PARTIAL_ITERATION",
+    "NORU_REVERSE_FUTILITY",
     "NORU_PBRAIN_FIXED_DEPTH",
     "NORU_PBRAIN_MAX_DEPTH",
     // Tooling (profiling, tests, benches).
